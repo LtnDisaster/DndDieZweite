@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D&D Tabletop</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ============ AUTH ============ -->
+<section id="view-auth" class="view hidden">
+  <div class="card narrow">
+    <h1>🐉 D&amp;D Tabletop</h1>
+    <input id="au-user" placeholder="Username" maxlength="32" autocomplete="username">
+    <input id="au-pass" type="password" placeholder="Password" maxlength="128" autocomplete="current-password">
+    <div class="row">
+      <button id="btn-login" class="primary">Login</button>
+      <button id="btn-register">Register</button>
+    </div>
+    <p id="auth-err" class="err"></p>
+  </div>
+</section>
+
+<!-- ============ LOBBY ============ -->
+<section id="view-lobby" class="view hidden">
+  <header class="topbar">
+    <h1>🐉 D&amp;D Tabletop</h1>
+    <div><span id="lobby-user" class="who"></span> <button id="btn-logout" class="ghost">Logout</button></div>
+  </header>
+  <main class="lobby-grid">
+    <div class="card">
+      <h2>My Characters</h2>
+      <div id="char-list" class="char-list"></div>
+      <details id="char-editor">
+        <summary>➕ New character</summary>
+        <div class="char-form">
+          <div class="row">
+            <input id="ch-name" placeholder="Name"><input id="ch-race" placeholder="Race">
+            <input id="ch-class" placeholder="Class"><input id="ch-level" type="number" min="1" max="20" value="1">
+          </div>
+          <div class="row">
+            <input id="ch-hp" type="number" value="10" title="Current HP"><input id="ch-mhp" type="number" value="10" title="Max HP">
+            <input id="ch-ac" type="number" value="10" title="Armor Class"><input id="ch-speed" type="number" value="30" title="Speed">
+          </div>
+          <div class="row stats" id="ch-stats"></div>
+          <div class="weapons">
+            <div class="wlabel">Weapons</div>
+            <div id="weap-rows"></div>
+            <button id="btn-weap-add" class="ghost" type="button">＋ Add weapon</button>
+          </div>
+          <div class="weapons">
+            <div class="wlabel">Armor &amp; Items</div>
+            <div id="item-rows"></div>
+            <button id="btn-item-add" class="ghost" type="button">＋ Add item</button>
+          </div>
+          <div class="weapons">
+            <div class="wlabel">Skills <small>(click to cycle: – / ✓ prof / ★ expertise)</small></div>
+            <div class="skills" id="skill-rows"></div>
+          </div>
+          <div class="weapons">
+            <div class="wlabel">Spellbook <small>(add a <b>📖 spellbook</b> item to use it at the table)</small></div>
+            <div id="spell-rows"></div>
+            <div class="row"><button id="btn-spell-add" class="ghost" type="button">＋ Add spell</button></div>
+            <div class="wlabel">Spell slots (max per level)</div>
+            <div class="row slots" id="slot-rows"></div>
+          </div>
+          <textarea id="ch-notes" placeholder="Notes, inventory, spells…" rows="3"></textarea>
+          <div class="row">
+            <button id="btn-char-save" class="primary">Save to library</button>
+            <button id="btn-char-cancel" class="ghost hidden">Cancel edit</button>
+          </div>
+        </div>
+      </details>
+    </div>
+    <div class="card">
+      <h2>Rooms</h2>
+      <div class="row">
+        <input id="rm-name" placeholder="New room name">
+        <button id="btn-room-create" class="primary">Create</button>
+      </div>
+      <div class="row">
+        <input id="rm-code" placeholder="Room code (e.g. A1B2C3)" maxlength="6">
+        <button id="btn-room-join">Join</button>
+      </div>
+      <div id="room-list"></div>
+      <p id="lobby-err" class="err"></p>
+    </div>
+  </main>
+</section>
+
+<!-- ============ ROOM ============ -->
+<section id="view-room" class="view hidden">
+  <header class="topbar">
+    <div class="row">
+      <button id="btn-back" class="ghost">← Lobby</button>
+      <h1 id="room-title">Room</h1>
+      <span id="room-code" class="code"></span>
+      <span id="room-role" class="badge"></span>
+    </div>
+    <div id="online" class="online"></div>
+  </header>
+  <main class="room-grid">
+    <div class="mapwrap">
+      <canvas id="map"></canvas>
+      <div id="toast"></div>
+      <div id="movehud" class="hidden">
+        <span id="mh-text"></span>
+        <button id="mh-go" class="primary">Move</button>
+        <button id="mh-cancel" class="ghost">Cancel</button>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="panel grow">
+        <h2>Chronicle</h2>
+        <div id="chat" class="chat"></div>
+        <div class="row">
+          <input id="chat-in" placeholder="Message…" maxlength="2000">
+          <button id="btn-chat" class="primary">➤</button>
+        </div>
+        <div class="row dice">
+          <input id="roll-expr" value="1d20" placeholder="2d6+3">
+          <select id="roll-adv"><option value="">—</option><option value="adv">ADV</option><option value="dis">DIS</option></select>
+          <button id="btn-roll" class="primary">Roll</button>
+        </div>
+        <div class="row dice roll-abil-row">
+          <label class="tiny">ability</label>
+          <select id="roll-abil"><option value="">none</option><option value="str">STR</option><option value="dex">DEX</option><option value="con">CON</option><option value="int">INT</option><option value="wis">WIS</option><option value="cha">CHA</option></select>
+          <label class="tiny"><input type="checkbox" id="roll-prof"> prof</label>
+        </div>
+        <div class="row dice" id="dice-btns">
+          <button data-d="d4">d4</button><button data-d="d6">d6</button><button data-d="d8">d8</button>
+          <button data-d="d10">d10</button><button data-d="d12">d12</button><button data-d="d20" class="hot">d20</button>
+        </div>
+      </div>
+      <div class="panel hidden" id="sheet-roll">
+        <h2 id="sr-name">Rolls</h2>
+        <div class="row sr-toggles">
+          <label><input type="checkbox" id="sr-prof"> proficient</label>
+          <select id="sr-adv"><option value="">—</option><option value="adv">ADV</option><option value="dis">DIS</option></select>
+        </div>
+        <div class="row sr-toggles">
+          <label class="tiny">attack ability</label>
+          <select id="sr-atk-abil"><option value="">weapon default</option><option value="str">STR</option><option value="dex">DEX</option><option value="con">CON</option><option value="int">INT</option><option value="wis">WIS</option><option value="cha">CHA</option></select>
+        </div>
+        <div class="row chips" id="sr-abil"></div>
+        <div id="sr-weapons"></div>
+      </div>
+      <div class="panel">
+        <h2>Initiative</h2>
+        <ol id="init-list"></ol>
+        <div class="row" id="init-btns">
+          <button id="btn-init-start">⚔️ Start</button>
+          <button id="btn-init-next">Next ▸</button>
+          <button id="btn-init-round">⏭ End round</button>
+          <button id="btn-init-end">End</button>
+        </div>
+      </div>
+      <div class="panel hidden" id="mychars">
+        <h2>My Characters</h2>
+        <div id="my-chars"></div>
+      </div>
+      <div class="panel">
+        <h2>Party</h2>
+        <div id="party"></div>
+      </div>
+      <div class="panel hidden" id="sheet">
+        <h2 id="sheet-name">Sheet</h2>
+        <div id="sheet-body"></div>
+        <div class="row hidden" id="hp-btns">
+          <button data-hp="-1">−1</button><button data-hp="-5">−5</button><button data-hp="1">+1</button><button data-hp="5">+5</button>
+        </div>
+      </div>
+      <div class="panel hidden" id="dmtools">
+        <h2>DM Tools</h2>
+        <div class="row">
+          <input id="npc-name" placeholder="NPC name">
+          <button id="btn-npc-add">＋ Token</button>
+        </div>
+        <div class="row">
+          <input type="file" id="map-file" accept="image/png,image/jpeg">
+        </div>
+        <div class="row">
+          <button id="btn-edit-map">🛠 Edit map</button>
+          <button id="btn-long-rest" title="Restore spell slots + recharge items">🛌 Long rest</button>
+        </div>
+        <div id="editor" class="hidden">
+          <div class="row brushes">
+            <button class="brush" data-b="wall" title="Wall (blocks path)">🧱</button>
+            <button class="brush" data-b="floor" title="Floor">⬜</button>
+            <button class="brush" data-b="rough" title="Difficult terrain (2× walk)">🌿</button>
+            <button class="brush" data-b="trap" title="Hidden trap">⚠️</button>
+            <button class="brush" data-b="loot" title="Hidden loot">🎁</button>
+            <button class="brush" data-b="erase" title="Erase cell">🧹</button>
+          </div>
+          <div class="row trapfields hidden" id="trap-fields">
+            <input id="trap-label" placeholder="Trap label" maxlength="80" value="Poison Needle">
+            <input id="trap-dc" type="number" min="1" max="30" value="13" title="Save DC (DEX)" style="width:52px">
+            <input id="trap-dmg" placeholder="dmg" maxlength="16" value="2d6" title="Damage dice" style="width:58px">
+          </div>
+          <div class="row lootfields hidden" id="loot-fields">
+            <input id="loot-label" placeholder="Loot (e.g. 25 gp and a silver ring)" maxlength="80">
+          </div>
+          <div class="row">
+            <input id="ed-w" type="number" min="8" max="80" title="Width (cells)">
+            <input id="ed-h" type="number" min="6" max="60" title="Height (cells)">
+            <button id="btn-ed-resize">Resize</button>
+          </div>
+          <div class="row fogrow">
+            <label><input id="ed-fog" type="checkbox"> Reset fog of war</label>
+          </div>
+          <div class="row">
+            <button id="btn-ed-save" class="primary">💾 Save map</button>
+            <button id="btn-ed-cancel" class="ghost">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+</section>
+
+<script src="/static/js/10_core.js"></script>
+<script src="/static/js/20_lobby.js"></script>
+<script src="/static/js/30_room.js"></script>
+<script src="/static/js/40_ws.js"></script>
+<script src="/static/js/50_canvas.js"></script>
+<script src="/static/js/60_main.js"></script>
+</body>
+</html>
