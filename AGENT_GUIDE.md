@@ -66,6 +66,7 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/progression.py` | Multiclass-ready class model | `clean_class_levels()`, `total_character_level()`, `set_class_levels()` |
 | `app/events.py` | Plain-dict game-event facts + listener seam (D52) | `make()`, `emit()`, `subscribe()`, `recent` |
 | `app/effects.py` | Generic ability/effect geometry (D54) | `effect_cells()` |
+| `app/abilities.py` | Generic ability engine: data defs + authoritative executor (D55) | `register()`, `clean_definition()`, `execute()` |
 | `app/room/quests.py` | Quest WS transport (thin) | `handle_quest_add/complete/…` |
 | `app/room/progression.py` | `class_levels` WS transport (thin) | `handle_class_levels()` |
 | `app/ratelimit.py` | In-memory request limiter | `limit()` |
@@ -317,6 +318,28 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 - Tests:
   - `tests/test_quests.py`, `tests/test_progression.py`, `tests/test_effects.py`
 
+## Ability engine (Sprint 7)
+
+- Flow: `ability_cast` msg → `app/room/abilities.py` (auth: own-token for
+  players, any token for DM) → `app/abilities.execute()` (ONE game operation —
+  also the call target for future triggers/AI, never needs a ws object):
+  registry lookup → availability (PC `abilities` list / NPC block / DM bypass) →
+  cost (slot/resource, all-or-nothing) → range (Chebyshev×5ft, 0=touch) →
+  LOS if `los_required` → cells via `effects.effect_cells` → tokens via
+  footprint intersection → per-target save (`gear.save_bonus` + `do_roll`) or
+  attack (`ability_attack_bonus` vs AC) → effects through
+  `health.change_hp` / `conditions.add` → chronicle (`system` line, hidden
+  tokens counted not named) → `ability_result` (privacy-filtered) + cond/snapshot.
+- Canonical derivations (do not re-derive anywhere):
+  `gear.stat_mod()`, `gear.ability_save_dc(char, ability, bonus=0)`,
+  `gear.ability_attack_bonus(...)`; `spell_save_dc/spell_attack` delegate.
+  Casting ability = data on the definition — never hard-coded by class (D57).
+- Content: production registry is EMPTY; definitions register via
+  `abilities.register(clean dict)` (tests use original names). No spell DB.
+- Multiclass caveat (D58): slot progression must NOT be derived from
+  `total_character_level()` — separate axis, table attaches later.
+- Tests: `tests/test_abilities.py`
+
 ---
 
 # 4. WebSocket message map
@@ -354,6 +377,7 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `sound_trigger` | `room.audio.handle_sound_trigger` | DM | maybe | targeted private SFX |
 | `quest_add/update/obj_add/obj_done/complete/fail/delete` | `room.quests.*` | DM | no | thin transport over `app/quests.py` ops |
 | `class_levels` | `room.progression.handle_class_levels` | owner or DM (room members) | no | multiclass entries; legacy `level` kept in sync |
+| `ability_cast` | `room.abilities.handle_ability_cast` | owner (own token) or DM | no | thin transport over `abilities.execute` (D55) |
 
 ## Important outbound event kinds
 
@@ -374,6 +398,7 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `cond` / `death` | conditions/death | room or snapshot | usually no |
 | `ping` | pings | room | no |
 | `quests_changed` | room quests | room | no | payload-less; clients refetch filtered `/state` |
+| `ability_result` | caster socket | private | yes | entries privacy-filtered; hidden targets counted, never named |
 | `system` | gamelog notices (incl. quest notices) | per visibility | maybe | chronicle line, never reconstruction source |
 | `error` | various | sender socket | private |
 
@@ -469,6 +494,10 @@ Frontend filtering may improve presentation but may not be the security boundary
   be reconstructed from events or notices.
 - `app/effects.py::effect_cells()` — shared ability geometry; client parity
   enforced by `tests/test_effects.py`.
+- `app/abilities.py::execute()` — the ONLY ability operation; definitions via
+  `abilities.register()`; all targeting/range/LOS/resources decided here, server-side.
+- `app/gear.py::stat_mod()/ability_save_dc()/ability_attack_bonus()` — the only
+  modifier/DC/attack derivations.
 
 ## Permissions and visibility
 
@@ -509,6 +538,8 @@ Important tables:
   non-hidden rows, filtered in `quests.visible_for` (live and `/state`).
 - `characters.class_levels` — JSON multiclass entries (D53); `level` column
   kept in sync by `progression.set_class_levels`.
+- `characters.abilities` — JSON list of granted ability ids (access model only;
+  no prep/spellbook rules — D55). NPC equivalents live in the token's npc block.
 - `soundboard` — private reusable DM sound effects.
 
 Migrations are append-only. Add columns with `db.py::init_db()`'s `migrate()` helper and add new tables to `SCHEMA`.
@@ -550,6 +581,7 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_quests.py` | quest CRUD via WS, DM-only server filtering (live + `/state` + raw-payload grep), notice visibility, reconnect reconstruction, player mutation refusal, quest/door event emission |
 | `tests/test_progression.py` | class-level validation, derived total + PB, legacy-column sync, owner/DM/stranger authorization |
 | `tests/test_effects.py` | point/line/cone/circle/square geometry, clipping, determinism, server≡client `aoeCells` parity (Node vm) |
+| `tests/test_abilities.py` | DC/attack derivation, save-half, resist/immune through defense pipeline, death-pipeline entry, heal, condition, concentration flag, slot+resource consumption, upcast validation, attack-vs-AC+crit, footprint flank, LOS/door, range authority, actor spoofing refusal, hidden-token non-leak |
 
 `tests/conftest.py`:
 

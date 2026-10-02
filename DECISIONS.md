@@ -733,6 +733,77 @@ WS smoke suites (still in `/tmp/opencode/`) re-run green after these changes.
   only; resolution remains a deliberate future step.
 - **Status:** Accepted.
 
+## D55 — Abilities are DATA; one generic executor owns mechanical resolution
+- **Context:** fireball/healing-word/dragon-breath/trap-flame as separate code
+  paths is the classic VTT death spiral. The sprint goal was the ENGINE, not
+  the spellbook.
+- **Decision:** `app/abilities.py` holds validated definitions (`clean_definition`:
+  casting `ability` score, `range_ft`, `targeting self|single|point|area`,
+  area `shape+size_ft` via `effects.py`, `resolution auto|save|attack`,
+  `on_save none|half|negate`, generic effects `damage(+type)|heal|condition`,
+  `concentration` flag, `cost {spell_slot|resource}`) in a server-side registry —
+  the client sends ONLY `ability_id` + target. `abilities.execute()` is the ONE
+  operation every caller uses (WS handler, future trigger, future AI DM); it
+  takes plain ids, never a WebSocket object. Named content becomes rows later;
+  zero named-spell code paths exist. Definitions are whole-rejected on any
+  invalid field; production ships an EMPTY registry (engine, no content DB).
+- **Geometry independence:** shapes/sizes are pure `effects.effect_cells()`
+  inputs (D54) — nothing in the engine knows what a "fireball" is.
+- **Status:** Accepted. Tests: `tests/test_abilities.py` (Training Bolt/Burst
+  etc. — original fixture names, no licensed content).
+
+## D56 — Existing subsystems stay authoritative; the executor only orchestrates
+- **Decision:** the executor implements NO second engine. Damage/heal go through
+  `room.health.change_hp` (typed damage → `gear.apply_defense` resist/immune/
+  vulnerable → temp HP → death saves — verified by a test where ability damage
+  drives a token into the dying state). Saves use `gear.save_bonus` +
+  `room.dice.do_roll`; conditions use `app.conditions`; concentration IS the
+  existing `concentrating` condition flag; slots/resources are the existing
+  `spell_slots`/`resources` columns (long/short rest already restore them).
+  Canonical derivation helpers live in `gear.py`: `stat_mod()` (the one
+  modifier formula, scores clamped 1–30), `ability_save_dc()` and
+  `ability_attack_bonus()` — `spell_save_dc/spell_attack` now delegate.
+- **Rounding:** save-half damage is floored BEFORE defense (`//2`, matching
+  `apply_defense`'s resistance floor); crit doubles damage dice count.
+- **Status:** Accepted.
+
+## D57 — The casting ability is configuration, never a class assumption
+- **Decision:** nothing in gear/abilities hard-codes "wizard→INT". The ability
+  definition carries `ability`; the executor derives DC/attack from it. Class
+  defaults can become data later. Save DC/attack take an explicit `bonus`
+  parameter so magic-item/racial bonuses never need formula copies.
+- **Status:** Accepted.
+
+## D58 — Spell slots ride on the generic resource system; multiclass total level MUST NOT derive slot tables
+- **Decision:** slot state stays the existing `{1..9: {max, used}}` JSON with
+  the existing consume/restore semantics (rest handlers unchanged); a new op
+  consumes exactly one slot or rejects — never negative, never consumed when
+  the cast later refuses. Generic `{type:resource,id}` costs ride the existing
+  `resources` list (ki/rage/charges are first-class, not spell slots).
+  `cast_level` is the upcast EXTENSION POINT: validated (1–9, ≥ base level) and
+  consumed at that level, but effect scaling is intentionally NOT implemented.
+- **The trap documented for tomorrow:** `progression.total_character_level()`
+  is for PB and legacy sync only. Spell-slot progression is a SEPARATE axis
+  (multiclass casters combine HALF levels, rounding — and full multiclass
+  tables are licensing-uncertain anyway). Deriving slots naively from total
+  level is explicitly forbidden; the architecture keeps class levels and
+  casting resources in different fields so the correct table can attach later.
+- **Status:** Accepted.
+
+## D59 — Targeting, range and LOS are server-authoritative; hidden info never leaks through AoE
+- **Decision:** the server computes affected cells (`effects`), affected tokens
+  (footprint intersection: ANY occupied cell counts — a Large token is hit on
+  its flank, not just its origin cell), range (Chebyshev cells × 5 ft; range 0
+  = touch/adjacent) and LOS (`los.line_of_sight` + `mapmodel.blocked_edges`,
+  per-definition `los_required` flag — not every ability needs sight). Clients
+  never choose affected creatures or damage. For a player actor, result entries
+  and the game-log chronicle name only tokens inside that player's current
+  visibility (`ws.viewer_visible_cells`, the same filter `/state` uses);
+  everyone else appears as `+N hidden` — while the mechanical effect still
+  applies server-side. Conservative by construction.
+- **Status:** Accepted. Tests: footprint-flank hit, wall/door LOS, out-of-range
+  refusal, and a fog-hidden NPC that takes damage but is never named.
+
 ## Cross-cutting assumptions (read before scaling)
 - Single uvicorn process, single event loop; `LOOP` captured in `main.py` for thread-safe broadcasts.
 - `VTT_DATA_DIR` isolates the SQLite/`secret.key`/uploads tree.

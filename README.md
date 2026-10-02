@@ -364,7 +364,7 @@ under HTTPS (direct, or via `X-Forwarded-Proto`) or when `VTT_COOKIE_SECURE=1`. 
 ## Tests
 
 ```bash
-./.venv/bin/python -m pytest          # 201 tests
+./.venv/bin/python -m pytest          # 219 tests
 ```
 
 The suite mixes fast unit tests (`test_path`, `test_mapmodel`, `test_gear`, `test_dice`,

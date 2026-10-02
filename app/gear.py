@@ -132,7 +132,17 @@ def _stat_mod(char, ability):
         v = int(stats.get(ability, 10))
     except (TypeError, ValueError):
         v = 10
+    v = max(1, min(30, v))                                 # sane-score range, then classic math
     return (v - 10) // 2
+
+
+def stat_mod(char, ability):
+    """THE canonical ability-score modifier: floor((score-10)/2) (D56).
+    Anything that needs a modifier calls this — no re-derived copies."""
+    ability = str(ability or "").lower()
+    if ability not in ABILITIES:
+        return 0
+    return _stat_mod(char, ability)
 
 
 def prof_bonus(char):
@@ -328,12 +338,25 @@ def clean_slots(slots):
     return out
 
 
-def spell_attack(char, ability):
-    return prof_bonus(char) + _stat_mod(char, ability)
+def ability_save_dc(char, ability, bonus=0):
+    """Generic effect save DC: 8 + proficiency + casting-ability modifier + optional
+    explicit bonus. The casting ability is CONFIGURATION (D57) — never hard-coded
+    by class here. All save DCs derive from this one function."""
+    return 8 + prof_bonus(char) + stat_mod(char, ability) + _clampi(bonus, -20, 20, 0)
 
 
-def spell_save_dc(char, ability):
-    return 8 + prof_bonus(char) + _stat_mod(char, ability)
+def ability_attack_bonus(char, ability, bonus=0):
+    """Generic spell/ability attack bonus: proficiency + ability modifier + optional
+    explicit bonus. Works for magical or any other ability attack (D57)."""
+    return prof_bonus(char) + stat_mod(char, ability) + _clampi(bonus, -20, 20, 0)
+
+
+def spell_attack(char, ability, bonus=0):
+    return ability_attack_bonus(char, ability, bonus)
+
+
+def spell_save_dc(char, ability, bonus=0):
+    return ability_save_dc(char, ability, bonus)
 
 
 def has_spellbook(items):

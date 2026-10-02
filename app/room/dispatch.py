@@ -1,6 +1,7 @@
 """Message dispatch: map a message ``type`` to its handler. Flat registry, no bus."""
 from .. import db, mapmodel
 from .aoe import handle_aoe
+from .abilities import handle_ability_cast
 from .audio import (handle_audio_add, handle_audio_play, handle_audio_remove,
                     handle_audio_stop, handle_sound_trigger)
 from .chat import handle_chat, handle_narrative
@@ -94,6 +95,7 @@ HANDLERS = {
     "quest_fail": handle_quest_fail,
     "quest_delete": handle_quest_delete,
     "class_levels": handle_class_levels,
+    "ability_cast": handle_ability_cast,
 }
 
 

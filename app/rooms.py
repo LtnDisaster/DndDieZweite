@@ -115,6 +115,7 @@ def _char_row(r, mask_items=False):
     r["hit_die"] = gear.clean_hit_die(r.get("hit_die", 8))
     r["class_levels"] = progression.load(r)
     r["total_level"] = progression.total_character_level(r)
+    r["abilities"] = [str(a) for a in (db.j(r.get("abilities"), []) or [])][:60]
     r["hit_dice_max"] = gear.hit_dice_max(r)
     r["hit_dice_spent"] = max(0, min(gear.hit_dice_max(r), int(r.get("hit_dice_spent") or 0)))
     r["has_spellbook"] = gear.has_spellbook(r["items"])

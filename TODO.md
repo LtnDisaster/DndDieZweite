@@ -4,7 +4,7 @@ Living checklist. "Done" = shipped and covered by an in-repo test.
 Verify state with:
 
 ```bash
-./.venv/bin/python -m pytest                       # 201 tests (unit + integration + view guards)
+./.venv/bin/python -m pytest                       # 219 tests (unit + integration + view guards)
 ./.venv/bin/python -m compileall -q app            # byte-compile check
 for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 ```
@@ -212,6 +212,21 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       No spell catalogue.
 - [x] Tests: quests 7 + progression 8 + effects 6 → **201 total**.
 
+## Done — generic ability engine (2026-10-02, Sprint 7)
+- [x] **Ability definitions as data + ONE executor** (D55): `app/abilities.py`
+      (registry + `clean_definition` + async `execute()`); WS `ability_cast` is a
+      thin transport; triggers/AI will call the same operation (no ws object in core).
+- [x] **Canonical derivations** (D56/D57): `gear.stat_mod`, `ability_save_dc`,
+      `ability_attack_bonus` (+optional bonus); casting ability is configuration.
+- [x] **Save/attack/auto resolution** through existing dice/saves/AC; crit doubles
+      dice; save-half floored before defense; NO second damage/condition/concentration engine.
+- [x] **Slots & generic resources** ride existing columns; all-or-nothing consumption;
+      `cast_level` upcast extension point (consumption only, no scaling).
+- [x] **Authority**: range (Chebyshev×5ft), LOS flag, footprint-intersection targeting,
+      hidden tokens counted-not-named to players (D59). 18 tests in `test_abilities.py`.
+- [x] **Explicit architecture guard** (D58): slot progression must NOT derive from
+      `total_character_level()` — documented, not implemented.
+
 ## P1 — Repo hygiene
 - [ ] Add a `Makefile`/`scripts/smoke.sh`: start (pidfile) -> live `vtt_smoke*.mjs` -> stop
       (the `.mjs` suites stay a **dev-only** live-server harness; `pytest` is the durable suite).
@@ -235,6 +250,12 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       tests are vision-adjacent).
 
 ## P3 — Feature gaps (nice, not blocking)
+- [ ] **Ability content pipeline:** the registry ships empty — tomorrow's work is
+      DATA (named spells/class/monster abilities via `abilities.register()` or an
+      import format), known/prepared-spell lists per character, class-specific
+      casting-ability defaults as data, upcast EFFECT scaling (dice growth) on the
+      existing `cast_level` seam, concentration break-check on damage (the state
+      flag exists; no auto CON-save fires today — none existed before either).
 - [ ] **Quest/automation follow-ups (Sprint 6 seams, intentionally not built):** per-player
       quest visibility (reuse a `recipients` list like notes), objective counters, the
       trigger engine over `app/events.py` (condition → game operation), quest-condition

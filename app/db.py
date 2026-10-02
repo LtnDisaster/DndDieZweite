@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS characters (
     hit_dice_spent INTEGER DEFAULT 0,
     resources TEXT DEFAULT '[]',
     defenses TEXT DEFAULT '{}',
-    class_levels TEXT DEFAULT ''
+    class_levels TEXT DEFAULT '',
+    abilities TEXT DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS creatures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -224,6 +225,7 @@ def init_db():
     migrate("messages", "style", "style TEXT DEFAULT ''")
     migrate("room_state", "audio_json", "audio_json TEXT DEFAULT '{}'")
     migrate("characters", "class_levels", "class_levels TEXT DEFAULT ''")
+    migrate("characters", "abilities", "abilities TEXT DEFAULT '[]'")
     c.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_type_created "
               "ON messages (room_id, type, created_at)")
     c.commit()
