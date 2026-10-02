@@ -171,6 +171,112 @@ def skill_bonus(char, skills, key):
     return _stat_mod(char, SKILLS[key][1]) + prof_bonus(char) * lvl, lvl > 0
 
 
+def clean_saves(saves):
+    """Normalise to {ability: bool}. Accepts dict/list/0-1 values."""
+    out = {a: False for a in ABILITIES}
+    if isinstance(saves, dict):
+        for k, v in saves.items():
+            k = str(k).lower()
+            if k in out:
+                out[k] = bool(v) and str(v).lower() not in ("0", "false", "off", "none")
+    elif isinstance(saves, (list, tuple)):
+        for k in saves:
+            k = str(k).lower()
+            if k in out:
+                out[k] = True
+    return out
+
+
+def save_bonus(char, saves, ability):
+    ability = str(ability or "").lower()
+    if ability not in ABILITIES:
+        return 0
+    return _stat_mod(char, ability) + (prof_bonus(char) if clean_saves(saves).get(ability) else 0)
+
+
+def hit_dice_max(char):
+    try:
+        return max(1, min(20, int(char.get("level", 1))))
+    except (TypeError, ValueError):
+        return 1
+
+
+def clean_hit_die(value):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 8
+    return min((4, 6, 8, 10, 12), key=lambda d: abs(d - n))
+
+
+def clean_resources(resources):
+    out = []
+    seen = set()
+    for i, r in enumerate(resources if isinstance(resources, list) else []):
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name", "")).strip()[:40]
+        if not name:
+            continue
+        rid = str(r.get("id", ""))[:24] or f"res{i}"
+        while rid in seen:
+            rid = rid + "x"
+        seen.add(rid)
+        mx = _clampi(r.get("max", 1), 1, 99, 1)
+        cur = _clampi(r.get("current", mx), 0, mx, mx)
+        reset = str(r.get("reset", "manual")).lower()
+        if reset not in ("manual", "short", "long"):
+            reset = "manual"
+        out.append({"id": rid, "name": name, "current": cur, "max": mx, "reset": reset})
+    return out[:20]
+
+
+# ---------- damage types and defenses ----------
+
+DAMAGE_TYPES = ("acid", "bludgeoning", "cold", "fire", "force", "lightning",
+                "necrotic", "piercing", "poison", "psychic", "radiant",
+                "slashing", "thunder")
+
+
+def clean_defenses(defenses):
+    raw = defenses if isinstance(defenses, dict) else {}
+    keys = ("resist", "immune", "vulnerable")
+    if any(k in raw for k in keys):
+        src = raw
+    else:
+        src = {}
+        for kind, vals in raw.items():
+            if kind in keys and isinstance(vals, (list, tuple)):
+                src[kind] = vals
+    out = {}
+    for k in keys:
+        vals = []
+        for v in (src.get(k) or []):
+            v = str(v).strip().lower()[:16]
+            if v in DAMAGE_TYPES and v not in vals:
+                vals.append(v)
+        out[k] = vals[:12]
+    return out
+
+
+def apply_defense(amount, damage_type, defenses):
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        amount = 0
+    dtype = str(damage_type or "").strip().lower()
+    if not dtype or dtype not in DAMAGE_TYPES:
+        return max(0, min(99999, amount))
+    d = clean_defenses(defenses)
+    if dtype in d["immune"]:
+        return 0
+    if dtype in d["vulnerable"]:
+        amount *= 2
+    if dtype in d["resist"]:
+        amount //= 2
+    return max(0, min(99999, amount))
+
+
 # ---------- spells & slots ----------
 
 def clean_spells(spells):

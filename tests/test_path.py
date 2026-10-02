@@ -66,3 +66,22 @@ def test_out_of_bounds_goal_rejected():
 
 def test_goal_inside_wall_rejected():
     assert find_path(3, 3, grid(3, 3, walls=[(2, 2)]), (0, 0), (2, 2)) is None
+
+
+def test_closed_door_edge_blocks_a_corridor():
+    be = {frozenset({(1, 0), (2, 0)})}                     # a closed door between the two cells
+    assert find_path(4, 1, grid(4, 1), (0, 0), (3, 0)) == [(1, 0), (2, 0), (3, 0)]
+    assert find_path(4, 1, grid(4, 1), (0, 0), (3, 0), blocked_edges=be) is None
+
+
+def test_open_door_edge_is_passable():
+    # an open door contributes no blocked edge, so the route is unchanged
+    assert find_path(4, 1, grid(4, 1), (0, 0), (3, 0), blocked_edges=set()) == \
+        [(1, 0), (2, 0), (3, 0)]
+
+
+def test_closed_door_forces_a_detour():
+    # 3x2 open field, goal top-right; block the direct top edge → must loop via row 1
+    be = {frozenset({(1, 0), (2, 0)})}
+    p = find_path(3, 2, grid(3, 2), (0, 0), (2, 0), blocked_edges=be)
+    assert p is not None and (1, 0) not in p and (1, 1) in p

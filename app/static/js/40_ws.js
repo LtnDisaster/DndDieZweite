@@ -11,35 +11,72 @@ function connectWS(code){
     if (m.type !== "event") return;
     const p = m.payload || {};
     switch (m.kind){
-      case "chat": case "dice": appendChat({ id: p.id, username: p.username,
-                       body: p.text ?? p.body, type: m.kind }); break;
-      case "whisper": appendChat({ type:"whisper", body:p.text }); break;
+      case "chat": appendChatMessage(p); break;
+      case "narrative": {
+        const entry = { ...p, type:"narrative" };
+        appendChatMessage(entry);
+        if (entry.meta?.overlay || entry.style) showNarrativeOverlay(entry);
+        break;
+      }
+      case "dice": appendGameLogMessage({ id:p.id, username:p.username, body:p.text ?? p.body,
+                                          type:"dice", visibility:p.visibility, meta:p.meta }); break;
+      case "whisper": appendGameLogMessage({ type:"whisper", body:p.text }); break;
+      case "ambience": applyAudioState(p); break;
+      case "sound": playSoundEvent(p); break;
       case "step": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.atx = p.x; t.aty = p.y;
                        if (Math.abs(t.atx-t.x) > state.grid.cell*3){ t.x = p.x; t.y = p.y; } }
                      break; }
       case "move": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.atx = t.x = p.x; t.aty = t.y = p.y; } break; }
+      case "path_preview": applyPathPreview(p); break;
+      case "move_state": {
+        if (p.moving) state.moving.add(p.token_id); else state.moving.delete(p.token_id);
+        if (p.reason === "trap") toast("Movement stopped: trap triggered");
+        updateMoveControls();
+        break;
+      }
+      case "fog_changed": {
+        const g = state.grid;
+        if (g){
+          for (const idx in p.cells){ const i = +idx;
+            g.explored[i] = p.cells[idx];
+            if (p.terrain && p.terrain[idx] !== undefined) g.cells[i] = p.terrain[idx];
+          }
+          draw();
+        }
+        break;
+      }
       case "initiative": state.init = p; renderInit(); break;
       case "presence": state.online.add(p.username); renderOnline();
-        appendChat({ type:"system", body: `${p.username} ${p.online ? "connected" : "disconnected"}` });
+        appendGameLogMessage({ type:"system", body: `${p.username} ${p.online ? "connected" : "disconnected"}` });
         break;
       case "explored": { const g = state.grid;
         if (g && p.cells) for (const i of p.cells){ g.explored[i] = 1;
           if (p.terrain && p.terrain[i] !== undefined) g.cells[i] = p.terrain[i]; }
         break; }
       case "map_changed": refreshRoom(); break;
-      case "token_add": { upsertToken(p); break; }
+      case "token_add": { upsertToken(p); renderVoiceTargets(); break; }
       case "token_leave": { const g = state.tokens.find(t => t.id === p.token_id);
                             if (g){ state.ghosts = state.ghosts.filter(x => x.id !== g.id);
                                     state.ghosts.push({...g, atx:null, aty:null, ghost:true}); }
                             state.tokens = state.tokens.filter(t => t.id !== p.token_id);
+                            state.moving.delete(p.token_id);
                             if (state.sel === p.token_id){ state.sel = null; renderSheet(null); }
-                            break; }
+                            renderVoiceTargets(); break; }
       case "token_gone": { state.tokens = state.tokens.filter(t => t.id !== p.token_id);
+                           state.moving.delete(p.token_id);
                            if (state.sel === p.token_id){ state.sel = null; renderSheet(null); }
-                           break; }
-      case "snapshot": refreshRoom(); break;
+                           renderVoiceTargets(); break; }
+      case "snapshot": refreshRoom().then(() => { if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel) || null); }); break;
+      case "cond": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t){ t.conds = p.conds || [];
+                       if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "death": { const t = state.tokens.find(t => t.id === p.token_id);
+                      if (t){ t.death = p.death || null;
+                        if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "aoe": showAoe(p); break;
+      case "ping": showPing(p); break;
       case "error": toast(p.msg || "Error"); break;
     }
   };

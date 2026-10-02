@@ -131,6 +131,34 @@ button.hot { border-color: var(--gold); color: var(--gold); }
 .inv-btns { margin-left: auto; display: inline-flex; gap: .25rem; }
 .inv-btns button { padding: .1rem .4rem; font-size: .72rem; }
 
+/* ---- conditions / status effects ---- */
+.conds { margin: .5rem 0; }
+.cond-chips { display: flex; flex-wrap: wrap; gap: .3rem; }
+.cond-chip { display: inline-flex; align-items: center; gap: .3rem; padding: .1rem .4rem;
+             border: 1px solid var(--line); border-radius: 10px; font-size: .78rem; background: #22273a; }
+.cond-chip i { width: .7rem; height: .7rem; border-radius: 50%; display: inline-block; }
+.cond-chip .cond-rm { padding: 0 .2rem; font-size: .7rem; line-height: 1; background: none; border: none; color: var(--red); }
+.cond-add { margin-top: .3rem; gap: .25rem; }
+.cond-add input { flex: 0 0 auto; }
+.cond-add #cond-name { flex: 1 1 auto; min-width: 0; }
+
+/* ---- death saving throws ---- */
+.death { margin: .4rem 0; padding: .3rem .4rem; border: 1px solid var(--red); border-radius: 6px; }
+.dsrow { display: flex; align-items: center; gap: .35rem; flex-wrap: wrap; font-size: .82rem; }
+.dsuccess, .dfail { display: inline-flex; gap: .2rem; }
+.dsv { width: .85rem; height: .85rem; border-radius: 3px; border: 1px solid var(--line); display: inline-block; }
+.dsucc .dsv.on { background: var(--green); border-color: var(--green); }
+.dfail .dsv.on { background: var(--red); border-color: var(--red); }
+.dsbtns { margin-top: .3rem; gap: .4rem; }
+
+/* ---- bestiary ---- */
+.best-list { display: flex; flex-direction: column; gap: .25rem; margin: .2rem 0; max-height: 160px; overflow: auto; }
+.creature-row { display: flex; align-items: center; gap: .4rem; padding: .15rem .2rem; border-bottom: 1px dashed var(--line); }
+.creature-row .cr-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.creature-row button { flex: 0 0 auto; padding: .1rem .4rem; font-size: .74rem; }
+.creature-row [data-a="del"] { color: var(--red); background: none; border: none; }
+#btn-aoe.active { outline: 2px solid var(--gold); color: var(--gold); }
+
 /* ---- skills (editor + sheet) ---- */
 .skills { display: grid; grid-template-columns: repeat(2, 1fr); gap: .2rem .8rem; }
 .skillrow { display: flex; align-items: center; gap: .4rem; font-size: .82rem; }
@@ -157,3 +185,84 @@ button.hot { border-color: var(--gold); color: var(--gold); }
 .spbtns button { padding: .1rem .4rem; font-size: .72rem; }
 .roundline { color: var(--gold); font-weight: 700; text-align: center; list-style: none;
              opacity: .85; border-bottom: 1px solid var(--line); margin-bottom: .25rem; }
+
+/* ---------- NPC / enemy editor (DM sheet) ---------- */
+#sheet-body .row input[type=number] { flex: 0 0 auto; min-width: 0; }
+#sheet-body .stat input { width: 100%; padding: .1rem; text-align: center; }
+#sheet-body .sprow input, #sheet-body .sprow select { min-width: 0; }
+#npc-abil { gap: .3rem; }
+#npc-abil .abil button { padding: .18rem .4rem; font-size: .72rem; }
+#npc-spells .sprow button { padding: .1rem .4rem; font-size: .72rem; }
+#npc-spells .ns-del { color: var(--red); }
+#npc-attacks .na-del { color: var(--red); }
+.atkrow .atk-go { padding: .1rem .35rem; font-size: .72rem; }
+
+/* ---- game log, quick dice, future DM panels ---- */
+.tabs { margin: -2px 0 6px; }
+.tabs button { flex: 1; padding: 4px 6px; font-size: 11.5px; }
+.log .ts { color: var(--muted); margin-right: 4px; }
+.log .visbadge { color: var(--gold); margin-left: 4px; text-transform: uppercase; font-size: 9px; }
+.qdice { gap: 3px; }
+.qdice button { flex: 1; padding: 3px 2px; font-size: 11px; }
+#roll-mod { width: 58px; flex: 0 0 auto; }
+.journal-list { max-height: 170px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+.journal-item { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+                background: var(--panel2); border: 1px solid var(--line); color: var(--ink);
+                border-radius: 6px; padding: 5px 7px; cursor: pointer; }
+.journal-item small { margin-left: auto; color: var(--muted); text-transform: uppercase; }
+.journal-item.dm { border-color: #7d5a2c; }
+.resource-row, .defense-row { display: flex; align-items: center; gap: 4px; width: 100%; margin: 2px 0; }
+.resource-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resource-row small, .hp-states small { color: var(--muted); }
+.hp-states .state-btn { flex: 1; padding: 4px 3px; font-size: 11.5px; }
+.hp-states .on { border-color: var(--gold); color: var(--gold); }
+.encounter-row, .pin-row { display: flex; align-items: center; gap: 5px; width: 100%; }
+.pin-swatch { width: 12px; height: 12px; border-radius: 50%; border: 1px solid #000; }
+.ruler-read { margin-top: 6px; color: var(--muted); font-size: 11.5px; }
+.hp-states-wrap { margin: .25rem 0 .35rem; }
+.hp-states-wrap .tag { background: var(--panel2); border:1px solid var(--line); border-radius:5px; padding:1px 4px; }
+.res-btn, .exh-btn { width:28px; min-width:28px; flex:0 0 auto; }
+
+/* ---- chat / narrative / ambience ---- */
+.chronicle-head { display: flex; align-items: center; gap: .45rem; justify-content: space-between; }
+.chronicle-head h2 { margin: 0; }
+.chronicle-head button { padding: 0 .45rem; min-width: 28px; }
+#chronicle-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#chronicle.collapsed #chronicle-body { display: none; }
+.chat-controls { margin: -.15rem 0 .15rem; gap: .25rem; font-size: .8rem; }
+.chat-controls select, .chat-controls input { min-width: 0; }
+.chat-send-row { gap: .25rem; }
+.chat-send-row select { flex: 0 1 94px; min-width: 68px; font-size: .8rem; }
+.chat-send-row input { flex: 1 1 auto; }
+.chat .whisper-text, .chat .narrative .text { font-style: italic; }
+.chat .persona b { color: #d8a0ff; }
+.chat .npc b { color: #70d6ff; }
+.chat .voice b { color: #b48ce0; }
+.chat .narrative { color: #e9c46a; }
+.chat .to { color: #b48ce0; opacity: .8; font-size: .78rem; }
+.audio-bar { display: flex; align-items: center; gap: .3rem; padding: .22rem .3rem; margin-bottom: .35rem;
+             background: #10131b; border: 1px solid var(--line); border-radius: 7px; font-size: .76rem; }
+.audio-bar span, .audio-bar b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audio-bar .audio-name { flex: 1; min-width: 0; color: var(--gold); }
+.audio-bar .audio-state { flex: 0 0 auto; opacity: .7; }
+.audio-bar button { padding: 0 .35rem; min-width: 28px; }
+.audio-bar input[type=range] { width: 54px; min-width: 54px; flex: 0 0 auto; padding: 0; }
+#audio-embed { height: 82px; margin-bottom: .35rem; border-radius: 7px; overflow: hidden; background: #000; }
+#audio-embed iframe { width: 100%; height: 82px; border: 0; }
+.ambience-row { display: flex; align-items: center; gap: 4px; padding: 3px 5px; border-bottom: 1px dashed var(--line); font-size: .8rem; }
+.ambience-row .am-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ambience-row button { padding: 0 .35rem; min-width: 28px; }
+.ambience-row .del { color: var(--red); }
+.narrative-overlay { position: absolute; inset: 0; display: flex; flex-direction: column;
+                     align-items: center; justify-content: center; gap: .55rem;
+                     background: rgba(5,6,10,.42); opacity: 0; pointer-events: none; transition: opacity .35s; }
+.narrative-overlay.show { opacity: 1; }
+.narrative-box { max-width: min(720px, 88%); text-align: center; text-shadow: 0 2px 18px #000; }
+.narrative-persona { color: #d8a0ff; font-weight: 700; font-size: .92rem; margin-bottom: .25rem; }
+.narrative-text { color: #fff; font-size: clamp(1rem, 2.2vw, 1.55rem); line-height: 1.35; white-space: pre-wrap; }
+.narrative-overlay[data-style="voice"] .narrative-text { color: #e7c2ff; font-style: italic; }
+@media (max-width: 900px) {
+  .audio-bar { flex-wrap: wrap; }
+  .audio-bar .audio-name { flex: 1 1 100%; }
+  .chat-send-row select { flex: 1 1 100%; }
+}

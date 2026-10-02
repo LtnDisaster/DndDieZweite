@@ -1,20 +1,20 @@
 """WebSocket entry point: authenticate, parse, dispatch, manage lifecycle.
 
 Gameplay lives in app/room/*. This module keeps only the connection plumbing and
-re-exports the few helpers REST/rooms.py reach through ``ws`` (notify, build_seen,
-token_cell, _last_seen) so those call sites are unchanged."""
+re-exports the few helpers REST/rooms.py reach through ``ws`` (notify, viewer_visible_cells,
+token_cell, _last_seen) so those call sites remain thin."""
 import json
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from . import auth, db
+from . import auth, db, footprint, los, mapmodel
 from .room.dispatch import handle
 from .room.movement import _walks
 from .room.net import (_clients, broadcast, clients, fog_patch, get_map, notify,
                        send_to, set_map, sys_msg)
-from .room.visibility import (_last_seen, build_seen, owned_cells, prune_viewer_last_seen,
-                              token_cell)
+from .room.visibility import (_last_seen, prune_viewer_last_seen, token_cell,
+                              viewer_source_cells, viewer_visible_cells)
 
 log = logging.getLogger("vtt.ws")
 router = APIRouter()
@@ -37,8 +37,9 @@ async def ws_room(ws: WebSocket, code: str):
     socks.add(ws)
     mpj = get_map(room_id)
     newly = []
-    for tk in db.q("SELECT x, y FROM tokens WHERE room_id=? AND owner_user_id=?", (room_id, user["id"])):
-        newly += _reveal(mpj, int(tk["x"] // mpj["cell"]), int(tk["y"] // mpj["cell"]))
+    for tk in db.q("SELECT id, x, y, owner_user_id, size FROM tokens WHERE room_id=? AND owner_user_id=?",
+                   (room_id, user["id"])):
+        newly += _reveal_token(mpj, tk)
     if newly:
         set_map(room_id, mpj)
         await broadcast(room_id, "explored", fog_patch(mpj, newly))
@@ -69,6 +70,6 @@ async def ws_room(ws: WebSocket, code: str):
             await broadcast(room_id, "presence", {"username": user["username"], "online": False})
 
 
-def _reveal(mp, cx, cy):
-    from . import mapmodel
-    return mapmodel.reveal(mp, cx, cy)
+def _reveal_token(mp, token):
+    return mapmodel.reveal_cells(mp, los.visible_cells(
+        mp, footprint.player_source_cells(mp, [token]), radius=mapmodel.FOG_R))

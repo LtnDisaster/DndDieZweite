@@ -2,6 +2,7 @@
 import json
 
 from .. import db, gear
+from . import death as D
 from .dice import do_roll
 from .net import broadcast, send_to, send_user, sys_msg
 
@@ -31,12 +32,21 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
     res = do_roll(it["heal"], None)
     healed = res["total"] if res else 0
     hp = min(ch["max_hp"], ch["hp"] + healed)
+    death = D.load(tok)
     if it["charges"] > 0:
         it["charges"] -= 1
         # Single UPDATE so HP and charge decrement are atomic (never one without the other).
-        db.x("UPDATE characters SET hp=?, items=? WHERE id=?", (hp, json.dumps(items), ch["id"]))
+        with db.tx() as c:
+            c.execute("UPDATE characters SET hp=?, temp_hp=?, items=? WHERE id=?",
+                      (hp, ch.get("temp_hp") or 0, json.dumps(items), ch["id"]))
+            if hp > 0 and death is not None:
+                c.execute("UPDATE tokens SET death=NULL WHERE id=?", (tok["id"],))
     else:
-        db.x("UPDATE characters SET hp=? WHERE id=?", (hp, ch["id"]))
+        with db.tx() as c:
+            c.execute("UPDATE characters SET hp=?, temp_hp=? WHERE id=?",
+                      (hp, ch.get("temp_hp") or 0, ch["id"]))
+            if hp > 0 and death is not None:
+                c.execute("UPDATE tokens SET death=NULL WHERE id=?", (tok["id"],))
     sys_msg(room_id, f"{ch['name']} uses {it['name']}.")
     extra = " (depleted)" if it["charges"] == 0 and it["chargesMax"] >= 0 else ""
     await send_user(room_id, ch["user_id"], "whisper",

@@ -48,13 +48,29 @@ def test_do_roll_invalid_returns_none():
     assert do_roll("not a roll", None) is None
 
 
+def test_keep_high_low_parser_and_range():
+    assert parse_roll("2d20kh1") == (2, 20, 0)
+    for _ in range(30):
+        kh = do_roll("2d20kh1", None)
+        assert len(kh["rolls"]) == 2 and len(kh["kept_rolls"]) == 1
+        assert kh["kept"] == max(kh["rolls"]) == kh["total"]
+        kl = do_roll("2d20kl1+2", None)
+        assert len(kl["kept_rolls"]) == 1 and 3 <= kl["total"] <= 22
+        assert kl["kept"] == min(kl["rolls"])
+    for _ in range(30):
+        r = do_roll("4d6kh3", None)
+        assert len(r["rolls"]) == 4 and len(r["kept_rolls"]) == 3
+        assert r["kept"] == sum(sorted(r["rolls"], reverse=True)[:3]) == r["total"]
+        assert 3 <= r["total"] <= 18
+
+
 # ---- spell roll builders ----
 def test_spell_attack_text_format_and_range():
-    ch = {"name": "Zara", "stats": {"dex": 20}, "level": 1}   # PB 1 + dex +5 = +6
+    ch = {"name": "Zara", "stats": {"dex": 20}, "level": 1}   # PB 2 + dex +5 = +7
     sp = {"name": "Zap", "ability": "dex", "dmg": "8d6"}
     text, total = _spell_attack_text(ch, sp, None)
     assert "Zap attack" in text and "Zara" in text
-    assert 7 <= total <= 26                                    # 1..20 + 6
+    assert 8 <= total <= 27                                    # 1..20 + 7
 
 
 def test_spell_dc_text():

@@ -4,8 +4,9 @@ Purpose: capture the decisions taken while building this app so later instances
 (human or AI) can recover the *why* without re-deriving it from code.
 Each record: Context → Decision → Alternatives → Consequences → Status.
 
-Last touched: 2026-09-29 (traps fix + round-based initiative + skills/spellbook/items).
-Current test status: `pytest` **66 passed** (unit + in-repo integration). Dev-only live
+Last touched: 2026-10-02 (multi-cell footprints, wall/door LOS, manual fog, movement stop,
+server path preview).
+Current test status: `pytest` **162 passed** (unit + in-repo integration). Dev-only live
 WS smoke suites (still in `/tmp/opencode/`) re-run green after these changes.
 
 ## D1 — Tech stack: FastAPI + WebSockets + SQLite + vanilla JS
@@ -53,9 +54,9 @@ WS smoke suites (still in `/tmp/opencode/`) re-run green after these changes.
 ## D8 — Strict line-of-sight, targeted token events, last-seen ghosts
 - **Context:** Requirement: out-of-sight movement of *anyone* (incl. allies) must not leak; sight should fade to a "memory".
 - **Decision:** Vision radius `VISION_R = 6` (Chebyshev). Replaced global broadcasts with `app/room/visibility.py::send_token_event`, which per viewer decides: first sight → `token_add`, subsequent → `step`, losing sight → `token_leave`, deletion → `token_gone`. Server keeps `_last_seen[room][viewer][token]` snapshots; `/state` returns LOS-filtered `tokens` plus `ghosts` (`ghost:true`, pinned to last-seen x,y). Client renders ghosts as faded dashed circles and keeps them live via `token_leave`.
-- **Alternatives:** Broadcast-all-and-hide-in-DOM (rejected: leaks over the wire), true shadow-casting LOS (deferred — see TODO).
+- **Alternatives:** Broadcast-all-and-hide-in-DOM (rejected: leaks over the wire), true shadow-casting LOS (deferred at the time — now implemented by D44).
 - **Consequences:** Out-of-sight tokens are never transmitted (strong leak-prevention); more per-viewer compute per step.
-- **Status:** Accepted.
+- **Status:** Superseded for geometry by D44; targeted-event/guest mechanics remain accepted.
 
 ## D9 — Ghost state is in-memory (`_last_seen`), single-process
 - **Context:** Ghosts are derived/ephemeral.
@@ -215,6 +216,340 @@ WS smoke suites (still in `/tmp/opencode/`) re-run green after these changes.
   tables (rejected — manual `max` is simpler and lets homebrew classes).
 - **Consequences:** Client mirrors the bonus math for previews only; the server recomputes
   authoritatively (D3). Migration is non-destructive for existing DBs.
+- **Status:** Accepted.
+
+## D24 — NPC / enemy stat blocks live on the token (DM-only)
+- **Context:** Monster tokens carried only a label+color; initiative and DEX-save traps used
+  DEX=0 for them, they took no trap damage, and DMs had no way to give an enemy ability scores
+  or let it cast spells.
+- **Decision:**
+  - New single JSON column `tokens.npc` (added via `migrate()`, non-destructive) holds the whole
+    block: `{name, level, stats{6}, hp, max_hp, ac, speed, spells[], spell_slots{}}`. `app/npc.py`
+    is the SSOT: `clean_npc` (bounded), `load`, `dex_mod`/`stat_mod`, and `to_char(block,name)`.
+  - **Reuse, don't fork:** `to_char` returns a `{name, stats, level}` pseudo-character so the
+    existing `gear.spell_attack`/`spell_save_dc`/`prof_bonus` and the `dice._spell_*_text`
+    builders serve NPCs unchanged — one source of truth for all spell math (no second impl).
+  - Token-keyed DM actions: `add_token`/`update_npc` (edit the block), `hp` and `roll`/`cast`
+    accept a `token_id` for an owner-less, character-less monster token (guarded `if not is_dm`).
+    Initiative (`combat.token_dex_mod`) and traps (`traps.hit_trap`) resolve DEX from the token's
+    block and apply damage to `npc.hp`. Leveled casts consume per-NPC `spell_slots`.
+  - **Hidden from players:** the `npc` block is stripped for non-DM viewers in `rooms.room_state`
+    and in the `token_add` path of `visibility.send_token_event`, extending the D11/D19
+    hidden-info posture. Rolls themselves post publicly, as at a real table.
+- **Alternatives:** DM-owned rows in `characters` (rejected — muddies the library/ownership model
+  and the per-user character list). Full PC mirror with weapons/items (deferred — beyond scope).
+- **Consequences:** `SELECT * FROM tokens` now carries `npc`; every reader that hands a token to a
+  client must keep the strip in sync. Initiative reveals monster DEX mod + totals as before (D22).
+- **Status:** Accepted.
+
+## D25 — Fog reveal is gated to player-owned tokens
+- **Context:** `movement.walk`/teleport revealed fog on the **shared** `explored` array and
+  broadcast `explored` to everyone for *any* token that moved, so marching an NPC lifted fog for
+  the whole party (and leaked it on refresh, since the array is persisted).
+- **Decision:** Reveal + `set_map` + the `explored` broadcast run only when
+  `token.owner_user_id is not None`. NPC/DM-token movement keeps triggering traps/loot but touches
+  no fog. Party-shared vision (one player's discovery reveals for the party) is intentionally kept.
+  Other reveal sites — `ws` connect (own tokens) and REST `assign` (a player character) — were
+  already owner-scoped. The DM needs no reveal (`visible_map` returns the full map for `is_dm`).
+- **Alternatives:** Strict per-viewer fog (rejected here — would mean a per-user `explored` array;
+  revisit only if the party-shared model is ever dropped).
+- **Consequences:** The DM moving a monster can no longer be used to scout the map for players.
+- **Status:** Accepted.
+
+## D21 (amendment) — Trap/loot markers render as a colored badge
+- The map icon loop computed a marker color but never applied it, so the ⚠/🎁 glyphs drew in the
+  leftover dark cell fill-style (effectively invisible where emoji fall back to monochrome, e.g.
+  Linux). They are now drawn as a filled circle in the marker color with a white glyph, gated
+  role-wise: DM always, players only once `discovered`/`taken_by`.
+
+## D26 — Conditions ride on the token, effects are NOT auto-applied
+- **Context:** The table wants a reliable flag for blinded/prone/concentrating/… so the state
+  survives refresh and reaches every viewer, without inventing a rules engine.
+- **Decision:** `tokens.conds` is a compact JSON list `[{k, rounds}]` normalised by the SSOT
+  `app/conditions.py` (`clean_conds`, `add`/`remove`, `step_rounds`, `is_concentrating`). The 15
+  canonical 5e conditions ship with a label/glyph/color; any bounded ASCII string is accepted as a
+  homebrew condition. **Round progression** runs only at the DM's `init_end_round` (timed entries
+  decrement, `rounds==0` are permanent); **long rest clears all**. `cond_add`/`cond_remove` let the
+  DM manage any token and players flag **their own**. Conds are carried in `room_state`, the
+  `token_add` payload and `_snapshot`, and broadcast live as a `cond` event. Concentrating renders a
+  dashed gold ring; other flags as colored dots + sheet chips.
+- **Alternatives:** A `character_conditions` table (rejected — conditions are a play-time state, so
+  the token is the right owner, matching the `npc`/`death` pattern). Auto-applying mechanical effects
+  like every engine (rejected — D3 keeps rules explicit and additive; the flag is the contract,
+  effects layer on later).
+- **Consequences:** Conditions are **carried, not enforced** by design. Per-round decrement is tied
+  to the initiative round counter (D22), so it only advances when the DM ends a round.
+- **Status:** Accepted.
+
+## D27 — Death saves are 5e and token-scoped, characters only
+- **Context:** A PC dropping to 0 HP needs the 5e dying/stable/dead arc without touching the
+  character library (the same character may be dying in one room and fine in the lobby).
+- **Decision:** `tokens.death` (`app/room/death.py`) holds `{s, f, stable, dead}`. `handle_hp`
+  transitions on damage: fresh state at 0, `+1 fail` per damage while already at 0 (instant death
+  when the hit ≥ max HP, re-enter on damage to a *stable* creature), cleared on healing above 0.
+  `death_save` (owner or DM) rolls a straight d20: ≥10 success, <10 fail, nat-20 regains 1 HP and
+  becomes conscious, nat-1 = two failures; 3 successes → stable, 3 fails → dead. `death_clear` is the DM override.
+  **NPCs never enter the state** — they just sit at 0 HP.
+- **Alternatives:** Storing `death` on `characters` (rejected — pollutes the library with a transient
+  room state). Auto-rolling saves for the player (rejected — the owner rolls their own, DM may proxy).
+- **Consequences:** Death state is per-token, so it's hidden/scoped like every other token field; the
+  canvas shows a red ring (dying) / ☠ (dead) and a 3×(✓/✗) sheet panel.
+- **Status:** Accepted.
+
+## D28 — NPC attacks resolve against a target token's AC, reusing the dice path
+- **Context:** A monster needs more than spell slots — reusable natural attacks with a to-hit bonus,
+  ideally answering "did it hit and for how much" in one click.
+- **Decision:** `npc.attacks` (`clean_attacks`) stores `{id, name, to_hit, dmg, dc, save, reach}`.
+  `npc_attack` (DM-only) rolls d20+`to_hit` and, when a `target_id` is given, compares against the
+  target's **effective AC** — a character's `gear.compute_ac` or another monster's `ac` — then rolls
+  `dmg` on a hit (crit on nat-20, fumble on nat-1). `mode:"damage"`/`mode:"dc"` post just the dice /
+  save DC. Everything flows through the existing `do_roll`/`dice_post` (no second dice engine).
+- **Alternatives:** Full attack bundles with damage types/conditions and auto-apply (rejected — out of
+  scope, and D3 keeps effects manual). Player-facing target picking (rejected — monsters act on the DM's turn).
+- **Consequences:** Attack outcomes post publicly (rolls are public at a table, D24); AC is read
+  authoritatively server-side, so the DM never sees a wrong AC.
+- **Status:** Accepted.
+
+## D29 — Doors are first-class map geometry and block the pathfinder
+- **Context:** Closed/locked doors are the one map feature that must actually stop movement, not just
+  look the part, and must be authorable and interactable at the table.
+- **Decision:** A door sits on an **interior edge** (`dir v` = `x↔x+1`, `dir h` = `y↔y+1`), stored in
+  `mp["doors"]` and normalised in `mapmodel.sanitize` (`_canon_door` re-anchors to the lower cell and
+  drops out-of-bounds/dup edges). `blocked_edges()` → the pathfinder (`find_path`'s new
+  `blocked_edges` param, mirrored in `findPathJS`) refuses to cross a closed edge (and a diagonal may
+  not squeeze past one). `mapmodel.find_door` matches either orientation. **Authoring** is the 🚪 map-
+  editor brush (edge chosen from the click position); **interaction** is the `door` WS op: DM
+  open/close/lock/unlock/remove anything; a player may only **toggle an unlocked door their token is
+  adjacent to** (`_player_cell` vs the door's two cells), locking being DM-only. `visible_map` withholds
+  doors in unexplored cells.
+- **Alternatives:** Doors as terrain cells (rejected — a cell is not an edge; walls already exist).
+  Auto path-through when a door is open (rejected — path re-runs on move, so an open door simply
+  isn't in `blocked_edges`; no special case needed).
+- **Consequences:** `find_path` gained a parameter; every caller must pass `mapmodel.blocked_edges`.
+  The JS↔Python pathfinder parity (a known P2 soft spot) must keep the door logic in lockstep.
+- **Status:** Accepted.
+
+## D30 — AoE templates are a visual relay, not a resolver
+- **Context:** Casting a fireball needs the area shown to the party, but auto-resolving saves/damage
+  in an area is a much larger (D3-forbidden) step.
+- **Decision:** The DM arms a template (burst/square/line/cone + size + direction), clicks the grid,
+  and `app/room/aoe.py` relays the *parameters* to everyone; each client recomputes the covered cells
+  from the shared client-side `aoeCells()` and paints a ~7s overlay. Nothing is stored or resolved.
+- **Alternatives:** Server computing the cell list (rejected — the geometry is a pure function of the
+  params and the client's grid; recomputing avoids trusting a client-supplied array). Auto-resolving
+  the area (rejected — D3).
+- **Consequences:** DM-only presentation tool; the overlay is transient and cosmetic.
+- **Status:** Accepted.
+
+## D31 — Bestiary is a generic, per-user template store keyed on the NPC block
+- **Context:** Reusing a well-built monster (or sharing a homebrew archetype) beats rebuilding it per
+  room, without importing a copyrighted stat catalog.
+- **Decision:** A `creatures(user_id, name, block, tags)` table where `block` is exactly a
+  `npc.clean_npc` output — one data model for monsters everywhere (library token, spawned token,
+  bestiary entry). REST CRUD (`/api/creatures`, owner-scoped, private) + a sheet "Save to Bestiary"
+  capture. **Spawn reuses `add_token`** from the client, so no new spawn authority surface is needed.
+- **Alternatives:** A global shared monster library (rejected — ownership/privacy; keep it per-user).
+  Seeding a stock catalog (deferred — must be IP-clean; see TODO P3).
+- **Consequences:** Any change to `npc.clean_npc` immediately changes the stored-block shape the
+  bestiary round-trips — keep them in sync (same mirror concern as D24).
+- **Status:** Accepted.
+
+## D32 — Line-of-sight fog was evaluated and gated out (square vision retained)
+- **Context:** The vision model was a Chebyshev radius-6 square that ignored walls (D8). True
+  shadow-casting LOS was requested as the final roadmap item, hard-gated on the existing
+  visibility/fog/hidden-info suites staying green.
+- **Decision:** Originally not shipped. A correct LOS must gate **both** the transient light *and* the
+  persistent `explored` memory, otherwise terrain already revealed through a
+  wall stays visible in `visible_map` and LOS hides nothing that matters. At the time `test_reveal_*`
+  and the fog suite pinned `reveal` to the current square contract.
+- **Alternatives:** LOS for the live view only (rejected — pointless while memory leaks square);
+  rewrite the fog tests to the new model (later accepted as its own Sprint 4 change).
+- **Consequences:** The original square-vision gate is obsolete. Walls and closed doors now gate
+  both live visibility and exploration under D44; the tests were deliberately rewritten to the
+  stricter model.
+- **Status:** Superseded by D44.
+
+## D33 — Game-log visibility is a transport property, not a client filter
+- **Context:** The game log needs secret GM rolls, self-only rolls and blind rolls without
+  leaking their results over the wire.
+- **Decision:** `messages.visibility`, `recipient_user_id` and `meta` are canonical fields.
+  `app/room/gamelog.py` owns both live delivery and `/state` reconstruction. The four modes
+  are `public`, `self`, `blind` and `dm`; blind only sends an acknowledgment to the actor and
+  the result to DMs. A non-DM request for `dm` visibility is normalized to `self`.
+- **Alternatives:** CSS hiding (rejected: full data leak), separate per-recipient message
+  copies (rejected: redundant and hard to reconstruct), client filtering (rejected: violates D3).
+- **Consequences:** Message queries return role-filtered rows. Dice results and roll metadata
+  are deliberately carried together, allowing the UI to retain ADV/DIS and cover context.
+- **Status:** Accepted.
+
+## D34 — HP, death and defenses use one server-side health reducer
+- **Context:** Damage could enter from manual HP edits, traps, potions and NPC attacks, while
+  temp HP, typed damage and death saves were beginning to duplicate transition logic.
+- **Decision:** `app/room/health.py::change_hp` is the single transition path for PCs and NPC
+  blocks. Damage type is an explicit optional field. Defensive reduction runs before temp HP
+  or real HP is consumed; death save nat-20 restores 1 HP and clears dying. Massive damage
+  uses post-defense damage and only fires when damage actually occurs.
+- **Alternatives:** Patching each call site separately (rejected: divergence), encoding
+  vulnerability in dice rolls (rejected: defensive properties belong to the target).
+- **Consequences:** Manual HP remains supported, while typed interactions receive a clear
+  extension point without adding a full effect engine.
+- **Status:** Accepted.
+
+## D35 — Rests separate narrative recovery from condition removal
+- **Context:** D&D 5e long rest restores class/spell resources and does not automatically
+  erase arbitrary conditions. A blanket clear was a table surprise.
+- **Decision:** Short rest is owner-or-DM and is hit-dice based. Long rest is DM-triggered;
+  HP, slots, hit dice and resource state reset, while `conditions` remain untouched unless the
+  message supplies explicit `clear_conditions: true`.
+- **Alternatives:** Auto-clear all conditions (rejected), automatic party-wide short rest
+  (rejected: the party may not actually be resting).
+- **Consequences:** Existing long-rest behavior remains opt-in, and the table retains control
+  over magical/condition effects without inventing auto-resolution.
+- **Status:** Accepted.
+
+## D36 — Encounter and journal data are server-scoped by ownership and room
+- **Context:** Saved encounters and handouts are DM materials that should never leak through
+  the shared room state.
+- **Decision:** `encounters` are owner-scoped global templates. `notes` are room-scoped and
+  carry `dm`, `party` or `selected` visibility plus an explicit recipient ID list. The note
+  endpoint parses recipients server-side instead of using textual SQL matching.
+- **Alternatives:** Storing JSON in `room_state` (rejected: unbounded state blob), client
+  filtering (rejected: violates D3), JSON `LIKE` recipient lookup (rejected: false positives).
+- **Consequences:** Encounter spawn can reuse saved creature blocks and private note reads are
+  safe against malformed `recipients` values.
+- **Status:** Accepted.
+
+## D37 — Map pins, pings and ruler have different trust levels
+- **Context:** Map annotations and communication tools have different state, visibility and
+  abuse characteristics.
+- **Decision:** Pins are sanitized persistent map data with `dm`/`players`/`revealed`
+  visibility. Pings are rate-limited live broadcasts and are deliberately not persisted.
+  The ruler is purely client-side measurement. Server-side visibility and fog filtering own
+  the security boundary for pins.
+- **Alternatives:** Make all ephemeral (rejected: DM planning notes should survive refresh),
+  make all persistent (rejected: pings have no audit value and can spam state), validate ruler
+  server-side (rejected: it is display-only and cannot mutate state).
+- **Consequences:** UI tools can be lightweight without weakening the map information model.
+- **Status:** Accepted.
+
+## D38 — Chat history is separated from game-log delivery at the database boundary
+- **Context:** The `messages` table had become both a game log and chat store. Client-side
+  filtering could separate presentation but could not prevent private data from being sent.
+- **Decision:** Chat and narrative rows are delivered by `app/room/chat.py`; dice/system rows
+  remain in `app/room/gamelog.py`. Message metadata carries `channel`, `visibility` and a
+  JSON `recipient_ids` list. `/state` queries chat and game log separately and applies the
+  viewer's authorization in SQL.
+- **Alternatives:** Use only `meta` (rejected: unqueryable), add `display:none` (rejected: leaks
+  data), create a separate `chat` table (deferred: existing message history and replay code are
+  already built around `messages`).
+- **Consequences:** Replay and live delivery share explicit visibility concepts, and private
+  chat can be tested without changing dice visibility.
+- **Status:** Accepted.
+
+## D39 — Player whispers are not secretly visible to the DM
+- **Context:** Some VTTs make every player whisper DM-visible; others protect player-to-player
+  private communication.
+- **Decision:** A whisper is visible only to its sender and explicit recipients. Player-to-DM
+  messages naturally include the DM. A DM's untargeted `dm` channel message is visible only to
+  DMs. This choice is deliberately documented in the README.
+- **Alternatives:** Make the DM an omniscient listener (rejected for this product: it removes a
+  trust boundary players expect), make all chat visible to everyone (rejected: no whisper).
+- **Consequences:** DM private notes and player whispers need separate handling. The rule must be
+  preserved by any future moderation/audit feature if added.
+- **Status:** Accepted.
+
+## D40 — DM personas and NPC speech are authorized server-side
+- **Context:** Narrative immersion requires speaking as NPCs/personas, but the chat sender is a
+  security and identity boundary.
+- **Decision:** Only DM sockets may set `sender_kind` to `persona` or `npc`. The database always
+  records the real `user_id`. Persona names matching any room member username are rejected. NPC
+  speech requires a target token that belongs to the room, has no owner/character attachment and
+  has a parseable NPC block.
+- **Alternatives:** Let players impersonate anyone (rejected: identity spoofing), hide provenance
+  in `meta` only (rejected: unqueryable), validate only on the client (rejected: D3).
+- **Consequences:** NPCs can be renamed/deleted while old messages retain their display persona;
+  this is preferable to changing chat history or enforcing cascading edits.
+- **Status:** Accepted.
+
+## D41 — Audio is a safe-URL projection, not an embedded content pipeline
+- **Context:** Direct audio, YouTube and Spotify can all improve table atmosphere, but arbitrary
+  URLs, embed HTML and media downloading introduce different security and legal risks.
+- **Decision:** Direct HTTP(S) audio and same-origin `/uploads` paths are allowed. YouTube and
+  Spotify URLs are parsed and their media IDs revalidated; fixed `youtube-nocookie` or
+  Spotify embeds are constructed by the server. No caller-supplied iframe/HTML is rendered and
+  no media is scraped or downloaded. Selective effects are limited to direct audio URLs and
+  receive server-resolved recipients.
+- **Alternatives:** Accept arbitrary iframe embeds (rejected: XSS/CSP), download media (rejected:
+  out of scope and rights risk), allow players to control room ambience (rejected: atmosphere
+  control is DM responsibility).
+- **Consequences:** Player volume/mute are local UX, not authoritative room state. Third-party
+  browsers may still block autoplay, so direct effects are the more reliable selective channel.
+- **Status:** Accepted.
+
+## D42 — `AGENT_GUIDE.md` is a map, not an authoritative specification
+- **Context:** Future agents need a fast architecture map but generated documentation tends to
+  drift and can confidently mislead.
+- **Decision:** Add `AGENT_GUIDE.md` as a deliberately concise repository/feature/file/message/
+  hazard map with an explicit code-wins rule.
+- **Alternatives:** No guide (rejected: repeated discovery cost), generate every fact with line
+  numbers (rejected: brittle and noisy), treat it as an ADR/source of truth (rejected).
+- **Consequences:** Changes to architectural boundaries should update the guide, but implementation
+  inspection remains mandatory before edits.
+- **Status:** Accepted.
+
+## D43 — Token footprint is an `n×n` square anchored at `x/y`
+- **Context:** Large monsters were visually scaled but still occupied only one pathfinding cell, so
+  a Huge creature could stand on the map edge or squeeze through a one-cell corridor.
+- **Decision:** `app/footprint.py` is the footprint SSOT: Tiny/Small/Medium 1×1, Large 2×2, Huge 3×3,
+  Gargantuan 4×4. The existing token `x/y` remains the top-left occupied cell center; footprint
+  extends right/down. A clicked movement destination is the anchor. Spawns and size changes find the
+  nearest valid origin; confirmed moves require a valid final footprint.
+- **Alternatives:** Center-based storage (rejected: it would reinterpret every legacy token),
+  circular templates (rejected: the existing grid and rules use squares), per-client geometry (rejected).
+- **Consequences:** Server pathfinding can enforce Large+ terrain rules, collision and spawning with
+  one representation. Same-owner pass-through is intentionally retained; collision blocks different
+  distinct owners only at final placement.
+- **Status:** Accepted.
+
+## D44 — Deterministic conservative LOS replaces square vision
+- **Context:** Sprint 4 requires walls and closed doors to hide terrain/tokens, including exploration
+  memory, not merely the current view.
+- **Decision:** `app/los.py` casts deterministic integer DDA rays from footprint source cells. Walls
+  and closed-door edges block. A ray through an exact grid corner is allowed only when both relevant
+  orthogonal transitions are open, preventing vision through sealed diagonal corners. The existing
+  radius 6 remains; footprint sources/targets need only one occupied cell to be visible. Live LOS and
+  persistent exploration use the same result.
+- **Alternatives:** Recursive shadowcasting (rejected for now: larger rewrite and floating-point drift),
+  live-view-only LOS (rejected: old memory leaks), optimistic Bresenham (rejected: corner ambiguity).
+- **Consequences:** DM hiding or re-fogging can no longer be undone merely by moving a player token.
+  Visibility and fog are server-authoritative; hidden token payloads remain absent before transmission.
+- **Status:** Accepted. Supersedes the square-vision portions of D8 and the deferral in D32.
+
+## D45 — Manual fog edits room-wide exploration, not live sight
+- **Context:** DMs need explicit reveal/hide tools while a player's current line of sight remains
+  mechanically correct.
+- **Decision:** DM-only `fog_edit` updates `map.explored` for up to 512 cells. Revealed/hid state is
+  broadcast to all players. `visible_map` returns terrain when persistent exploration **or** current
+  LOS visibility is true, so hiding an old memory cell does not corrupt a live view.
+- **Alternatives:** Per-player fog (rejected: current schema has one shared `explored` bitmap),
+  erase current visibility too (rejected: would blind a player standing in plain sight).
+- **Consequences:** Manual reveal is simple and shared across all players; private per-player fog needs
+  a schema change later. Map-editor reset-fog checkbox now has an actual server effect.
+- **Status:** Accepted.
+
+## D46 — Movement state and path previews are server-owned
+- **Context:** The client previously mirrored A*, while walk tasks and traps were server-controlled;
+  large footprints/LOS made duplicated route planning unsafe.
+- **Decision:** Players preview their own token via `path_preview`; the server validates ownership,
+  footprint, walls/doors, collision and current explored/visible cells. Walk tasks emit `move_state`;
+  trap trigger and DM `stop_move` cancel the task and announce a stopped walk. Movement confirmation
+  recomputes the authoritative path independently of the preview.
+- **Alternatives:** Keep client A* as source of truth (rejected), block friendly pass-through at every
+  animation step (rejected: conflicts with chosen pass-through policy), add a resumable move queue
+  (deferred).
+- **Consequences:** Hidden terrain cannot be inferred through preview, path/UI remain synchronized,
+  and traps now interrupt an in-flight walk. Intermediate movement may still overlap same-owner tokens;
+  only final placements are collision-authoritative.
 - **Status:** Accepted.
 
 ## Cross-cutting assumptions (read before scaling)

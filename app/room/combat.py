@@ -2,9 +2,34 @@
 import json
 import random
 
-from .. import db
+from .. import db, npc
+from .. import conditions as C
+from . import death as D, health
 from .dice import dex_mod
 from .net import broadcast, sys_msg
+
+
+def step_conditions(room_id):
+    """Advance timed conditions on every token by one round.
+
+    Returns a list of ``(token_id, new_conds)`` for the tokens that changed, so the
+    caller can stream the updates. Permanent (``rounds == 0``) conditions are kept.
+    """
+    changed = []
+    for tok in db.q("SELECT id, conds FROM tokens WHERE room_id=?", (room_id,)):
+        new, dirty = C.step_rounds(C.load(tok))
+        if dirty:
+            db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(new), tok["id"]))
+            changed.append((tok["id"], new))
+    return changed
+
+
+def token_dex_mod(tok):
+    """DEX modifier for any token: an attached character, else an NPC stat block."""
+    if tok["character_id"]:
+        return dex_mod(tok["character_id"])
+    block = npc.load(tok)
+    return npc.dex_mod(block) if block else 0
 
 
 def get_init(room_id):
@@ -25,7 +50,7 @@ async def handle_init_start(ws, room_id, user, is_dm, msg):
         return
     order = []
     for tok in db.q("SELECT * FROM tokens WHERE room_id=? ORDER BY id", (room_id,)):
-        mod = dex_mod(tok["character_id"])
+        mod = token_dex_mod(tok)
         roll = random.randint(1, 20)
         order.append({"token_id": tok["id"], "label": tok["label"], "color": tok["color"],
                       "mod": mod, "roll": roll, "total": roll + mod})
@@ -58,6 +83,8 @@ async def handle_init_end_round(ws, room_id, user, is_dm, msg):
     init["round"] = int(init.get("round", 1)) + 1
     init["active"] = 0
     set_init(room_id, init)
+    for token_id, conds in step_conditions(room_id):
+        await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
     sys_msg(room_id, f"— Round {init['round']} —")
     await broadcast(room_id, "initiative", init)
 
@@ -75,15 +102,26 @@ async def handle_hp(ws, room_id, user, is_dm, msg):
     if not is_dm:
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
-    if tok is None or tok["character_id"] is None:
+    if tok is None:
         return
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
     try:
-        delta = max(-999, min(999, int(msg.get("delta", 0))))
+        delta = max(-9999, min(9999, int(msg.get("delta", 0))))
     except (TypeError, ValueError):
         return
-    hp = max(0, min(ch["max_hp"], ch["hp"] + delta))
-    db.x("UPDATE characters SET hp=? WHERE id=?", (hp, ch["id"]))
-    verb = "takes" if delta < 0 else "heals"
-    sys_msg(room_id, f"{ch['name']} {verb} {abs(delta)} → {hp}/{ch['max_hp']} HP")
+    dtype = str(msg.get("damage_type", "")).strip().lower() or None
+    res = await health.change_hp(room_id, tok, delta, crit=bool(msg.get("crit")),
+                                 damage_type=dtype, broadcast_change=False)
+    if res is None:
+        return
+    if delta < 0 and res.get("immune"):
+        sys_msg(room_id, f"{res['name']} takes no {dtype or 'damage'} damage.")
+        await broadcast(room_id, "snapshot", None)
+        return
+    if not res.get("changed"):
+        return
+    if delta < 0:
+        verb, amount = "takes", res["damage"]
+    else:
+        verb, amount = "heals", res["healed"]
+    sys_msg(room_id, f"{res['name']} {verb} {amount} → {res['hp']}/{res['max_hp']} HP{res.get('note', '')}")
     await broadcast(room_id, "snapshot", None)

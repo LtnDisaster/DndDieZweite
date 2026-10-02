@@ -55,6 +55,21 @@
             <button id="btn-item-add" class="ghost" type="button">＋ Add item</button>
           </div>
           <div class="weapons">
+            <div class="wlabel">Resources</div>
+            <div id="resource-rows"></div>
+            <button id="btn-resource-add" class="ghost" type="button">＋ Add resource</button>
+          </div>
+          <div class="weapons">
+            <div class="wlabel">Saving Throws <small>(check to make proficient)</small></div>
+            <div class="skills" id="save-rows"></div>
+          </div>
+          <div class="weapons">
+            <div class="wlabel">Damage Defenses</div>
+            <div class="row"><label class="tiny">resist</label><input id="def-res" placeholder="fire, cold"></div>
+            <div class="row"><label class="tiny">vulnerable</label><input id="def-vuln" placeholder="radiant"></div>
+            <div class="row"><label class="tiny">immune</label><input id="def-imm" placeholder="poison"></div>
+          </div>
+          <div class="weapons">
             <div class="wlabel">Skills <small>(click to cycle: – / ✓ prof / ★ expertise)</small></div>
             <div class="skills" id="skill-rows"></div>
           </div>
@@ -104,6 +119,12 @@
     <div class="mapwrap">
       <canvas id="map"></canvas>
       <div id="toast"></div>
+      <div id="narrative-overlay" class="narrative-overlay" aria-live="polite" data-style="overlay">
+        <div class="narrative-box">
+          <div class="narrative-persona"></div>
+          <div class="narrative-text"></div>
+        </div>
+      </div>
       <div id="movehud" class="hidden">
         <span id="mh-text"></span>
         <button id="mh-go" class="primary">Move</button>
@@ -111,17 +132,51 @@
       </div>
     </div>
     <aside class="side">
-      <div class="panel grow">
-        <h2>Chronicle</h2>
+      <div class="panel grow" id="chronicle">
+        <div class="chronicle-head">
+          <h2>Chronicle</h2>
+          <button id="toggle-chronicle" class="ghost" title="Collapse Chronicle">▾</button>
+        </div>
+        <div id="chronicle-body">
+        <div class="row tabs">
+          <button id="tab-chat" class="primary">Chat</button>
+          <button id="tab-log" class="ghost">Game Log</button>
+        </div>
+        <div id="audio-bar" class="audio-bar hidden" title="Room ambience">
+          <span id="audio-title" class="audio-name">No ambience</span>
+          <span id="audio-status" class="audio-state">muted</span>
+          <button id="btn-audio-play" title="Play locally">▶</button>
+          <button id="btn-audio-mute" title="Mute locally">🔇</button>
+          <input id="audio-vol" type="range" min="0" max="1" step="0.05" value="0.7" title="Local volume">
+        </div>
+        <div id="audio-embed" class="hidden"></div>
         <div id="chat" class="chat"></div>
-        <div class="row">
-          <input id="chat-in" placeholder="Message…" maxlength="2000">
+        <div id="log" class="chat hidden"></div>
+        <div class="row chat-controls hidden" id="chat-persona-row">
+          <select id="chat-sender" title="Speak as">
+            <option value="user">Self</option><option value="persona">Persona</option><option value="npc">NPC</option>
+          </select>
+          <input id="chat-persona" placeholder="Persona name" maxlength="64" class="hidden">
+          <select id="chat-npc" class="hidden"></select>
+        </div>
+        <div class="row chat-send-row">
+          <select id="chat-channel" title="Channel">
+            <option value="global">Global</option><option value="dm">DM</option><option value="whisper">Whisper</option>
+          </select>
+          <select id="chat-target" class="hidden"></select>
+          <input id="chat-in" placeholder="Message… (/w Bob hi)" maxlength="4000">
           <button id="btn-chat" class="primary">➤</button>
+        </div>
         </div>
         <div class="row dice">
           <input id="roll-expr" value="1d20" placeholder="2d6+3">
+          <input id="roll-mod" type="number" placeholder="±mod" min="-500" max="500">
           <select id="roll-adv"><option value="">—</option><option value="adv">ADV</option><option value="dis">DIS</option></select>
+          <select id="roll-vis"><option value="public">Public</option><option value="self">Self</option><option value="blind">Blind</option><option class="dm-only" value="dm" style="display:none">DM</option></select>
           <button id="btn-roll" class="primary">Roll</button>
+        </div>
+        <div class="row qdice">
+          <button class="qd" data-expr="1d4">d4</button><button class="qd" data-expr="1d6">d6</button><button class="qd" data-expr="1d8">d8</button><button class="qd" data-expr="1d10">d10</button><button class="qd" data-expr="1d12">d12</button><button class="qd" data-expr="1d20">d20</button><button class="qd" data-expr="1d100">d%</button>
         </div>
         <div class="row dice roll-abil-row">
           <label class="tiny">ability</label>
@@ -138,6 +193,12 @@
         <div class="row sr-toggles">
           <label><input type="checkbox" id="sr-prof"> proficient</label>
           <select id="sr-adv"><option value="">—</option><option value="adv">ADV</option><option value="dis">DIS</option></select>
+          <select id="sr-vis"><option value="public">Public</option><option value="self">Self</option><option value="blind">Blind</option><option class="dm-only" value="dm" style="display:none">DM</option></select>
+        </div>
+        <div class="row sr-toggles">
+          <label class="tiny">target cover</label>
+          <select id="sr-cover"><option value="">none</option><option value="half">half +2</option>
+            <option value="three_quarters">3/4 +5</option><option value="total">total</option></select>
         </div>
         <div class="row sr-toggles">
           <label class="tiny">attack ability</label>
@@ -164,26 +225,114 @@
         <h2>Party</h2>
         <div id="party"></div>
       </div>
+      <div class="panel" id="journal">
+        <h2>Journal</h2>
+        <div class="row"><select id="note-list" class="journal-list" style="max-height:110px"></select>
+          <button id="btn-note-view" class="ghost">View</button></div>
+        <div id="note-panel" class="hidden">
+          <div class="row"><input id="note-title" placeholder="Title" maxlength="120">
+            <select id="note-cat"><option value="notes">notes</option><option value="handout">handout</option>
+              <option value="locations">location</option><option value="npcs">NPC</option><option value="quests">quest</option></select>
+            <select id="note-vis"><option value="dm">DM only</option><option value="party">Party</option><option value="selected">Selected</option></select></div>
+          <div class="row"><input id="note-recips" placeholder="selected user ids: 1,2" maxlength="160"></div>
+          <textarea id="note-body" rows="3" maxlength="8000" placeholder="Body"></textarea>
+          <div class="row dm-only-note">
+            <button id="btn-note-new" class="ghost">New</button><button id="btn-note-save" class="primary">Save note</button>
+            <button id="btn-note-del" style="color:var(--red)">Delete</button>
+          </div>
+        </div>
+      </div>
       <div class="panel hidden" id="sheet">
         <h2 id="sheet-name">Sheet</h2>
         <div id="sheet-body"></div>
         <div class="row hidden" id="hp-btns">
           <button data-hp="-1">−1</button><button data-hp="-5">−5</button><button data-hp="1">+1</button><button data-hp="5">+5</button>
         </div>
+        <div class="row hidden" id="hp-adv">
+          <select id="hp-dtype"><option value="">untyped</option></select>
+          <input id="hp-amount" type="number" placeholder="±HP" style="width:64px">
+          <button id="btn-hp-apply">Apply</button>
+          <label title="Apply critical damage to selected token"><input id="hp-crit" type="checkbox"> crit</label>
+        </div>
       </div>
       <div class="panel hidden" id="dmtools">
         <h2>DM Tools</h2>
         <div class="row">
-          <input id="npc-name" placeholder="NPC name">
+          <input id="npc-name" placeholder="Enemy / NPC name">
           <button id="btn-npc-add">＋ Token</button>
         </div>
+        <div class="row"><small class="meta" style="opacity:.6">Add a token, then click it to edit its
+          ability scores, HP/AC and spells.</small></div>
         <div class="row">
           <input type="file" id="map-file" accept="image/png,image/jpeg">
         </div>
         <div class="row">
           <button id="btn-edit-map">🛠 Edit map</button>
-          <button id="btn-long-rest" title="Restore spell slots + recharge items">🛌 Long rest</button>
+          <button id="btn-long-rest" title="Restore HP, spell slots, hit dice and long-rest resources">🛌 Long rest</button>
+          <label title="Do not clear arbitrary conditions unless checked"><input id="long-rest-conds" type="checkbox"> clear conditions</label>
         </div>
+        <div class="wlabel">Narration & Ambience</div>
+        <div class="row chat-controls">
+          <select id="narr-target" title="Narration target"></select>
+          <select id="narr-style" title="Style">
+            <option value="overlay">Overlay</option><option value="voice">Private voice</option>
+            <option value="normal">Normal</option>
+          </select>
+          <select id="narr-sender" title="Speak as">
+            <option value="user">Self</option><option value="persona">Persona</option><option value="npc">NPC</option>
+          </select>
+          <input id="narr-persona" placeholder="Persona" maxlength="64" class="hidden">
+          <select id="narr-npc" class="hidden"></select>
+        </div>
+        <div class="row"><input id="narr-text" placeholder="Temporary narration or secret event…" maxlength="4000">
+          <select id="secret-sound" title="Optional sound"><option value="">No sound</option></select>
+        </div>
+        <div class="row">
+          <button id="btn-narrate" class="primary">Send narration</button>
+          <button id="btn-secret-event" class="ghost">Secret event</button>
+        </div>
+        <div class="wlabel">Ambience</div>
+        <div class="row">
+          <input id="audio-title-in" placeholder="Title" maxlength="80">
+          <input id="audio-url-in" placeholder="YouTube / Spotify / direct audio URL" maxlength="2048">
+          <select id="audio-cat"><option value="ambience">ambience</option><option value="music">music</option>
+            <option value="sfx">sfx</option></select>
+          <button id="btn-audio-add" class="ghost">＋</button>
+        </div>
+        <div class="row"><button id="btn-ambience-stop" class="ghost">Stop ambience</button></div>
+        <div id="ambience-list" class="journal-list"></div>
+        <div class="wlabel">Soundboard</div>
+        <div class="row">
+          <input id="sound-name" placeholder="Sound name" maxlength="80">
+          <input id="sound-url" placeholder="Direct mp3/ogg URL" maxlength="2048">
+          <button id="btn-sound-add" class="ghost">＋ Save</button>
+        </div>
+        <div id="sound-list" class="journal-list"></div>
+        <div class="row aoe">
+          <button id="btn-aoe" class="ghost" title="Arm, then click the map to place a template">🎯 AoE</button>
+          <button id="btn-ping" class="ghost" title="Arm, then click the map to ping">📣 Ping</button>
+          <button id="btn-ruler" class="ghost" title="Measure distance on the map">📏 Ruler</button>
+          <select id="aoe-shape" title="Shape"><option value="circle">Burst</option><option value="square">Square</option><option value="line">Line</option><option value="cone">Cone</option></select>
+          <input id="aoe-size" type="number" min="0" max="30" value="5" style="width:48px" title="Size (cells)">
+          <select id="aoe-dir" title="Direction"><option value="E">E</option><option value="N">N</option><option value="S">S</option><option value="W">W</option><option value="NE">NE</option><option value="NW">NW</option><option value="SE">SE</option><option value="SW">SW</option></select>
+          <input id="aoe-color" type="color" value="#e74c3c" title="Colour">
+          <button id="btn-stop-move" class="ghost hidden" title="Stop this token's active walk">⏹ Stop</button>
+        </div>
+        <div class="wlabel">Bestiary <small style="opacity:.6">(your saved monster templates)</small></div>
+        <div id="best-list" class="best-list"></div>
+        <div class="row"><small class="meta" style="opacity:.6">Open an NPC token and use “Save to Bestiary”,
+          then Spawn to drop it on the map.</small></div>
+        <div class="wlabel">Encounters</div>
+        <div class="row"><select id="enc-list" class="journal-list" style="max-height:90px"></select>
+          <button id="btn-enc-save" class="ghost">Save</button><button id="btn-enc-del" class="ghost">Del</button>
+          <button id="btn-enc-spawn" class="primary">Spawn</button></div>
+        <div class="row"><input id="enc-name" placeholder="Encounter name" maxlength="80">
+          <input id="enc-notes" placeholder="notes" maxlength="1000"></div>
+        <div class="row"><select id="enc-creature-select"></select>
+          <input id="enc-qty" type="number" min="1" max="50" value="1" style="width:54px">
+          <label class="tiny"><input id="enc-hidden" type="checkbox"> hidden flag</label>
+          <button id="btn-enc-add-row" class="ghost">＋ Add</button></div>
+        <div id="enc-rows" class="journal-list"></div>
         <div id="editor" class="hidden">
           <div class="row brushes">
             <button class="brush" data-b="wall" title="Wall (blocks path)">🧱</button>
@@ -191,12 +340,27 @@
             <button class="brush" data-b="rough" title="Difficult terrain (2× walk)">🌿</button>
             <button class="brush" data-b="trap" title="Hidden trap">⚠️</button>
             <button class="brush" data-b="loot" title="Hidden loot">🎁</button>
+            <button class="brush" data-b="door" title="Door: click a cell edge">🚪</button>
+            <button class="brush" data-b="doorrm" title="Remove a door">🚫</button>
+            <button class="brush" data-b="pin" title="Place map pin">📍</button>
+            <button class="brush" data-b="pinrm" title="Remove map pin">📌✕</button>
             <button class="brush" data-b="erase" title="Erase cell">🧹</button>
+            <button class="brush" data-b="reveal" title="Reveal explored fog">👁</button>
+            <button class="brush" data-b="refog" title="Hide explored fog">🌫</button>
           </div>
           <div class="row trapfields hidden" id="trap-fields">
             <input id="trap-label" placeholder="Trap label" maxlength="80" value="Poison Needle">
             <input id="trap-dc" type="number" min="1" max="30" value="13" title="Save DC (DEX)" style="width:52px">
             <input id="trap-dmg" placeholder="dmg" maxlength="16" value="2d6" title="Damage dice" style="width:58px">
+          </div>
+          <div class="row trapfields hidden" id="pin-fields">
+            <input id="pin-title" placeholder="Pin title" maxlength="80">
+            <input id="pin-desc" placeholder="description" maxlength="1000">
+            <select id="pin-vis"><option value="dm">DM only</option><option value="players">Players</option><option value="revealed">When revealed</option></select>
+            <input id="pin-color" type="color" value="#f1c40f">
+          </div>
+          <div class="row trapfields hidden" id="door-fields">
+            <label><input id="door-locked" type="checkbox"> start locked</label>
           </div>
           <div class="row lootfields hidden" id="loot-fields">
             <input id="loot-label" placeholder="Loot (e.g. 25 gp and a silver ring)" maxlength="80">

@@ -76,6 +76,11 @@ function openCharForm(c){
   renderItemRows();
   state.skillMap = Object.assign({}, c && c.skills ? c.skills : {});
   renderSkillRows();
+  state.saveMap = Object.assign({}, c && c.saves ? c.saves : {});
+  renderSaveRows();
+  renderDefenses(c && c.defenses);
+  state.resourceRows = (c && Array.isArray(c.resources) ? c.resources : []).map(r => ({...r}));
+  renderResourceRows();
   state.spellRows = (c && Array.isArray(c.spells) ? c.spells : []).map(s => ({...s}));
   renderSpellRows();
   state.slotMap = {};
@@ -165,6 +170,51 @@ function renderSkillRows(){
     box.appendChild(row);
   }
 }
+function renderResourceRows(){
+  const box = $("resource-rows"); if (!box) return;
+  box.innerHTML = "";
+  (state.resourceRows || []).forEach((r, idx) => {
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = `<input class="res-name" placeholder="Resource name" value="${esc(r.name||"")}" maxlength="40">
+      <input class="res-cur" type="number" min="0" value="${r.current||0}" style="width:48px">/
+      <input class="res-max" type="number" min="1" max="99" value="${r.max||1}" style="width:48px">
+      <select class="res-reset"><option value="manual" ${r.reset==="manual"?"selected":""}>manual</option><option value="short" ${r.reset==="short"?"selected":""}>short rest</option><option value="long" ${r.reset==="long"?"selected":""}>long rest</option></select>
+      <button type="button" class="res-del" title="Remove">✕</button>`;
+    row.querySelector(".res-name").oninput = e => r.name = e.target.value;
+    row.querySelector(".res-cur").oninput = e => r.current = +e.target.value || 0;
+    row.querySelector(".res-max").oninput = e => r.max = Math.max(1, +e.target.value || 1);
+    row.querySelector(".res-reset").onchange = e => r.reset = e.target.value;
+    row.querySelector(".res-del").onclick = () => { state.resourceRows.splice(idx,1); renderResourceRows(); };
+    box.appendChild(row);
+  });
+}
+const _defList = v => (Array.isArray(v) ? v : []).filter(x => DMG_TYPES.includes(x)).slice(0, 12);
+const _defParse = s => _defList(String(s||"").split(/[,;]+/).map(x => x.trim().toLowerCase()));
+
+function renderDefenses(d){
+  state.defenses = { resist:_defList(d&&d.resist), vulnerable:_defList(d&&d.vulnerable), immune:_defList(d&&d.immune) };
+  const set = (id, arr) => { const el = $(id); if (el) el.value = arr.join(", "); };
+  set("def-res", state.defenses.resist); set("def-vuln", state.defenses.vulnerable); set("def-imm", state.defenses.immune);
+}
+
+function renderSaveRows(){
+  const box = $("save-rows"); if (!box) return;
+  box.innerHTML = "";
+  const lvl = +$("ch-level").value || 1;
+  state.saveMap = state.saveMap || {};
+  for (const [k, label] of STATS){
+    const on = !!state.saveMap[k];
+    const bonus = _smod(($("st-"+k) && $("st-"+k).value)) + (on ? _pb(lvl) : 0);
+    const row = document.createElement("label"); row.className = "skillrow";
+    row.innerHTML = `<input type="checkbox" ${on ? "checked" : ""}> <span class="sk-name">${label} <small>${k.toUpperCase()}</small></span>
+      <span class="sk-bonus">${bonus>=0?"+":""}${bonus}</span>`;
+    row.querySelector("input").onchange = e => {
+      if (e.target.checked) state.saveMap[k] = true; else delete state.saveMap[k];
+      renderSaveRows();
+    };
+    box.appendChild(row);
+  }
+}
 function renderSpellRows(){
   const box = $("spell-rows"); if (!box) return;
   box.innerHTML = "";
@@ -230,6 +280,11 @@ function charPayload(){
     ac:+$("ch-ac").value || 10, speed:+$("ch-speed").value || 30, notes:$("ch-notes").value,
     weapons:(state.weaponRows||[]).filter(w => w.name && w.name.trim()), items,
     skills: state.skillMap || {},
+    saves: state.saveMap || {},
+    defenses: { resist:_defParse($("def-res") && $("def-res").value),
+                vulnerable:_defParse($("def-vuln") && $("def-vuln").value),
+                immune:_defParse($("def-imm") && $("def-imm").value) },
+    resources: (state.resourceRows||[]).filter(r => r.name && r.name.trim()),
     spells: (state.spellRows||[]).filter(s => s.name && s.name.trim()),
     spell_slots: slots };
   p.hp = Math.min(p.hp, p.max_hp);

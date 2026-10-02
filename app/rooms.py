@@ -6,7 +6,12 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import db, gear, mapmodel, ratelimit, ws
+from . import db, footprint, gear, los, mapmodel, ratelimit, ws
+from . import conditions as C
+from . import npc
+from .room import audio, chat
+from .room import death as D
+from .room import gamelog
 from .auth import COOKIE, cookie_secure, hash_pw, make_token, require_user, room_of, verify_pw
 
 router = APIRouter(prefix="/api")
@@ -36,6 +41,30 @@ class CharIn(BaseModel):
     skills: dict = {}
     spells: list = []
     spell_slots: dict = {}
+    saves: dict = {}
+    defenses: dict = {}
+    resources: list = []
+    hit_die: int = 8
+
+
+class EncounterEntryIn(BaseModel):
+    creature_id: int
+    quantity: int = Field(1, ge=1, le=50)
+    hidden: bool = False
+
+
+class EncounterIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    notes: str = ""
+    entries: list = []
+
+
+class NoteIn(BaseModel):
+    category: str = "notes"
+    title: str = Field(min_length=1, max_length=120)
+    body: str = ""
+    visibility: str = "dm"
+    recipients: list = []
 
 
 ABILITIES = ("str", "dex", "con", "int", "wis", "cha")
@@ -76,11 +105,26 @@ def _char_row(r, mask_items=False):
     r["skills"] = gear.clean_skills(db.j(r.get("skills"), {}))
     r["spells"] = gear.clean_spells(db.j(r.get("spells"), []))
     r["spell_slots"] = gear.clean_slots(db.j(r.get("spell_slots"), {}))
+    r["saves"] = gear.clean_saves(db.j(r.get("saves"), {}))
+    r["defenses"] = gear.clean_defenses(db.j(r.get("defenses"), {}))
+    r["resources"] = gear.clean_resources(db.j(r.get("resources"), []))
+    r["temp_hp"] = max(0, min(999, int(r.get("temp_hp") or 0)))
+    r["inspiration"] = 1 if r.get("inspiration") else 0
+    r["exhaustion"] = max(0, min(6, int(r.get("exhaustion") or 0)))
+    r["hit_die"] = gear.clean_hit_die(r.get("hit_die", 8))
+    r["hit_dice_max"] = gear.hit_dice_max(r)
+    r["hit_dice_spent"] = max(0, min(gear.hit_dice_max(r), int(r.get("hit_dice_spent") or 0)))
     r["has_spellbook"] = gear.has_spellbook(r["items"])
     r["ac_total"] = gear.compute_ac(r)
     if mask_items:
         r["items"] = gear.mask_items(r["items"], True)
     return r
+
+
+class SoundIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=2048)
+    category: str = "sfx"
 
 
 class JoinIn(BaseModel):
@@ -93,6 +137,24 @@ class RoomIn(BaseModel):
 
 class AssignIn(BaseModel):
     character_id: int
+
+
+class CreatureIn(BaseModel):
+    name: str = Field(min_length=1, max_length=32)
+    level: int = 1
+    stats: dict = {}
+    hp: int = 10
+    max_hp: int = 10
+    ac: int = 10
+    speed: int = 30
+    attacks: list = []
+    spells: list = []
+    spell_slots: dict = {}
+    saves: dict = {}
+    defenses: dict = {}
+    size: str = "Medium"
+    disposition: str = ""
+    tags: str = Field(default="", max_length=120)
 
 
 COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f1c40f", "#9b59b6", "#e67e22", "#1abc9c", "#fd79a8"]
@@ -150,13 +212,15 @@ def list_chars(user=Depends(require_user)):
 @router.post("/characters")
 def create_char(ch: CharIn, user=Depends(require_user)):
     cid = db.x(
-        "INSERT INTO characters (user_id,name,race,char_class,level,stats,hp,max_hp,ac,speed,notes,weapons,items,skills,spells,spell_slots) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO characters (user_id,name,race,char_class,level,stats,hp,max_hp,ac,speed,notes,weapons,items,skills,spells,spell_slots,saves,resources,defenses,hit_die) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (user["id"], ch.name, ch.race, ch.char_class, ch.level,
          db.json_dumps(ch.stats), ch.hp, ch.max_hp, ch.ac, ch.speed, ch.notes,
          db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(gear.clean_items(ch.items)),
          db.json_dumps(gear.clean_skills(ch.skills)), db.json_dumps(gear.clean_spells(ch.spells)),
-         db.json_dumps(gear.clean_slots(ch.spell_slots))))
+         db.json_dumps(gear.clean_slots(ch.spell_slots)),
+         db.json_dumps(gear.clean_saves(ch.saves)), db.json_dumps(gear.clean_resources(ch.resources)),
+         db.json_dumps(gear.clean_defenses(ch.defenses)), gear.clean_hit_die(ch.hit_die)))
     return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)))
 
 
@@ -164,12 +228,15 @@ def create_char(ch: CharIn, user=Depends(require_user)):
 def update_char(cid: int, ch: CharIn, user=Depends(require_user)):
     _load_char(cid, user["id"])
     db.x(
-        "UPDATE characters SET name=?,race=?,char_class=?,level=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,weapons=?,items=?,skills=?,spells=?,spell_slots=? WHERE id=?",
+        "UPDATE characters SET name=?,race=?,char_class=?,level=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,"
+        "weapons=?,items=?,skills=?,spells=?,spell_slots=?,saves=?,defenses=?,resources=?,hit_die=? WHERE id=?",
         (ch.name, ch.race, ch.char_class, ch.level, db.json_dumps(ch.stats),
          ch.hp, ch.max_hp, ch.ac, ch.speed, ch.notes,
          db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(gear.clean_items(ch.items)),
          db.json_dumps(gear.clean_skills(ch.skills)), db.json_dumps(gear.clean_spells(ch.spells)),
-         db.json_dumps(gear.clean_slots(ch.spell_slots)), cid))
+         db.json_dumps(gear.clean_slots(ch.spell_slots)),
+         db.json_dumps(gear.clean_saves(ch.saves)), db.json_dumps(gear.clean_defenses(ch.defenses)),
+         db.json_dumps(gear.clean_resources(ch.resources)), gear.clean_hit_die(ch.hit_die), cid))
     return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)))
 
 
@@ -179,6 +246,222 @@ def delete_char(cid: int, user=Depends(require_user)):
     with db.tx() as c:
         c.execute("UPDATE tokens SET character_id=NULL WHERE character_id=?", (cid,))
         c.execute("DELETE FROM characters WHERE id=?", (cid,))
+    return {"ok": True}
+
+
+# ---------- bestiary (generic monster templates owned by a user) ----------
+
+def _creature_block(cr: "CreatureIn"):
+    block = npc.clean_npc({"name": cr.name, "level": cr.level, "stats": cr.stats,
+                           "hp": cr.hp, "max_hp": cr.max_hp, "ac": cr.ac, "speed": cr.speed,
+                           "attacks": cr.attacks, "spells": cr.spells, "spell_slots": cr.spell_slots,
+                           "saves": cr.saves, "defenses": cr.defenses,
+                           "size": cr.size, "disposition": cr.disposition})
+    block["name"] = cr.name
+    return block
+
+
+def _creature_row(r):
+    if not r:
+        return r
+    r = dict(r)
+    r["block"] = db.j(r.get("block"), {})
+    return r
+
+
+def _load_creature(cid: int, user_id: int):
+    cr = db.q1("SELECT * FROM creatures WHERE id=? AND user_id=?", (cid, user_id))
+    if cr is None:
+        raise HTTPException(404, "Creature not found")
+    return cr
+
+
+@router.get("/creatures")
+def list_creatures(user=Depends(require_user)):
+    return [_creature_row(r) for r in db.q(
+        "SELECT * FROM creatures WHERE user_id=? ORDER BY name", (user["id"],))]
+
+
+@router.post("/creatures")
+def create_creature(cr: CreatureIn, user=Depends(require_user)):
+    cid = db.x("INSERT INTO creatures (user_id,name,block,tags) VALUES (?,?,?,?)",
+               (user["id"], cr.name, db.json_dumps(_creature_block(cr)), cr.tags))
+    return _creature_row(db.q1("SELECT * FROM creatures WHERE id=?", (cid,)))
+
+
+@router.put("/creatures/{cid}")
+def update_creature(cid: int, cr: CreatureIn, user=Depends(require_user)):
+    _load_creature(cid, user["id"])
+    db.x("UPDATE creatures SET name=?, block=?, tags=? WHERE id=?",
+         (cr.name, db.json_dumps(_creature_block(cr)), cr.tags, cid))
+    return _creature_row(db.q1("SELECT * FROM creatures WHERE id=?", (cid,)))
+
+
+@router.delete("/creatures/{cid}")
+def delete_creature(cid: int, user=Depends(require_user)):
+    _load_creature(cid, user["id"])
+    db.x("DELETE FROM creatures WHERE id=?", (cid,))
+    return {"ok": True}
+
+
+def _clean_enc_entries(user_id, entries):
+    out = []
+    for e in entries[:50] if isinstance(entries, list) else []:
+        if not isinstance(e, dict):
+            continue
+        try:
+            cid = int(e.get("creature_id", -1))
+            qty = max(1, min(50, int(e.get("quantity", 1))))
+        except (TypeError, ValueError):
+            continue
+        cr = db.q1("SELECT id,name FROM creatures WHERE id=? AND user_id=?", (cid, user_id))
+        if cr is None:
+            raise HTTPException(400, "Encounter creature not found")
+        out.append({"creature_id": cid, "name": cr["name"], "quantity": qty,
+                    "hidden": bool(e.get("hidden"))})
+    return out
+
+
+def _enc_row(r, user_id):
+    r = dict(r)
+    r["entries"] = _clean_enc_entries(user_id, db.j(r.get("entries"), []))
+    return r
+
+
+@router.get("/encounters")
+def list_encounters(user=Depends(require_user)):
+    return [_enc_row(r, user["id"]) for r in db.q(
+        "SELECT * FROM encounters WHERE user_id=? ORDER BY name", (user["id"],))]
+
+
+@router.get("/encounters/{eid}")
+def get_encounter(eid: int, user=Depends(require_user)):
+    r = db.q1("SELECT * FROM encounters WHERE id=? AND user_id=?", (eid, user["id"]))
+    if r is None:
+        raise HTTPException(404, "Not found")
+    return _enc_row(r, user["id"])
+
+
+@router.post("/encounters")
+def create_encounter(enc: EncounterIn, user=Depends(require_user)):
+    entries = _clean_enc_entries(user["id"], enc.entries)
+    rid = db.x("INSERT INTO encounters (user_id,name,notes,entries) VALUES (?,?,?,?)",
+               (user["id"], enc.name, enc.notes, db.json_dumps(entries)))
+    return _enc_row(db.q1("SELECT * FROM encounters WHERE id=?", (rid,)), user["id"])
+
+
+@router.put("/encounters/{eid}")
+def update_encounter(eid: int, enc: EncounterIn, user=Depends(require_user)):
+    if db.q1("SELECT id FROM encounters WHERE id=? AND user_id=?", (eid, user["id"])) is None:
+        raise HTTPException(404, "Not found")
+    entries = _clean_enc_entries(user["id"], enc.entries)
+    db.x("UPDATE encounters SET name=?, notes=?, entries=? WHERE id=?",
+         (enc.name, enc.notes, db.json_dumps(entries), eid))
+    return _enc_row(db.q1("SELECT * FROM encounters WHERE id=?", (eid,)), user["id"])
+
+
+@router.delete("/encounters/{eid}")
+def delete_encounter(eid: int, user=Depends(require_user)):
+    if db.q1("SELECT id FROM encounters WHERE id=? AND user_id=?", (eid, user["id"])) is None:
+        raise HTTPException(404, "Not found")
+    db.x("DELETE FROM encounters WHERE id=?", (eid,))
+    return {"ok": True}
+
+
+# ---------- room-scoped journal / handouts ----------
+
+def _clean_note_body(body: "NoteIn"):
+    cat = str(body.category or "notes").lower()
+    if cat not in ("notes", "locations", "npcs", "quests", "handouts"):
+        cat = "notes"
+    vis = str(body.visibility or "dm").lower()
+    if vis not in ("dm", "party", "selected"):
+        vis = "dm"
+    recipients = []
+    for uid in (body.recipients or [])[:100]:
+        try:
+            recipients.append(int(uid))
+        except (TypeError, ValueError):
+            pass
+    return cat, vis, recipients
+
+
+def _note_row(n):
+    n = dict(n)
+    n["recipients"] = db.j(n.get("recipients"), [])
+    return n
+
+
+def _room_dm(request: Request, code: str):
+    user, room = room_of(request, code)
+    if room["_role"] != "dm":
+        raise HTTPException(403, "DM only")
+    return user, room
+
+
+@router.get("/rooms/{code}/notes")
+def list_notes(code: str, request: Request):
+    user, room = room_of(request, code)
+    is_dm = room["_role"] == "dm"
+    rows = db.q("SELECT * FROM notes WHERE room_id=? ORDER BY title", (room["id"],))
+    out = []
+    for r in rows:
+        n = _note_row(r)
+        if is_dm:
+            out.append(n)
+        elif n["visibility"] == "party" or (n["visibility"] == "selected" and user["id"] in (n["recipients"] or [])):
+            out.append(n)
+    return out
+
+
+@router.post("/rooms/{code}/notes")
+def create_note(code: str, body: NoteIn, request: Request):
+    user, room = _room_dm(request, code)
+    cat, vis, recips = _clean_note_body(body)
+    nid = db.x("INSERT INTO notes (room_id,user_id,category,title,body,visibility,recipients) "
+               "VALUES (?,?,?,?,?,?,?)",
+               (room["id"], user["id"], cat, body.title, body.body, vis, db.json_dumps(recips)))
+    return _note_row(db.q1("SELECT * FROM notes WHERE id=?", (nid,)))
+
+
+@router.put("/rooms/{code}/notes/{nid}")
+def update_note(code: str, nid: int, body: NoteIn, request: Request):
+    _, room = _room_dm(request, code)
+    n = db.q1("SELECT id FROM notes WHERE id=? AND room_id=?", (nid, room["id"]))
+    if n is None:
+        raise HTTPException(404, "Not found")
+    cat, vis, recips = _clean_note_body(body)
+    db.x("UPDATE notes SET category=?, title=?, body=?, visibility=?, recipients=?, updated_at=datetime('now') "
+         "WHERE id=?", (cat, body.title, body.body, vis, db.json_dumps(recips), nid))
+    return _note_row(db.q1("SELECT * FROM notes WHERE id=?", (nid,)))
+
+
+@router.delete("/rooms/{code}/notes/{nid}")
+def delete_note(code: str, nid: int, request: Request):
+    _, room = _room_dm(request, code)
+    if db.q1("SELECT id FROM notes WHERE id=? AND room_id=?", (nid, room["id"])) is None:
+        raise HTTPException(404, "Not found")
+    db.x("DELETE FROM notes WHERE id=?", (nid,))
+    return {"ok": True}
+
+
+@router.get("/sounds")
+def list_sounds(user=Depends(require_user)):
+    return audio.list_sounds(user["id"])
+
+
+@router.post("/sounds")
+def add_sound(body: SoundIn, user=Depends(require_user)):
+    row = audio.create_sound(user["id"], body.name, body.url, body.category)
+    if row is None:
+        raise HTTPException(400, "Name and a safe direct audio URL are required")
+    return row
+
+
+@router.delete("/sounds/{sid}")
+def remove_sound(sid: int, user=Depends(require_user)):
+    if not audio.delete_sound(user["id"], sid):
+        raise HTTPException(404, "Not found")
     return {"ok": True}
 
 
@@ -232,30 +515,43 @@ def room_state(code: str, request: Request):
         if m["char"] and masked:
             m["char"]["notes"] = ""
     tokens_all = db.q("SELECT * FROM tokens WHERE room_id=? ORDER BY id", (room["id"],))
-    st = db.q1("SELECT initiative, map_json FROM room_state WHERE room_id=?", (room["id"],)) or {}
+    st = db.q1("SELECT initiative, map_json, audio_json FROM room_state WHERE room_id=?", (room["id"],)) or {}
     mp = mapmodel.load(st.get("map_json"))
-    owned = [(max(0, min(mp["w"] - 1, int(t["x"] // mp["cell"]))),
-              max(0, min(mp["h"] - 1, int(t["y"] // mp["cell"]))))
-             for t in db.q("SELECT x, y FROM tokens WHERE room_id=? AND owner_user_id=?",
-                           (room["id"], user["id"]))]
+    visible = set()
     if room["_role"] == "dm":
         tokens, ghosts = tokens_all, []
+        for t in tokens:                                   # DM sees full stat blocks
+            t["npc"] = db.j(t.get("npc"), None) or None
     else:
-        seen = ws.build_seen(owned)
-        tokens = [t for t in tokens_all
-                  if t["owner_user_id"] == user["id"] or ws.token_cell(t, mp) in seen]
+        visible = ws.viewer_visible_cells(room["id"], user["id"], mp)
+        def _visible_token(t):
+            if t["owner_user_id"] == user["id"]:
+                return True
+            origin, side = footprint.occupied_origin(mp, t)
+            return any((y * mp["w"] + x) in visible for (x, y) in footprint.origin_cells(mp["w"], mp["h"], origin, side))
+        tokens = [t for t in tokens_all if _visible_token(t)]
+        for t in tokens:                                   # NPC stat blocks are DM-only
+            t["npc"] = None
+            if t.get("character_id") is None and t.get("owner_user_id") is None:
+                t.pop("disposition", None)
+                t.pop("size", None)
         last = ws._last_seen.get(room["id"], {}).get(user["id"], {})
         vis_ids = {t["id"] for t in tokens}
         ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]
-    msgs = db.q(
-        "SELECT ms.id, u.username, ms.type, ms.body, ms.created_at FROM messages ms "
-        "LEFT JOIN users u ON u.id=ms.user_id WHERE ms.room_id=? ORDER BY ms.id DESC LIMIT 100",
-        (room["id"],))[::-1]
+    for t in tokens:                                   # conditions/death ride with visible tokens
+        t["conds"] = C.load(t)
+        t["death"] = D.load(t)
+    msgs = gamelog.filter_messages_for_viewer(room["id"], user["id"], room["_role"] == "dm", 100)[::-1]
+    for m in msgs:
+        m["meta"] = db.j(m.get("meta"), {})
+    chat_msgs = chat.chat_history_for_viewer(room["id"], user["id"], room["_role"] == "dm", 200)
     return {
         "code": room["code"], "name": room["name"], "map": room["map_image"],
         "role": room["_role"], "me": user["id"],
         "members": members, "tokens": tokens, "ghosts": ghosts, "messages": msgs,
-        "grid": mapmodel.visible_map(mp, user["id"], room["_role"] == "dm", owned),
+        "chat": chat_msgs,
+        "audio": audio.load_state(st.get("audio_json")),
+        "grid": mapmodel.visible_map(mp, user["id"], room["_role"] == "dm", visible),
         "initiative": db.j(st.get("initiative"), {"combat": False, "order": [], "active": -1}),
         "characters": [_char_row(c) for c in db.q("SELECT * FROM characters WHERE user_id=?", (user["id"],))],
     }
@@ -282,9 +578,23 @@ def assign_char(code: str, body: AssignIn, request: Request):
             px, py = 400, 300
         strow = c.execute("SELECT map_json FROM room_state WHERE room_id=?", (room["id"],)).fetchone()
         mp = mapmodel.load(strow["map_json"] if strow else "")
-        cx = max(0, min(mp["w"] - 1, int(px // mp["cell"])))
-        cy = max(0, min(mp["h"] - 1, int(py // mp["cell"])))
-        if mapmodel.reveal(mp, cx, cy):
+        size = tok["size"] if tok else "Medium"
+        desired = footprint.origin_from_pixel(px, py, mp["cell"], mp["w"], mp["h"])
+        candidate = {"id": tok["id"] if tok else -1, "owner_user_id": user["id"],
+                     "size": size, "x": px, "y": py}
+        existing = [dict(r) for r in c.execute(
+            "SELECT id, x, y, owner_user_id, size FROM tokens WHERE room_id=?",
+            (room["id"],)).fetchall()]
+        origin = footprint.find_valid_origin(mp, candidate, desired, existing) or desired
+        px, py = footprint.origin_pixels(origin, footprint.side_for_size(size), mp["cell"])
+        if (tok and (px != tok["x"] or py != tok["y"])) or not tok:
+            c.execute("UPDATE tokens SET x=?, y=? WHERE room_id=? AND owner_user_id=?",
+                      (px, py, room["id"], user["id"]))
+        tok_for_reveal = {"id": tok["id"] if tok else -1, "x": px, "y": py,
+                          "owner_user_id": user["id"], "size": size}
+        source = footprint.player_source_cells(mp, [tok_for_reveal])
+        visible_indices = los.visible_cells(mp, source)
+        if mapmodel.reveal_cells(mp, visible_indices):
             c.execute("UPDATE room_state SET map_json=? WHERE room_id=?", (db.json_dumps(mp), room["id"]))
             revealed = True
     if revealed:

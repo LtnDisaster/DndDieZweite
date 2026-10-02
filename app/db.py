@@ -34,7 +34,23 @@ CREATE TABLE IF NOT EXISTS characters (
     items TEXT DEFAULT '[]',
     skills TEXT DEFAULT '{}',
     spells TEXT DEFAULT '[]',
-    spell_slots TEXT DEFAULT '{}'
+    spell_slots TEXT DEFAULT '{}',
+    saves TEXT DEFAULT '{}',
+    temp_hp INTEGER DEFAULT 0,
+    inspiration INTEGER DEFAULT 0,
+    exhaustion INTEGER DEFAULT 0,
+    hit_die INTEGER DEFAULT 8,
+    hit_dice_spent INTEGER DEFAULT 0,
+    resources TEXT DEFAULT '[]',
+    defenses TEXT DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS creatures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    block TEXT DEFAULT '{}',
+    tags TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS rooms (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,7 +76,12 @@ CREATE TABLE IF NOT EXISTS tokens (
     label TEXT NOT NULL,
     color TEXT DEFAULT '#888',
     x REAL DEFAULT 100,
-    y REAL DEFAULT 100
+    y REAL DEFAULT 100,
+    npc TEXT DEFAULT '',
+    conds TEXT DEFAULT '[]',
+    death TEXT,
+    disposition TEXT DEFAULT '',
+    size TEXT DEFAULT 'Medium'
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,12 +89,52 @@ CREATE TABLE IF NOT EXISTS messages (
     user_id INTEGER REFERENCES users(id),
     type TEXT NOT NULL DEFAULT 'chat',
     body TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    visibility TEXT NOT NULL DEFAULT 'public',
+    recipient_user_id INTEGER REFERENCES users(id),
+    meta TEXT DEFAULT '{}',
+    channel TEXT DEFAULT '',
+    recipient_ids TEXT DEFAULT '[]',
+    persona TEXT DEFAULT '',
+    sender_kind TEXT DEFAULT 'user',
+    npc_token_id INTEGER,
+    style TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS room_state (
     room_id INTEGER PRIMARY KEY REFERENCES rooms(id),
     initiative TEXT DEFAULT '{"combat": false, "order": [], "active": -1, "round": 0}',
-    map_json TEXT DEFAULT ''
+    map_json TEXT DEFAULT '',
+    audio_json TEXT DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS soundboard (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    category TEXT DEFAULT 'sfx',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_messages_room_type_created
+    ON messages (room_id, type, created_at);
+CREATE TABLE IF NOT EXISTS encounters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    notes TEXT DEFAULT '',
+    entries TEXT DEFAULT '[]',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id INTEGER NOT NULL REFERENCES rooms(id),
+    user_id INTEGER REFERENCES users(id),
+    category TEXT DEFAULT 'notes',
+    title TEXT NOT NULL,
+    body TEXT DEFAULT '',
+    visibility TEXT NOT NULL DEFAULT 'dm',
+    recipients TEXT DEFAULT '[]',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
 );
 """
 
@@ -127,6 +188,31 @@ def init_db():
     migrate("characters", "skills", "skills TEXT DEFAULT '{}'")
     migrate("characters", "spells", "spells TEXT DEFAULT '[]'")
     migrate("characters", "spell_slots", "spell_slots TEXT DEFAULT '{}'")
+    migrate("tokens", "npc", "npc TEXT DEFAULT ''")
+    migrate("tokens", "conds", "conds TEXT DEFAULT '[]'")
+    migrate("tokens", "death", "death TEXT")
+    migrate("tokens", "disposition", "disposition TEXT DEFAULT ''")
+    migrate("tokens", "size", "size TEXT DEFAULT 'Medium'")
+    migrate("messages", "visibility", "visibility TEXT NOT NULL DEFAULT 'public'")
+    migrate("messages", "recipient_user_id", "recipient_user_id INTEGER REFERENCES users(id)")
+    migrate("messages", "meta", "meta TEXT DEFAULT '{}'")
+    migrate("characters", "saves", "saves TEXT DEFAULT '{}'")
+    migrate("characters", "temp_hp", "temp_hp INTEGER DEFAULT 0")
+    migrate("characters", "inspiration", "inspiration INTEGER DEFAULT 0")
+    migrate("characters", "exhaustion", "exhaustion INTEGER DEFAULT 0")
+    migrate("characters", "hit_die", "hit_die INTEGER DEFAULT 8")
+    migrate("characters", "hit_dice_spent", "hit_dice_spent INTEGER DEFAULT 0")
+    migrate("characters", "resources", "resources TEXT DEFAULT '[]'")
+    migrate("characters", "defenses", "defenses TEXT DEFAULT '{}'")
+    migrate("messages", "channel", "channel TEXT DEFAULT ''")
+    migrate("messages", "recipient_ids", "recipient_ids TEXT DEFAULT '[]'")
+    migrate("messages", "persona", "persona TEXT DEFAULT ''")
+    migrate("messages", "sender_kind", "sender_kind TEXT DEFAULT 'user'")
+    migrate("messages", "npc_token_id", "npc_token_id INTEGER")
+    migrate("messages", "style", "style TEXT DEFAULT ''")
+    migrate("room_state", "audio_json", "audio_json TEXT DEFAULT '{}'")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_type_created "
+              "ON messages (room_id, type, created_at)")
     c.commit()
 
 
