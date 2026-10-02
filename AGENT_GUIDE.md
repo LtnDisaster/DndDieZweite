@@ -39,7 +39,8 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   3. `app/static/js/30_room.js` — room rendering and most UI state.
   4. `app/static/js/40_ws.js` — WebSocket connection and event dispatch.
   5. `app/static/js/50_canvas.js` — canvas map, tokens, fog, pins, movement.
-  6. `app/static/js/60_main.js` — DOM wiring and boot.
+  6. `app/static/js/55_diorama.js` — client-local isometric diorama renderer.
+  7. `app/static/js/60_main.js` — DOM wiring and boot.
 - Single mutable global `state` object in `10_core.js`.
 - DOM rendering is imperative `innerHTML`/`createElement` code.
 
@@ -61,6 +62,12 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/footprint.py` | Token size and collision footprint | `FOOTPRINT`, `occupied_origin()`, `valid_final_position()`, `find_valid_origin()` |
 | `app/los.py` | Wall/door line of sight | `line_of_sight()`, `visible_cells()` |
 | `app/mapmodel.py` | Map schema, fog, doors, traps, loot, pins | `sanitize()`, `visible_map()`, `blocked_edges()`, `reveal_cells()` |
+| `app/quests.py` | Quest Log game operations (persistent, filtered) | `create_quest()`, `set_objective()`, `complete_quest()`, `visible_for()` |
+| `app/progression.py` | Multiclass-ready class model | `clean_class_levels()`, `total_character_level()`, `set_class_levels()` |
+| `app/events.py` | Plain-dict game-event facts + listener seam (D52) | `make()`, `emit()`, `subscribe()`, `recent` |
+| `app/effects.py` | Generic ability/effect geometry (D54) | `effect_cells()` |
+| `app/room/quests.py` | Quest WS transport (thin) | `handle_quest_add/complete/…` |
+| `app/room/progression.py` | `class_levels` WS transport (thin) | `handle_class_levels()` |
 | `app/ratelimit.py` | In-memory request limiter | `limit()` |
 | `app/room/dispatch.py` | WebSocket message registry | `HANDLERS`, `handle()` |
 | `app/room/net.py` | Broadcast/map helpers | `broadcast()`, `send_user()`, `sys_msg()`, `get_map()`, `set_map()` |
@@ -81,7 +88,8 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/static/js/10_core.js` | Global `state`, API helper, toast | `state`, `api()`, `esc()`, `toast()` |
 | `app/static/js/30_room.js` | Room state, chat, sheet, journal, party rendering | `openRoom()`, `refreshRoom()`, `renderFeed()` |
 | `app/static/js/40_ws.js` | WebSocket event dispatch | `connectWS()`, `wsSend()` |
-| `app/static/js/50_canvas.js` | Map/canvas rendering and overlays | `draw()`, `tick()`, `showAoe()`, `showPing()` |
+| `app/static/js/50_canvas.js` | Map/canvas rendering and overlays; view dispatcher | `draw()`, `drawTactical()`, `tick()`, `showAoe()`, `showPing()` |
+| `app/static/js/55_diorama.js` | Isometric diorama renderer + click routing | `drawDiorama()`, `dioProj()`, `dioramaDown()` |
 | `app/static/js/60_main.js` | Wire DOM events | `wire()`, boot function |
 | `tests/test_integration.py` | REST/WS integration suite | auth, visibility, rest, map, combat, items |
 
@@ -286,6 +294,29 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   - `tests/test_chat.py`
   - `tests/test_integration.py`
 
+## Quests / progression / events / effect geometry (Sprint 6)
+
+- Quests:
+  - `app/quests.py` (pure ops + `visible_for` filter) → `app/room/quests.py`
+    (WS parse→DM-check→op→notice→`quests_changed`) → `rooms.py::room_state()`
+    (`"quests"` key) → `30_room.js::renderQuests()` / `wireQuestUI()`.
+  - Notices reuse `gamelog.post_message(kind="system")` with visibility bound
+    to the quest. Reconstruction is `/state`-only, never notice replay (D51/D52).
+- Class progression:
+  - `app/progression.py` (`class_levels` JSON on characters; one canonical
+    `total_character_level`) → `gear.prof_bonus()` derives from it →
+    `app/room/progression.py` (`class_levels` message) → sheet line in
+    `30_room.js`.
+- Game events:
+  - `app/events.py` — facts emitted AFTER state commits; wired today:
+    doors, traps (`hit_trap`), quest ops. Future triggers call game
+    operations; never fake WS clients (D52).
+- Effect geometry:
+  - `app/effects.py::effect_cells()` — pure `point|line|cone|circle|square`;
+    client parity locked by Node-vm test. Visual relay `room/aoe.py` unchanged.
+- Tests:
+  - `tests/test_quests.py`, `tests/test_progression.py`, `tests/test_effects.py`
+
 ---
 
 # 4. WebSocket message map
@@ -321,6 +352,8 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `spawn_encounter` | `room.encounters.handle_spawn_encounter` | DM | no | validates encounter ownership |
 | `audio_add/remove/play/stop` | `room.audio.*` | DM | no | room ambience state |
 | `sound_trigger` | `room.audio.handle_sound_trigger` | DM | maybe | targeted private SFX |
+| `quest_add/update/obj_add/obj_done/complete/fail/delete` | `room.quests.*` | DM | no | thin transport over `app/quests.py` ops |
+| `class_levels` | `room.progression.handle_class_levels` | owner or DM (room members) | no | multiclass entries; legacy `level` kept in sync |
 
 ## Important outbound event kinds
 
@@ -340,6 +373,8 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `initiative` | combat | room | no |
 | `cond` / `death` | conditions/death | room or snapshot | usually no |
 | `ping` | pings | room | no |
+| `quests_changed` | room quests | room | no | payload-less; clients refetch filtered `/state` |
+| `system` | gamelog notices (incl. quest notices) | per visibility | maybe | chronicle line, never reconstruction source |
 | `error` | various | sender socket | private |
 
 ---
@@ -371,6 +406,9 @@ These must remain server-side:
 - Selective audio recipient filtering.
 - Character ownership.
 - Room membership and DM role.
+- Quest visibility (`party`/`dm`, `hidden` status, hidden objectives) —
+  filtered in `quests.visible_for` before any serialization.
+- Class-level validation (owner or room-DM only; strict whole-payload reject).
 
 Frontend filtering may improve presentation but may not be the security boundary.
 
@@ -418,6 +456,20 @@ Frontend filtering may improve presentation but may not be the security boundary
 - `app/mapmodel.py::reveal_cells()`
 - `app/room/fog.py::handle_fog_edit()`
 
+## Quests, progression, events, geometry (Sprint 6)
+
+- `app/quests.py::visible_for()` — the ONLY quest visibility filter (live and
+  `/state` both call it).
+- `app/quests.py::create_quest/update_quest/set_objective/complete_quest/
+  fail_quest/delete_quest` — quest state changes go through these ops only.
+- `app/progression.py::total_character_level()` — the ONLY level derivation
+  (never re-`sum` class entries elsewhere).
+- `app/progression.py::set_class_levels()` — the ONLY class-level mutation.
+- `app/events.py::emit()` — event facts AFTER state commits; state must never
+  be reconstructed from events or notices.
+- `app/effects.py::effect_cells()` — shared ability geometry; client parity
+  enforced by `tests/test_effects.py`.
+
 ## Permissions and visibility
 
 - `app/auth.py::room_of()`
@@ -452,6 +504,11 @@ Important tables:
 - `room_state` — initiative JSON, map JSON, audio JSON.
 - `encounters` — private per-user encounter templates.
 - `notes` — room journal/handouts.
+- `quests` — structured quest log: `status (active|completed|failed|hidden)`,
+  `objectives` JSON, `visibility (party|dm)`; players see only party-visible
+  non-hidden rows, filtered in `quests.visible_for` (live and `/state`).
+- `characters.class_levels` — JSON multiclass entries (D53); `level` column
+  kept in sync by `progression.set_class_levels`.
 - `soundboard` — private reusable DM sound effects.
 
 Migrations are append-only. Add columns with `db.py::init_db()`'s `migrate()` helper and add new tables to `SCHEMA`.
@@ -488,6 +545,11 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_integration.py` | auth/room lifecycle, hidden info, game log, dice, HP, traps, items, combat, visibility |
 | `tests/test_chat.py` | chat privacy, personas, narrative, secret events |
 | `tests/test_audio.py` | audio URL parsing, room ambience state, selective audio |
+| `tests/test_view_mode.py` | client-local view mode: no server/WS plumbing, fallback/persistence, diorama empty/hidden-safe rendering (Node vm) |
+| `tests/test_hardening.py` | door×LOS×explored cycle, stale-preview authority, walk cancellation, mid-walk door/wall route invalidation, coordinate invariants, adversarial permissions and malformed payloads |
+| `tests/test_quests.py` | quest CRUD via WS, DM-only server filtering (live + `/state` + raw-payload grep), notice visibility, reconnect reconstruction, player mutation refusal, quest/door event emission |
+| `tests/test_progression.py` | class-level validation, derived total + PB, legacy-column sync, owner/DM/stranger authorization |
+| `tests/test_effects.py` | point/line/cone/circle/square geometry, clipping, determinism, server≡client `aoeCells` parity (Node vm) |
 
 `tests/conftest.py`:
 
@@ -601,7 +663,9 @@ The frontend mirrors some rules for preview:
 - skill bonus display
 
 Movement preview no longer mirrors A* on the client. The server computes the route and the client only
-draws the returned cells.
+draws the returned cells. Each animated walk step is revalidated against the CURRENT map before it is
+applied (`path.step_legal()` + `map_lock`): a door closed or wall painted mid-walk ends the route with
+`move_state reason:"path_blocked"` and the token holds its last legal cell (D50).
 
 ## LOS/fog model and limitations
 
@@ -713,3 +777,64 @@ Add:
 - or new column through `init_db()`'s `migrate()` helper
 
 Then run tests to ensure old database shapes still work.
+
+---
+
+# 12. Content licensing boundary (read before adding D&D-flavored content)
+
+Full legal text: `ATTRIBUTION.md`. Working rules for coding agents:
+
+## Allowed without additional human review
+
+- project-original mechanics, content, names, maps, artwork
+- original monsters / items / spells (invented names and text)
+- appropriately attributed SRD 5.1 material (CC BY 4.0; use the exact
+  attribution statement from `ATTRIBUTION.md`, nothing more)
+- third-party assets whose license is compatible AND recorded where used
+
+## Do NOT copy (needs licensing/human review first)
+
+- D&D Beyond catalog content
+- Monster Manual content outside the SRD
+- Player's Handbook text outside licensed SRD material
+- adventure book text
+- Forgotten Realms (or any setting) text/content unless separately licensed
+- official artwork, official maps, logos, trade dress
+- non-SRD proprietary monster descriptions/statblocks
+- copyrighted music/audio
+
+The SRD is **not** "all of D&D". When in doubt: invent an original equivalent
+instead of copying. YouTube/Spotify integrations are user-entitled playback
+links only; they never grant redistribution rights.
+
+---
+
+# 13. Views: Tactical vs Diorama (client-local presentation)
+
+- One authoritative world (`state.grid`, `state.tokens`, `state.ghosts` — all
+  already server-filtered per viewer). TWO renderers display it.
+- Tactical renderer: `app/static/js/50_canvas.js::drawTactical()` (original
+  `draw()` body, untouched logic).
+- Diorama renderer: `app/static/js/55_diorama.js::drawDiorama()` — 2:1
+  isometric prototype (floors, extruded walls, door panels, token billboards).
+- Single dispatch point: `draw()` in `50_canvas.js` routes to the active
+  renderer. All existing call sites (tick, fog_changed, pings, AoE…) keep
+  calling `draw()` and therefore follow the current view.
+- View selection lives ONLY in the client: `state.viewMode`
+  ("tactical" | "diorama", invalid → tactical) plus localStorage
+  `dndtable-view-mode`, helper `normalizeViewMode()` in `10_core.js`, switch
+  UI wired in `60_main.js`.
+- View mode is NEVER sent over WebSocket, never persisted server-side, never
+  affects permissions, movement, LOS, fog, or combat. Each player picks their
+  own view independently. The DM map editor always renders tactical.
+- Diorama interaction covers token selection, door toggle and server path
+  preview/move confirm. DM tools (ruler, AoE, ping, spawn-drop, map editor)
+  are tactical-view tools; switch to Tactical to use them.
+- Manual verification checklist (frontend has no browser test automation):
+  1. Join a room → Tactical loads normally; move a token.
+  2. Switch to Diorama → same token position shown as a billboard.
+  3. Second browser stays Tactical → the first stays Diorama (independent).
+  4. Open/close a door from either view → both views reflect the same state.
+  5. A hidden NPC never appears in Diorama (server filtered it already).
+  6. Switch back to Tactical → movement and path preview still work.
+  7. Reload the page → the local view preference persists (localStorage).

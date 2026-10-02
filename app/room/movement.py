@@ -6,7 +6,7 @@ by net.map_lock so concurrent walks of different tokens can't clobber each other
 import asyncio
 
 from .. import db, footprint, los, mapmodel
-from ..path import find_path, path_footprint_cost
+from ..path import find_path, path_footprint_cost, step_legal
 from .net import broadcast, fog_patch, get_map, map_lock, send_to, set_map
 from .traps import at_cell, hit_trap, take_loot
 from .visibility import broadcast_token_step, viewer_visible_cells
@@ -95,21 +95,35 @@ async def handle_move(ws, room_id, user, is_dm, msg):
         return
 
     await _cancel_walk(tok["id"])
-    _walks[tok["id"]] = asyncio.create_task(walk(room_id, tok["id"], path))
+    _walks[tok["id"]] = asyncio.create_task(walk(room_id, tok["id"], path, mover_ws=ws))
     await _announce_move(room_id, tok["id"], True)
 
 
-async def walk(room_id, token_id, path):
-    cell = get_map(room_id)["cell"]
+async def walk(room_id, token_id, path, mover_ws=None):
     stop_reason = None
     try:
         for i, (cx, cy) in enumerate(path):
             tok = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
             if tok is None or tok["room_id"] != room_id:
                 return
-            x, y = (cx + .5) * cell, (cy + .5) * cell
-            db.x("UPDATE tokens SET x=?, y=? WHERE id=?", (x, y, token_id))
-            tok["x"], tok["y"] = x, y
+            # Revalidate against the CURRENT world before committing the step. Door,
+            # wall and map edits hold this same map_lock, so validation + the position
+            # write are atomic against them: a route valid when the walk began can no
+            # longer carry the token through geometry that became illegal mid-walk.
+            async with map_lock(room_id):
+                mp = get_map(room_id)
+                from_origin, side = footprint.occupied_origin(mp, tok)
+                legal = step_legal(mp["w"], mp["h"], mp["cells"], from_origin, (cx, cy),
+                                   blocked_edges=mapmodel.blocked_edges(mp), footprint=side)
+                if legal:
+                    x, y = (cx + .5) * mp["cell"], (cy + .5) * mp["cell"]
+                    db.x("UPDATE tokens SET x=?, y=? WHERE id=?", (x, y, token_id))
+                    tok["x"], tok["y"] = x, y
+            if not legal:
+                stop_reason = "path_blocked"
+                if mover_ws is not None:
+                    await send_to(mover_ws, "error", {"msg": "Your path was blocked"})
+                break
             await broadcast_token_step(room_id, tok, x, y, cx, cy)
             reveals = tok["owner_user_id"] is not None
             async with map_lock(room_id):

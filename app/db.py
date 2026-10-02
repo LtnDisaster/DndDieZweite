@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS characters (
     hit_die INTEGER DEFAULT 8,
     hit_dice_spent INTEGER DEFAULT 0,
     resources TEXT DEFAULT '[]',
-    defenses TEXT DEFAULT '{}'
+    defenses TEXT DEFAULT '{}',
+    class_levels TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS creatures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +137,17 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS quests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id INTEGER NOT NULL REFERENCES rooms(id),
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    objectives TEXT DEFAULT '[]',
+    visibility TEXT NOT NULL DEFAULT 'party',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -211,6 +223,7 @@ def init_db():
     migrate("messages", "npc_token_id", "npc_token_id INTEGER")
     migrate("messages", "style", "style TEXT DEFAULT ''")
     migrate("room_state", "audio_json", "audio_json TEXT DEFAULT '{}'")
+    migrate("characters", "class_levels", "class_levels TEXT DEFAULT ''")
     c.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_type_created "
               "ON messages (room_id, type, created_at)")
     c.commit()

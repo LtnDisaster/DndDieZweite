@@ -6,7 +6,8 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import db, footprint, gear, los, mapmodel, ratelimit, ws
+from . import db, footprint, gear, los, mapmodel, progression, ratelimit, ws
+from . import quests as questlog
 from . import conditions as C
 from . import npc
 from .room import audio, chat
@@ -112,6 +113,8 @@ def _char_row(r, mask_items=False):
     r["inspiration"] = 1 if r.get("inspiration") else 0
     r["exhaustion"] = max(0, min(6, int(r.get("exhaustion") or 0)))
     r["hit_die"] = gear.clean_hit_die(r.get("hit_die", 8))
+    r["class_levels"] = progression.load(r)
+    r["total_level"] = progression.total_character_level(r)
     r["hit_dice_max"] = gear.hit_dice_max(r)
     r["hit_dice_spent"] = max(0, min(gear.hit_dice_max(r), int(r.get("hit_dice_spent") or 0)))
     r["has_spellbook"] = gear.has_spellbook(r["items"])
@@ -553,6 +556,7 @@ def room_state(code: str, request: Request):
         "audio": audio.load_state(st.get("audio_json")),
         "grid": mapmodel.visible_map(mp, user["id"], room["_role"] == "dm", visible),
         "initiative": db.j(st.get("initiative"), {"combat": False, "order": [], "active": -1}),
+        "quests": questlog.visible_for(room["id"], room["_role"] == "dm"),
         "characters": [_char_row(c) for c in db.q("SELECT * FROM characters WHERE user_id=?", (user["id"],))],
     }
 

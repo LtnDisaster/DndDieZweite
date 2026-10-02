@@ -6,7 +6,7 @@ remove any door. A player may only **toggle an unlocked door they are standing n
 (their token is in one of the two cells the door separates) — locking is DM-only. A
 closed (or locked) door blocks movement, which the pathfinder enforces server-side.
 """
-from .. import db, footprint, los, mapmodel
+from .. import db, events, footprint, los, mapmodel
 from .net import broadcast, fog_patch, get_map, map_lock, send_to, set_map, sys_msg
 
 
@@ -20,12 +20,15 @@ def _door_of(msg, mp):
     return mapmodel.find_door(mp, x, y, bx, by)
 
 
-def _player_cell(room_id, user_id, mp):
-    tok = db.q1("SELECT x, y FROM tokens WHERE room_id=? AND owner_user_id=?", (room_id, user_id))
-    if tok is None:
-        return None
+def _player_cells(room_id, user_id, mp):
+    """Cells occupied by ANY token this user owns (multi-token players included)."""
+    cells = set()
     c = mp["cell"]
-    return max(0, min(mp["w"] - 1, int(tok["x"] // c))), max(0, min(mp["h"] - 1, int(tok["y"] // c)))
+    for tok in db.q("SELECT x, y FROM tokens WHERE room_id=? AND owner_user_id=?", (room_id, user_id)):
+        cx = max(0, min(mp["w"] - 1, int(tok["x"] // c)))
+        cy = max(0, min(mp["h"] - 1, int(tok["y"] // c)))
+        cells.add((cx, cy))
+    return cells
 
 
 async def handle_door(ws, room_id, user, is_dm, msg):
@@ -44,6 +47,8 @@ async def handle_door(ws, room_id, user, is_dm, msg):
             if action == "remove":
                 mp["doors"] = [d for d in mp["doors"] if d is not door]
                 set_map(room_id, mp)
+                events.emit(events.make("door_removed", room_id=room_id, actor_id=user["id"],
+                                        x=door["x"], y=door["y"], dir=door["dir"]))
                 await broadcast(room_id, "map_changed", None)
                 return
             if action == "set":
@@ -61,8 +66,8 @@ async def handle_door(ws, room_id, user, is_dm, msg):
             if door["locked"]:
                 await send_to(ws, "error", {"msg": "The door is locked"})
                 return
-            cell = _player_cell(room_id, user["id"], mp)
-            if cell not in ((door["x"], door["y"]), (bx, by)):
+            cells = _player_cells(room_id, user["id"], mp)
+            if not cells & {(door["x"], door["y"]), (bx, by)}:
                 await send_to(ws, "error", {"msg": "Walk up to the door first"})
                 return
             door["closed"] = not door["closed"]
@@ -81,6 +86,10 @@ async def handle_door(ws, room_id, user, is_dm, msg):
     state = "closes" if door["closed"] else "swings open"
     verb = "locks" if door["locked"] and door["closed"] else state
     sys_msg(room_id, f"🚪 The door {verb}.")
+    # Fact emitted AFTER the committed change (D52): the door state lives in the map.
+    events.emit(events.make("door_opened" if opened else "door_closed", room_id=room_id,
+                            actor_id=user["id"], x=door["x"], y=door["y"], dir=door["dir"],
+                            locked=bool(door["locked"])))
     if newly:
         await broadcast(room_id, "explored", fog_patch(mp, newly))
     await broadcast(room_id, "map_changed", None)

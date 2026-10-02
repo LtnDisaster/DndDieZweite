@@ -552,6 +552,187 @@ WS smoke suites (still in `/tmp/opencode/`) re-run green after these changes.
   only final placements are collision-authoritative.
 - **Status:** Accepted.
 
+## D47 — One authoritative world, multiple client-local renderers
+- **Context:** We want a Tactical view and a Diorama view of the same room without duplicating game
+  state or forcing every player into one presentation. A naive "view mode" flag on the server would
+  turn a personal preference into shared, room-level state.
+- **Decision:** The server keeps one authoritative, already per-viewer-filtered world
+  (`state.grid`/`state.tokens`/`state.ghosts`). Each browser picks its own renderer via a
+  **client-local** `state.viewMode` ("tactical" | "diorama", invalid → tactical) persisted in
+  localStorage (`dndtable-view-mode`). `draw()` is the single dispatch point to `drawTactical()` or
+  `drawDiorama()`; every existing call site keeps calling `draw()` and follows the active view. The
+  DM map editor always renders tactical. View mode is **never** sent over WebSocket, persisted
+  server-side, or allowed to influence permissions, movement, LOS, fog or combat.
+- **Alternatives:** Room-level view setting (rejected: not personal), separate map/state per view
+  (rejected: duplication and divergence), a full OO renderer framework (rejected: the frontend is
+  function-based; a thin dispatcher is enough).
+- **Consequences:** Two clients in the same room can show different views independently. Rendering
+  mode can never change gameplay, and the existing per-viewer visibility boundary is reused
+  unchanged, so a second renderer cannot leak hidden information.
+- **Status:** Accepted.
+
+## D48 — Diorama is a projection prototype over reused state, not a new engine
+- **Context:** We need to prove "one world → two renderers" cheaply, with no sprite assets, no WebGL,
+  and no risk to the freshly hardened Tactical renderer.
+- **Decision:** `app/static/js/55_diorama.js` projects the shared grid through a deterministic 2:1
+  isometric map (`dioProj`/`dioUnproj`) onto the same Canvas: floors as diamonds, walls as extruded
+  boxes, doors as upright open/closed/locked panels, tokens/ghosts as upright "paper" billboards.
+  Painter sort is split into a tile pass then a billboard pass (tokens always on top, as in Tactical).
+  Visibility is read through the existing `visibleHere()` mask — no second visibility authority.
+  Interaction reuses authoritative handlers only (door toggle, `path_preview`, `move`); there is no
+  client-side A*. **No speculative schema:** visual metadata (materials, elevation, sprite/scale/
+  rotation/layer, per-object blocks-movement/vision) is *deferred*; it is expected to live inside the
+  existing `room_state.map_json` document via the map sanitizer, not as new DB columns.
+- **Alternatives:** Three.js/WebGL (rejected: complexity/risk), a bespoke 3D camera (rejected), new
+  DB columns for visual metadata now (rejected: speculative).
+- **Consequences:** Diorama is a functional placeholder view. Deferred/limited: no sprite art, no
+  dynamic lighting/shadows, no elevation gameplay, no rotation/zoom camera, coarse billboard picking,
+  and Diorama movement is a server-preview only (precise manual movement stays a Tactical action).
+  Future visual metadata should extend `mapmodel.sanitize()` rather than the schema.
+- **Status:** Accepted.
+
+## D49 — Core/transport coupling audit; keep handlers thin, extract nothing speculative
+- **Context:** Sprint 5B audited whether gameplay rules are welded to FastAPI/WebSocket
+  transport, to keep a future DM-automation or local/single-player adapter possible. Goal
+  was a boring, test-safe separation — not a rewrite.
+- **Decision:** The transport layer is already thin: `ws.py` keeps only connection plumbing
+  and every `app/room/*` handler parses+authorizes, then calls pure gameplay helpers
+  (`path.find_path`, `footprint.*`, `los.*`, `mapmodel.*`, `health.*`, `gear.*`, `npc.*`).
+  No CQRS/event-sourcing/DI/bus/plugin layer was introduced. The only cross-handler duplication
+  worth naming is the "reveal a player token's LOS cells" expression, used by `ws.py` and
+  `movement.py`; it is a two-line call into pure functions with **different** `owner=None`
+  semantics and one copy sits on the movement hot path, so it was deliberately **not** extracted
+  (marginal gain, real regression risk). Gameplay operations should continue to read like
+  commands (move/door/damage/heal/reveal) reachable without a socket; new automation must call
+  those helpers, never a WebSocket handler.
+- **Alternatives:** A `visibility.token_reveal_cells()` dedup (rejected as not clearly
+  beneficial); an application/command layer (rejected: speculative, violates D16's thin-shim
+  intent and would churn hot paths for no behavioral gain).
+- **Consequences:** The rules core stays callable headlessly; the audit added cross-system
+  regression tests (`tests/test_hardening.py`) instead of moving code. A known design gap was
+  recorded rather than fixed: `walk()` computes its path once, so a door closed *mid-walk* does
+  not reroute the in-flight token (see TODO).
+- **Status:** Accepted.
+
+## D50 — Per-step authoritative movement revalidation (`path_blocked` stop)
+- **Context:** A walk computed its A* route once and replayed it blindly (D46). If a door
+  closed or a wall appeared mid-walk, the token could phase through the new obstacle — the
+  route was only authoritative when the walk began (recorded gap in D49 / TODO).
+- **Decision:** `walk()` revalidates **every step immediately before applying it** against the
+  current map: bounds, walls, footprint cells and `blocked_edges` (closed/locked doors) via
+  `path.step_legal()`. That function was extracted from `find_path`'s own validity closures,
+  so pathfinding and revalidation share one legality source (footprint-aware, including the
+  conservative diagonal mid-cell rule — Sprint 4 rules unchanged). An illegal step is never
+  written: the walk ends with `move_state {moving:false, reason:"path_blocked"}`, the mover's
+  socket additionally gets a private `error`, and the token stays on its last broadcast cell.
+  Validation and the position write run inside the existing per-room `map_lock` — the same
+  lock `handle_door`/`handle_map_edit` hold — so on the single event loop no world mutation
+  can interleave between "check" and "apply". One lifecycle, four endings: completed,
+  manual (DM stop), trap, path_blocked; all clean up `_walks` via the existing `finally`.
+- **Alternatives:** Re-running A* each step (rejected: expensive and re-plans routes the
+  player never chose); cancelling silently (rejected: mover gets at least a private reason);
+  a lock-free "validate then write" (rejected: the door close could slip between the two).
+- **Consequences:** Stale routes can no longer violate geometry; mid-walk token resizes also
+  stop safely (current side is used). Residual limitation: single-loop atomicity — a
+  multi-worker deployment would need shared state before this guarantee means anything
+  (already voided for ghosts/fog by the cross-cutting assumptions). Pixel math now reads the
+  live `mp["cell"]` per step instead of a value captured at walk start.
+- **Status:** Accepted. Tests: door-closed-mid-walk and wall-painted-mid-walk
+  (`tests/test_hardening.py`); trap-stop and DM-stop suites unchanged.
+
+## D51 — Quest Log: structured persistent progress; journal stays free-form
+- **Context:** DMs need objectives with authoritative state ("Speak with the
+  guard ✓"), not only prose journal notes. Journal notes were never queryable
+  and mixing the two would make "what is still open?" a text-parsing problem.
+- **Decision:** New `quests` table: `title, description, status
+  (active|completed|failed|hidden), objectives JSON [{id,text,done,hidden}],
+  visibility (party|dm), created/updated`. Pure game operations in
+  `app/quests.py` (create/update/add_objective/set_objective/complete/fail/
+  delete + `visible_for`); WS handlers in `app/room/quests.py` are thin
+  (parse → DM-authorize → op → notice → payload-less `quests_changed`
+  broadcast; clients refetch `/state`). **Server-side filtering in
+  `visible_for` is the security boundary**: DM-only quests, `hidden` status
+  and objective-level `hidden` hints are never serialized into any player
+  payload, live or `/state`; reconnecting clients rebuild quests from
+  `/state` only. `room_state()` gained `"quests"`.
+- **Alternatives:** Journal notes with a quest category (rejected: no
+  structure/derivation); REST CRUD like notes (rejected: mutations need live
+  room broadcast; REST kept read-free); per-player visibility (deferred — fits
+  `recipients` later, not built today).
+- **Consequences:** Triggers can later call `complete_quest(...)` exactly like
+  a DM click. Quest edits are last-write-wins (no lock) — acceptable for
+  low-frequency DM authoring; revisit if automation starts editing quests.
+- **Status:** Accepted. Tests: `tests/test_quests.py`.
+
+## D52 — Notices are transient presentation; game events are facts, not state
+- **Context:** Quest changes must be visible in the moment, and future
+  automation needs a seam to observe the game — without either becoming a
+  second source of truth.
+- **Decision:** **Notices** (`QUEST ADDED …`) go through the existing
+  game-log (`gamelog.post_message`, `kind="system"`) with visibility bound to
+  the quest's visibility (DM-only quests produce DM-only notices). They are
+  chronicle/presentation only: reconnect reconstructs quests from `/state`,
+  never by replaying notices. **Game events** (`app/events.py`) are small
+  plain dicts `{type, room_id, actor_id, target_id, data}` emitted **after**
+  an operation has committed its state change — an event is never where state
+  lives. One bounded in-process ring for diagnostics; synchronous listener
+  registry; a raising listener can never break the emitting operation.
+  Deliberately NOT an event bus: no queue, no persistence, no DI container.
+- **Future trigger direction (documented, NOT built):**
+  `GameEvent → trigger condition → game operation`, e.g.
+  `enter_area("crypt") → CompleteObjective(quest, objective)` or
+  `open_door("ancient_gate") → StartEncounter(...)`. Triggers must call the
+  same pure operations humans use (D49) — never fake WebSocket clients.
+- **Wired today (facts only, 4 families):** `door_opened/door_closed/
+  door_removed`, `trap_triggered`, `quest_started/updated/completed/failed`.
+  More events are added when an operation needs observers, not speculatively.
+- **Consequences:** Dropping every event loses nothing authoritative (tests
+  prove state and events co-exist, not that state depends on events).
+- **Status:** Accepted. Tests: quest-event + door-event emission + plain-JSON
+  transport-freeness in `tests/test_quests.py`.
+
+## D53 — Character classes are a collection; total level is derived
+- **Context:** A single `char_class`/`level` pair makes multiclassing a schema
+  migration later. Modeling it wrong now is the expensive mistake.
+- **Decision:** Progression is a collection:
+  `class_levels = [{"class_id":"fighter","level":3},{"class_id":"wizard","level":2}]`
+  (JSON column, additive migration). `app/progression.py` provides the strict
+  validator (ids lowercase ≤24 chars, levels 1–20, no duplicates, total ≤20 —
+  invalid input is **rejected whole**, never half-applied), the single
+  canonical `total_character_level()` (sum of entries, legacy `level` column
+  as single-class fallback) and the `set_class_levels()` operation which also
+  keeps the legacy `level` column in sync so every existing consumer (hit
+  dice, slots, sheet math) sees the derived total. `gear.prof_bonus()` now
+  derives from `total_character_level` — no re-summed copies. WS
+  `class_levels`: owners manage their own characters, the DM may advance
+  characters **of this room's members**; anyone else is refused server-side.
+  Engine structure only — no class feature tables, subclass text or
+  progression prose (licensing boundary, ATTRIBUTION.md); per-class hit dice/
+  resources/spellcasting attach to these entries later (TODO), no speculative
+  columns today. UI is a read-only sheet line `Warrior 3 / Adept 2 Lv4`.
+- **Alternatives:** `class = "fighter/wizard 3/2"` string (rejected: parsed
+  forever); one row per class in a table (rejected: overkill for one JSON
+  list at this scale).
+- **Status:** Accepted. Tests: `tests/test_progression.py`.
+
+## D54 — Ability geometry is generic and independent of named spells
+- **Context:** AoE templates existed only as a client-side visual relay
+  (`aoeCells` in `10_core.js`). Future abilities need the same geometry
+  resolved server-side, and it must not become hard-wired to spell names.
+- **Decision:** `app/effects.py::effect_cells(shape, size, x, y, w, h,
+  direction)` — pure, deterministic, boundary-clipped — covering
+  `point|line|cone|circle|square` (circle/square double as sphere/cube map
+  projections). An effect is `shape + size + origin + direction`; future
+  fields (range, save, damage expression/type, condition, duration,
+  concentration) attach as data HERE — never as spell names. NO spell
+  catalogue is introduced; tests use original names ("Training Cone" style
+  parameters, not content). The exact-45° cone edge is a float tie: the
+  server matches the shipped client's exclude-behavior, and the parity test
+  (`tests/test_effects.py`, Node `vm`) locks server preview ≡ client cells
+  cell-for-cell. The DM relay (`app/room/aoe.py`, D30) stays presentation-
+  only; resolution remains a deliberate future step.
+- **Status:** Accepted.
+
 ## Cross-cutting assumptions (read before scaling)
 - Single uvicorn process, single event loop; `LOOP` captured in `main.py` for thread-safe broadcasts.
 - `VTT_DATA_DIR` isolates the SQLite/`secret.key`/uploads tree.

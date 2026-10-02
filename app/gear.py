@@ -136,11 +136,10 @@ def _stat_mod(char, ability):
 
 
 def prof_bonus(char):
-    try:
-        lvl = max(1, int(char.get("level", 1)))
-    except (TypeError, ValueError):
-        lvl = 1
-    return 2 + (lvl - 1) // 4
+    # Single derivation for total level (multiclass-aware; D53) — same project
+    # formula as before, fed by the canonical total_character_level().
+    from . import progression
+    return 2 + (progression.total_character_level(char) - 1) // 4
 
 
 def clean_skills(skills):

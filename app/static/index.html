@@ -112,6 +112,10 @@
       <h1 id="room-title">Room</h1>
       <span id="room-code" class="code"></span>
       <span id="room-role" class="badge"></span>
+      <span id="viewtoggle" title="Personal view (this browser only; other players keep their own view)">
+        <button id="view-tactical" class="primary" type="button">Tactical</button>
+        <button id="view-diorama" class="ghost" type="button">Diorama</button>
+      </span>
     </div>
     <div id="online" class="online"></div>
   </header>
@@ -224,6 +228,14 @@
       <div class="panel">
         <h2>Party</h2>
         <div id="party"></div>
+      </div>
+      <div class="panel">
+        <h2>Quest Log</h2>
+        <div id="quest-list"></div>
+        <div class="row hidden" id="quest-new">
+          <input id="q-title" placeholder="New quest title" maxlength="120" style="flex:1">
+          <button id="btn-q-add" class="ghost">+ Quest</button>
+        </div>
       </div>
       <div class="panel" id="journal">
         <h2>Journal</h2>
@@ -388,6 +400,7 @@
 <script src="/static/js/30_room.js"></script>
 <script src="/static/js/40_ws.js"></script>
 <script src="/static/js/50_canvas.js"></script>
+<script src="/static/js/55_diorama.js"></script>
 <script src="/static/js/60_main.js"></script>
 </body>
 </html>

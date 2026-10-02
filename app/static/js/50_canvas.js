@@ -13,6 +13,7 @@ function resize(){
 }
 function view(){ const dpr = window.devicePixelRatio || 1; return { w: cv.width/dpr, h: cv.height/dpr }; }
 function clampCam(){
+  if (state.viewMode === "diorama") return;   // diorama has its own projected extents
   const { w, h } = view(), W = worldW(), H = worldH();
   state.cam.ox = W <= w ? (w - W)/2 : Math.min(0, Math.max(w - W, state.cam.ox));
   state.cam.oy = H <= h ? (h - H)/2 : Math.min(0, Math.max(h - H, state.cam.oy));
@@ -40,8 +41,15 @@ function visibleHere(i){
   if (state.room && state.room.role === "dm") return true;
   return g.cells && g.cells[i] !== null && g.cells[i] !== undefined;
 }
+/* Single view dispatch point. All existing call sites (tick, fog_changed,
+   pings, AoE, ...) keep calling draw() and follow the active client-local
+   view. Editing always uses the tactical renderer. */
 function draw(){
   if (!ctx || !state.room) return;
+  if (state.viewMode === "diorama" && !state.editing){ drawDiorama(); return; }
+  drawTactical();
+}
+function drawTactical(){
   const { w, h } = view(), c = cellSize(), cam = state.cam;
   const gm = state.editing && state.editMap ? state.editMap : state.grid;
   ctx.clearRect(0, 0, w, h);
@@ -430,6 +438,7 @@ function onDown(e){
   if (!state.room) return;
   const p = evtPos(e);
   if (e.button === 1 || e.button === 2){ state.pan = { x: p.x - state.cam.ox, y: p.y - state.cam.oy }; e.preventDefault(); return; }
+  if (state.viewMode === "diorama" && !state.editing){ dioramaDown(p); return; }
   if (state.rulerArmed && !state.editing){
     const { cx, cy } = toCell(p.x, p.y);
     if (!state.ruler || state.ruler.done){ state.ruler = { x1:cx, y1:cy, x2:cx, y2:cy }; state.rulerArmed = false; $("btn-ruler").classList.remove("active"); }

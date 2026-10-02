@@ -17,6 +17,10 @@ from .fog import handle_fog_edit
 from .movement import handle_move, handle_path_preview, handle_stop_move
 from .net import broadcast, get_map, map_lock, send_to, set_map, sys_msg
 from .pings import handle_ping
+from .progression import handle_class_levels
+from .quests import (handle_quest_add, handle_quest_complete, handle_quest_delete,
+                     handle_quest_fail, handle_quest_obj_add, handle_quest_obj_done,
+                     handle_quest_update)
 from .secret_events import handle_secret_event
 from .status import handle_exhaustion, handle_inspiration, handle_temp_hp
 from .tokens import handle_add_token, handle_del_token, handle_update_npc
@@ -82,6 +86,14 @@ HANDLERS = {
     "audio_play": handle_audio_play,
     "audio_stop": handle_audio_stop,
     "sound_trigger": handle_sound_trigger,
+    "quest_add": handle_quest_add,
+    "quest_update": handle_quest_update,
+    "quest_obj_add": handle_quest_obj_add,
+    "quest_obj_done": handle_quest_obj_done,
+    "quest_complete": handle_quest_complete,
+    "quest_fail": handle_quest_fail,
+    "quest_delete": handle_quest_delete,
+    "class_levels": handle_class_levels,
 }
 
 

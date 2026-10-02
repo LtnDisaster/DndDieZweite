@@ -1,7 +1,7 @@
 """Hidden traps and loot, triggered by stepping onto a cell."""
 import random
 
-from .. import db, npc
+from .. import db, events, npc
 from . import health
 from .dice import dex_mod, do_roll
 from .net import broadcast, send_user, sys_msg
@@ -13,6 +13,9 @@ def at_cell(items, cx, cy):
 
 async def hit_trap(room_id, tok, trap):
     trap["discovered"] = True
+    events.emit(events.make("trap_triggered", room_id=room_id, actor_id=tok.get("id"),
+                            trap_label=trap.get("label"), dc=trap.get("dc"),
+                            dmg=trap.get("dmg")))
     owner = tok["owner_user_id"]
     dm = db.q1("SELECT dm_id FROM rooms WHERE id=?", (room_id,))
     ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)) if tok["character_id"] else None

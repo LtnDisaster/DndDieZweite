@@ -20,6 +20,9 @@ function connectWS(code){
       }
       case "dice": appendGameLogMessage({ id:p.id, username:p.username, body:p.text ?? p.body,
                                           type:"dice", visibility:p.visibility, meta:p.meta }); break;
+      case "system": appendGameLogMessage({ id:p.id, username:p.username, body:p.text ?? p.body,
+                                            type:"system", visibility:p.visibility }); break;
+      case "quests_changed": refreshRoom(); break;
       case "whisper": appendGameLogMessage({ type:"whisper", body:p.text }); break;
       case "ambience": applyAudioState(p); break;
       case "sound": playSoundEvent(p); break;

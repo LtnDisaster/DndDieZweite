@@ -35,6 +35,7 @@ async function refreshRoom(){
   if (state.plan && !state.tokens.find(t => t.id === state.plan.token_id)) state.plan = null;
   updateMoveHud();
   renderParty(); renderInit(); renderMyChars();
+  state.quests = s.quests || []; renderQuests();
   state.messages = s.messages || []; state.chat = s.chat || [];
   applyAudioState(s.audio || {}); renderChatTargets(); renderVoiceTargets(); renderAudio();
   renderFeed();
@@ -646,7 +647,10 @@ function renderSheet(tok){
   panel.classList.remove("hidden");
   const m = state.room.members.find(x => x.user_id === tok.owner_user_id);
   const ch = m && m.char;
-  $("sheet-name").textContent = tok.label + (ch ? ` (${ch.race} ${ch.char_class} Lv${ch.level})` : " [NPC]");
+  const clsTxt = (ch.class_levels && ch.class_levels.length)
+    ? ch.class_levels.map(e => e.class_id[0].toUpperCase() + e.class_id.slice(1) + " " + e.level).join(" / ")
+    : (ch.char_class || "");
+  $("sheet-name").textContent = tok.label + (ch ? ` (${[ch.race, clsTxt, "Lv" + (ch.total_level || ch.level || 1)].filter(Boolean).join(" ")})` : " [NPC]");
   const body = $("sheet-body");
   if (!ch){
     if (tok.npc && state.room.role === "dm"){ renderNpcSheet(tok); return; }
@@ -1041,4 +1045,55 @@ function wireDeath(tok){
 function renderOnline(){
   $("online").innerHTML = [...state.online].map(u =>
     `<b>●</b> ${esc(u)}`).join(" &nbsp; ");
+}
+
+/* ---------- Quest Log (state from /state, mutations via DM WS ops) ---------- */
+function renderQuests(){
+  const el = $("quest-list"); if (!el) return;
+  const isDm = state.room && state.room.role === "dm";
+  const nw = $("quest-new"); if (nw) nw.classList.toggle("hidden", !isDm);
+  const qs = state.quests || [];
+  el.innerHTML = qs.length ? qs.map(q => {
+    const objs = (q.objectives || []).map(o =>
+      `<div class="row"><small style="flex:1">${o.done ? "☑" : "☐"} ${esc(o.text)}${o.hidden ? " · hidden hint" : ""}</small>` +
+      (isDm ? `<button class="ghost q-obj" data-q="${q.id}" data-o="${esc(o.id)}" data-done="${o.done ? 1 : 0}" style="padding:0 6px">${o.done ? "Undo" : "✓"}</button>` : "") +
+      `</div>`).join("");
+    const objAdd = isDm ? `<div class="row"><input class="q-objtext" data-q="${q.id}" placeholder="new objective" maxlength="200" style="flex:1">` +
+      `<button class="ghost q-objadd" data-q="${q.id}">+ Obj</button></div>` : "";
+    const dmBtns = isDm ? `<div class="row">` +
+      `<button class="ghost q-done" data-q="${q.id}" data-status="${esc(q.status)}">Complete</button>` +
+      `<button class="ghost q-fail" data-q="${q.id}">Fail</button>` +
+      `<button class="ghost q-hide" data-q="${q.id}" data-status="${esc(q.status)}">${q.status === "hidden" ? "Show" : "Hide"}</button>` +
+      `<button class="ghost q-vis" data-q="${q.id}" data-vis="${esc(q.visibility)}">${q.visibility === "dm" ? "→ Party" : "→ DM only"}</button>` +
+      `<button class="ghost q-del" data-q="${q.id}" style="color:var(--red)">Delete</button></div>` : "";
+    const col = q.status === "completed" ? "var(--green)" : q.status === "failed" ? "var(--red)" : "inherit";
+    return `<div style="border-bottom:1px solid #333;padding:4px 0">` +
+      `<div class="row"><b style="color:${col}">${esc(q.title)}</b>` +
+      `<small style="opacity:.6">${esc(q.status)}${q.visibility === "dm" ? " · DM-only" : ""}</small></div>` +
+      (q.description ? `<div><small>${esc(q.description)}</small></div>` : "") +
+      objs + objAdd + dmBtns + `</div>`;
+  }).join("") : `<small>${isDm ? "No quests yet — add one below." : "No quests yet."}</small>`;
+  if (!isDm) return;
+  const $q = (sel) => el.querySelectorAll(sel);
+  $q(".q-obj").forEach(b => b.onclick = () =>
+    wsSend({ type: "quest_obj_done", quest_id: +b.dataset.q, objective_id: b.dataset.o, done: b.dataset.done !== "1" }));
+  $q(".q-objadd").forEach(b => b.onclick = () => {
+    const inp = el.querySelector(`.q-objtext[data-q="${b.dataset.q}"]`); if (!inp || !inp.value.trim()) return;
+    wsSend({ type: "quest_obj_add", quest_id: +b.dataset.q, text: inp.value.trim() });
+  });
+  $q(".q-done").forEach(b => b.onclick = () => wsSend({ type: "quest_complete", quest_id: +b.dataset.q }));
+  $q(".q-fail").forEach(b => b.onclick = () => wsSend({ type: "quest_fail", quest_id: +b.dataset.q }));
+  $q(".q-hide").forEach(b => b.onclick = () =>
+    wsSend({ type: "quest_update", quest_id: +b.dataset.q, status: b.dataset.status === "hidden" ? "active" : "hidden" }));
+  $q(".q-vis").forEach(b => b.onclick = () =>
+    wsSend({ type: "quest_update", quest_id: +b.dataset.q, visibility: b.dataset.vis === "dm" ? "party" : "dm" }));
+  $q(".q-del").forEach(b => b.onclick = () => { if (confirm("Delete this quest?")) wsSend({ type: "quest_delete", quest_id: +b.dataset.q }); });
+}
+function wireQuestUI(){
+  const btn = $("btn-q-add");
+  if (btn) btn.onclick = () => {
+    const t = $("q-title"); if (!t || !t.value.trim()) return;
+    wsSend({ type: "quest_add", title: t.value.trim(), visibility: "party" });
+    t.value = "";
+  };
 }

@@ -231,6 +231,9 @@ function wire(){
     draw();
   };
   $("btn-stop-move").onclick = () => { if (state.sel) wsSend({ type:"stop_move", token_id: state.sel }); };
+  $("view-tactical").onclick = () => setViewMode("tactical");
+  $("view-diorama").onclick = () => setViewMode("diorama");
+  renderViewToggle();
   for (const b of document.querySelectorAll(".brush"))
     b.onclick = () => { state.brush = b.dataset.b;
       document.querySelectorAll(".brush").forEach(x => x.classList.toggle("active", x === b));
@@ -261,6 +264,7 @@ function wire(){
   wire();
   wireEncounters();
   wireNotes();
+  wireQuestUI();
   wireRoomAtmosphere();
   clearPings();
   try { await loadLobby(); }

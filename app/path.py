@@ -15,6 +15,58 @@ def _cells(w, h, origin, side):
     return [(cx + dx, cy + dy) for dy in range(side) for dx in range(side)]
 
 
+def _valid_origin(w, h, cells, origin, side, allowed_cells=None):
+    if not (0 <= origin[0] < w and 0 <= origin[1] < h):
+        return False
+    for (x, y) in _cells(w, h, origin, side):
+        if not (0 <= x < w and 0 <= y < h) or cells[y * w + x] == 1:
+            return False
+        if allowed_cells is not None and (x, y) not in allowed_cells:
+            return False
+    return True
+
+
+def _step_valid(w, h, cells, old, new, side, be):
+    if not _valid_origin(w, h, cells, new, side):
+        return False
+    old_cells = {(x, y) for (x, y) in _cells(w, h, old, side) if 0 <= x < w and 0 <= y < h}
+    new_cells = {(x, y) for (x, y) in _cells(w, h, new, side) if 0 <= x < w and 0 <= y < h}
+    for (x, y) in new_cells - old_cells:
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            neighbor = (x - dx, y - dy)
+            if neighbor in old_cells and frozenset((neighbor, (x, y))) in be:
+                return False
+    return True
+
+
+def _diagonal_valid(w, h, cells, old, new, side, be):
+    dx = 1 if new[0] > old[0] else -1
+    dy = 1 if new[1] > old[1] else -1
+    mid_x = (old[0] + dx, old[1])
+    mid_y = (old[0], old[1] + dy)
+    return (_step_valid(w, h, cells, old, mid_x, side, be) and
+            _step_valid(w, h, cells, mid_x, new, side, be) and
+            _step_valid(w, h, cells, old, mid_y, side, be) and
+            _step_valid(w, h, cells, mid_y, new, side, be))
+
+
+def step_legal(w, h, cells, old, new, blocked_edges=None, footprint=1):
+    """True if moving the footprint square from origin ``old`` to ``new`` is legal
+    on the CURRENT grid. Single source of truth shared with ``find_path``: bounds,
+    walls, blocked edges (closed doors) for every newly entered footprint cell,
+    and the conservative diagonal mid-cell rule. Explored-cell restriction is a
+    move-start/preview concern and intentionally not applied here.
+    """
+    be = blocked_edges or set()
+    side = max(1, int(footprint or 1))
+    dx, dy = new[0] - old[0], new[1] - old[1]
+    if max(abs(dx), abs(dy)) != 1:
+        return False
+    if dx and dy:
+        return _diagonal_valid(w, h, cells, old, new, side, be)
+    return _step_valid(w, h, cells, old, new, side, be)
+
+
 def find_path(w, h, cells, start, goal, max_steps=400, blocked_edges=None,
               footprint=1, allowed_cells=None):
     """Return list of ``(x, y)`` origins from start (exclusive) to goal (inclusive).
@@ -30,38 +82,14 @@ def find_path(w, h, cells, start, goal, max_steps=400, blocked_edges=None,
     if not (0 <= gx < w and 0 <= gy < h) or not (0 <= sx < w and 0 <= sy < h):
         return None
 
-    def valid_origin(origin, require_bounds=True):
-        if require_bounds and not (0 <= origin[0] < w and 0 <= origin[1] < h):
-            return False
-        for (x, y) in _cells(w, h, origin, side):
-            if not (0 <= x < w and 0 <= y < h) or cells[y * w + x] == 1:
-                return False
-            if allowed_cells is not None and (x, y) not in allowed_cells:
-                return False
-        return True
-
-    def edge_blocked(a, b):
-        return frozenset((a, b)) in be
+    def valid_origin(origin):
+        return _valid_origin(w, h, cells, origin, side, allowed_cells)
 
     def step_valid(old, new):
-        if not valid_origin(new):
-            return False
-        old_cells = {(x, y) for (x, y) in _cells(w, h, old, side) if 0 <= x < w and 0 <= y < h}
-        new_cells = {(x, y) for (x, y) in _cells(w, h, new, side) if 0 <= x < w and 0 <= y < h}
-        for (x, y) in new_cells - old_cells:
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                neighbor = (x - dx, y - dy)
-                if neighbor in old_cells and edge_blocked(neighbor, (x, y)):
-                    return False
-        return True
+        return _step_valid(w, h, cells, old, new, side, be)
 
     def diagonal_valid(old, new):
-        dx = 1 if new[0] > old[0] else -1
-        dy = 1 if new[1] > old[1] else -1
-        mid_x = (old[0] + dx, old[1])
-        mid_y = (old[0], old[1] + dy)
-        return step_valid(old, mid_x) and step_valid(mid_x, new) and \
-               step_valid(old, mid_y) and step_valid(mid_y, new)
+        return _diagonal_valid(w, h, cells, old, new, side, be)
 
     def move_cost(old, new, base):
         if side == 1:

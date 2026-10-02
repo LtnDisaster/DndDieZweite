@@ -14,7 +14,7 @@ if str(REPO) not in sys.path:
 
 import pytest  # noqa: E402
 
-from app import db, ratelimit, ws  # noqa: E402
+from app import db, events, ratelimit, ws  # noqa: E402
 from app.room import audio, chat, net  # noqa: E402
 
 db.init_db()
@@ -31,4 +31,5 @@ def _reset_ws_state():
     ratelimit._hits.clear()
     audio.clear_rate_state()
     chat.clear_rate_state()
+    events.clear()
     yield

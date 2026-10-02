@@ -14,7 +14,8 @@ const state = { me:null, room:null, ws:null, online:new Set(), tokens:[], ghosts
                          local:{volume:0.7,muted:false}, element:null, iframe:null, lastSoundId:null },
                  sounds:[],
                  notes:[], encounters:[], creatures:[], encRows:[], encId:null, noteId:null,
-                 cam:{ox:0, oy:0}, keys:new Set(), tickOn:false };
+                  cam:{ox:0, oy:0}, keys:new Set(), tickOn:false,
+                  viewMode:"tactical" };
 const VISION_R = 6;
 const SIZE_FOOTPRINT = { Tiny:1, Small:1, Medium:1, Large:2, Huge:3, Gargantuan:4 };
 
@@ -101,6 +102,38 @@ function saveAudioPrefs(){
     localStorage.setItem("dndtable-audio-muted", state.audio.local.muted ? "1" : "0");
   } catch { /* best effort */ }
 }
+/* ---------- view mode (presentation only, CLIENT-LOCAL) ----------
+   Never sent to the server, never broadcast, never affects rules.
+   Each client picks its own renderer; the world state is shared. */
+const VIEW_MODES = ["tactical", "diorama"];
+function normalizeViewMode(v){ return VIEW_MODES.includes(v) ? v : "tactical"; }
+function loadViewMode(){
+  let v = "tactical";
+  try { v = normalizeViewMode(localStorage.getItem("dndtable-view-mode")); }
+  catch { /* localStorage can be disabled */ }
+  state.viewMode = v;
+}
+function saveViewMode(){
+  try { localStorage.setItem("dndtable-view-mode", state.viewMode); }
+  catch { /* best effort */ }
+}
+function setViewMode(mode){
+  const next = normalizeViewMode(mode);
+  if (next === state.viewMode) return;
+  state.viewMode = next;
+  saveViewMode();
+  renderViewToggle();
+  if (next === "tactical" && typeof clampCam === "function") clampCam();
+  draw();
+}
+function renderViewToggle(){
+  for (const m of VIEW_MODES){
+    const b = $("view-" + m);
+    if (b) b.classList.toggle("primary", state.viewMode === m);
+    if (b) b.classList.toggle("ghost", state.viewMode !== m);
+  }
+}
+loadViewMode();
 function _memberName(m){ return m.char ? m.char.name : m.username; }
 function _chatSpeakerName(m){
   const kind = String(m.sender_kind || "user").toLowerCase();

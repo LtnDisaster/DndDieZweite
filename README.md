@@ -64,6 +64,18 @@ docker run -d -p 8000:8000 -v dnd-vtt-data:/srv/data dnd-vtt
     slots, hit dice and long-rest resources; arbitrary conditions are cleared only when
     explicitly requested), and upload a map background (PNG/JPEG ≤ 8 MB).
 
+## Views (Tactical / Diorama)
+
+Each player (and the DM) can independently pick **Tactical** (the top-down
+canvas) or **Diorama** (a 2:1 isometric 2.5D view) from the room's
+**Tactical | Diorama** buttons. This choice is **per-browser only**: it is
+saved in your browser's local storage and never sent to the server, so two
+players in the same room can use different views of the same shared world.
+Nothing about gameplay (movement, fog, LOS, combat, permissions) depends on
+the view. Diorama is a minimal prototype: floors, walls, doors (open/closed/
+locked), and paper-card token billboards, all placeholder shapes. Precise
+manual movement and the DM map tools remain in the Tactical view.
+
 ## Grid, Map Editor, Traps & Loot
 
 - **Two-click A\* path planning**: first click requests a server preview; second click (or the Move
@@ -329,7 +341,8 @@ app/static/
 ├── style.css
 └── js/            # classic scripts, loaded in dependency order (shared globals)
     ├── 10_core.js   ├── 20_lobby.js   ├── 30_room.js
-    ├── 40_ws.js     ├── 50_canvas.js  └── 60_main.js
+    ├── 40_ws.js     ├── 50_canvas.js  ├── 55_diorama.js
+    └── 60_main.js
 
 tests/             # pytest unit (footprint/path/LOS/map/gear/dice) + movement-fog + integration suites
 ```
@@ -351,7 +364,7 @@ under HTTPS (direct, or via `X-Forwarded-Proto`) or when `VTT_COOKIE_SECURE=1`. 
 ## Tests
 
 ```bash
-./.venv/bin/python -m pytest          # 162 tests
+./.venv/bin/python -m pytest          # 201 tests
 ```
 
 The suite mixes fast unit tests (`test_path`, `test_mapmodel`, `test_gear`, `test_dice`,
@@ -386,3 +399,12 @@ live in [`requirements-dev.txt`](requirements-dev.txt).
   are likewise never
   transmitted; what remains client-side is a faded last-seen ghost, not live state.
 - For public internet deployment, put a TLS proxy (nginx/caddy) in front.
+
+## License & Attribution
+
+DnDTable is an independent project, not affiliated with Wizards of the Coast.
+Its rules foundation is intended to come from the **D&D SRD 5.1**, used under
+the **Creative Commons Attribution 4.0 International (CC BY 4.0)** license.
+The exact required attribution text, the content boundary (what the SRD does
+*and does not* cover), and rules for third-party assets are documented in
+[`ATTRIBUTION.md`](ATTRIBUTION.md).

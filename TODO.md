@@ -4,7 +4,7 @@ Living checklist. "Done" = shipped and covered by an in-repo test.
 Verify state with:
 
 ```bash
-./.venv/bin/python -m pytest                       # 162 tests (unit + integration)
+./.venv/bin/python -m pytest                       # 201 tests (unit + integration + view guards)
 ./.venv/bin/python -m compileall -q app            # byte-compile check
 for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 ```
@@ -162,6 +162,56 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [x] Tests: footprint path/collision (12), LOS (9), movement/fog/path-preview (11)
       → **162 total**.
 
+## Done — view renderers & hardening (2026-10-02, Sprint 5A/5B)
+- [x] **Client-local Tactical/Diorama views** over one shared world (D47): a single `draw()`
+      dispatcher, isometric `drawDiorama()`, per-browser `localStorage` preference, never sent
+      to the server. Diorama reuses the server's per-viewer visibility mask.
+- [x] **Diorama footprint reveal parity:** a Large+ token renders if ANY of its footprint cells
+      is visible, matching the server's any-cell reveal rule (was origin-cell only).
+- [x] **Licensing boundary** (`ATTRIBUTION.md`, README, AGENT_GUIDE §12): SRD 5.1 under CC BY 4.0
+      with the verbatim attribution statement extracted from the official PDF; explicit DO-NOT-COPY
+      list. Human legal review still recommended before public release.
+- [x] **Door adjacency fix:** a player may toggle an unlocked door beside ANY token they own
+      (`_player_cells`), not just the arbitrary first one — matters for legacy multi-token rows.
+- [x] **Cross-system + adversarial regression suite** (`tests/test_hardening.py`, 8): door×LOS×
+      persistent-explored cycle, stale-preview-is-not-authority, DM-stop-leaves-no-orphan-walk,
+      out-of-map coordinate clamp, player-socket DM-only refusal, foreign-character temp-HP
+      refusal, malformed-payload survivability. Reused the existing Node-`vm` view guards.
+- [x] **Coupling audit** (D49): transport confirmed thin; no speculative extraction; future
+      automation must call the pure gameplay helpers, never a WS handler.
+- [x] Tests: +8 hardening +1 view guard → **178 total**.
+
+## Done — mid-walk route revalidation (2026-10-02, Sprint 5C)
+- [x] **No more phasing through freshly-invalid geometry** (D50): `walk()` revalidates every
+      step against the CURRENT map (bounds, walls, footprint cells, closed/locked doors) via a
+      new shared `path.step_legal()` extracted from `find_path`'s own rules. An illegal step is
+      never applied — the walk ends with `move_state reason:"path_blocked"`, the mover gets a
+      private `error`, and the token holds its last legal cell. Validation + the position write
+      run under the existing `map_lock` that door/map edits already hold, so a change can't
+      interleave between check and apply. Traps, DM-stop and one coherent walk lifecycle intact.
+- [x] Tests: door-closed-midwalk + wall-painted-midwalk → **180 total**.
+
+## Done — automation foundations: quests, events, classes, effect geometry (2026-10-02, Sprint 6)
+- [x] **Quest Log** (D51): `quests` table + pure ops (`app/quests.py`) + thin WS
+      transport (`room/quests.py`); objectives, `active/completed/failed/hidden`,
+      `party|dm` visibility + hidden objectives — all filtered server-side in
+      `visible_for()` (live AND `/state`). Panel in the sidebar; DM controls inline.
+- [x] **Notices** (D52): quest changes post game-log system lines with visibility
+      bound to the quest (DM-only quest ⇒ DM-only notice). Presentation only —
+      reconnect rebuilds from `/state`.
+- [x] **Game-event seam** (D52): `app/events.py` plain-dict facts emitted AFTER
+      state commits; wired: door_opened/closed/removed, trap_triggered,
+      quest_started/updated/completed/failed. Future triggers must call game
+      operations, never fake WS clients. NOT built: trigger engine, persistence, bus.
+- [x] **Multiclass-ready progression** (D53): `characters.class_levels` JSON
+      collection; strict validator (whole-payload reject); `total_character_level()`
+      the one derivation; legacy `level` kept in sync; `gear.prof_bonus()` derives
+      from it. WS `class_levels` (owner or room-DM). No class content/tables (licensing).
+- [x] **Generic effect geometry** (D54): `app/effects.py::effect_cells()`
+      (point/line/cone/circle/square) + Node-vm parity test against client `aoeCells`.
+      No spell catalogue.
+- [x] Tests: quests 7 + progression 8 + effects 6 → **201 total**.
+
 ## P1 — Repo hygiene
 - [ ] Add a `Makefile`/`scripts/smoke.sh`: start (pidfile) -> live `vtt_smoke*.mjs` -> stop
       (the `.mjs` suites stay a **dev-only** live-server harness; `pytest` is the durable suite).
@@ -173,6 +223,9 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       Remaining drift risk is UI formatting only; add a browser e2e test for async preview requests.
 - [ ] **Ghost persistence:** `_last_seen` is in-memory (D9) — lost on restart, wrong under
       multi-worker. Persist to `room_state`/DB before scaling beyond one process.
+- [ ] **Multi-token per user:** ownership is one-token-per-user by construction (assign reuses),
+      but nothing enforces it in the schema; door adjacency now handles legacy multi-token rows
+      (D49 era). Decide explicitly before adding a feature that creates second tokens.
 - [ ] **Fog granularity:** exploration is one shared room bitmap. Manual reveal/hide is global to all
       players; private per-player fog requires a schema change.
 - [ ] **Client math mirror:** the browser mirrors gear skill/spell bonus math (`_smod`/`_pb`
@@ -182,6 +235,19 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       tests are vision-adjacent).
 
 ## P3 — Feature gaps (nice, not blocking)
+- [ ] **Quest/automation follow-ups (Sprint 6 seams, intentionally not built):** per-player
+      quest visibility (reuse a `recipients` list like notes), objective counters, the
+      trigger engine over `app/events.py` (condition → game operation), quest-condition
+      auto-completion, XP progression.
+- [ ] **Class follow-ups:** progression editor UI (currently WS+read-only sheet line),
+      per-class hit dice/resources/spellcasting attached to `class_levels` entries,
+      multiclass prerequisites. Subclasses/feats/feature tables: engine-only, licensing-gated.
+- [ ] **Effect resolution:** abilities with `save`/damage-expression/duration riding on
+      `effects.effect_cells()` (schema fields documented in D54, no spell catalogue).
+- [ ] **Map visual metadata + richer vision (directions, not commitments):** floor/wall materials,
+      elevation, sprite/rotation/scale/layer and per-object blocks-vision/movement should extend
+      `mapmodel.sanitize()` inside `map_json` (D48), never speculative DB columns; light/darkvision
+      layers come after that foundation. Both renderers then consume the same metadata (D47).
 - [ ] Collision currently validates different owners at the final destination. Intermediate animation
       may temporarily overlap same-owner tokens and should be re-checked if stricter token stacking is
       ever desired.
