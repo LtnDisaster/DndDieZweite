@@ -41,7 +41,10 @@ function applySideTab(){
   // an unassigned character is a blocking prompt, not a tab-scoped panel:
   const mc = $("mychars");
   if (mc && mc.classList.contains("nudge")) mc.classList.remove("hidden");
-  for (const b of bar.querySelectorAll("button")) b.classList.toggle("active", b.dataset.tab === tab);
+  for (const b of bar.querySelectorAll("button")){
+    b.classList.toggle("active", b.dataset.tab === tab);
+    b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false");
+  }
 }
 
 async function refreshRoom(){
@@ -726,12 +729,12 @@ function renderSheet(tok){
   const slots = ch.spell_slots || {};
   const _ab = a => (ch.stats && ch.stats[a] != null) ? ch.stats[a] : 10;
   const profSkills = Object.keys(skills).filter(k => skills[k] > 0);
-  const skillBlock = profSkills.length ? `<div class="skills-sheet"><div class="wlabel">Skills</div>` +
+  const skillBlock = profSkills.length ? `<details class="sheet-sec" open><summary><h3>Skills</h3></summary>` +
     profSkills.map(k => {
       const meta = SKILLS[k] || [k, ""], bonus = _smod(_ab(meta[1])) + _pb(lvlv) * skills[k];
       return `<div class="skrow"><span>${meta[0]} <small>${skills[k]===2?"★":"✓"}</small> <b>${bonus>=0?"+":""}${bonus}</b></span>` +
              (own ? `<button class="sk-roll" data-skill="${k}">Roll</button>` : "") + `</div>`;
-    }).join("") + `</div>` : "";
+    }).join("") + `</details>` : "";
   let bookBlock = "";
   if (ch.has_spellbook){
     const slotLine = [];
@@ -749,9 +752,9 @@ function renderSheet(tok){
       }
       return `<div class="sprow"><span>${sp.level>0?`<small>${sp.level}L</small>`:"<small>✨</small>"} ${esc(sp.name)}</span> <small style="opacity:.6">${esc(sp.school||"")}${sp.dmg?(" · "+esc(sp.dmg)):""}</small><span class="spbtns">${btns}</span></div>`;
     }).join("");
-    bookBlock = `<div class="book"><div class="wlabel">📖 Spellbook ${slotLine.length?`<small style="opacity:.6"> · ${slotLine.join(" ")}</small>`:`<small style="opacity:.6"> · no slots</small>`}</div>${spRows||`<div class="meta" style="opacity:.6">No spells learned.</div>`}</div>`;
+    bookBlock = `<details class="sheet-sec" open><summary><h3>📖 Spellbook ${slotLine.length?`<small style="opacity:.6"> · ${slotLine.join(" ")}</small>`:`<small style="opacity:.6"> · no slots</small>`}</h3></summary>${spRows||`<div class="meta" style="opacity:.6">No spells learned.</div>`}</details>`;
   } else if (own && spells.length){
-    bookBlock = `<div class="book"><div class="wlabel">📖 Spellbook</div><div class="meta" style="opacity:.7">Add a <b>📖 spellbook</b> item to your character to cast at the table.</div></div>`;
+    bookBlock = `<details class="sheet-sec"><summary><h3>📖 Spellbook</h3></summary><div class="meta" style="opacity:.7">Add a <b>📖 spellbook</b> item to your character to cast at the table.</div></details>`;
   }
   body.innerHTML = `
     <div class="hpbar"><div style="width:${Math.max(0,ch.hp/ch.max_hp*100)}%;${ch.hp/ch.max_hp<=.25?"background:var(--red)":""}"></div></div>
@@ -822,7 +825,10 @@ function renderNpcSheet(tok){
     slotCells.push(`<label class="slotcell">L${lv}<input class="npc-slot" data-lv="${lv}" type="number" min="0" max="9" value="${d.max||0}" style="width:36px"></label>`);
   }
   body.innerHTML = `
-    <div class="row"><input id="npc-name" placeholder="NPC name" value="${esc(tok.label)}" maxlength="32"></div>
+    <div class="row"><input id="npc-name" placeholder="NPC name" value="${esc(tok.label)}" maxlength="32">
+      <select id="npc-size">${["Tiny","Small","Medium","Large","Huge","Gargantuan"].map(s => `<option value="${s}" ${(tok.size||"Medium")===s?"selected":""}>${s}</option>`).join("")}</select>
+      <select id="npc-disp"><option value="">neutral</option>${["friend","neutral","hostile"].map(d => `<option value="${d}" ${(tok.disposition||"")===d?"selected":""}>${d}</option>`).join("")}</select>
+    </div>
     <div class="hpbar"><div id="npc-hpbar"></div></div>
     <div class="row">
       <span class="tiny">HP</span><input id="npc-hp" type="number" min="0" value="${n.hp||0}" style="width:50px">/
@@ -831,37 +837,43 @@ function renderNpcSheet(tok){
       <span class="tiny">Lv</span><input id="npc-lvl" type="number" min="1" max="30" value="${n.level||1}" style="width:42px">
       <span class="tiny">Spd</span><input id="npc-spd" type="number" min="0" value="${n.speed||30}" style="width:46px">
     </div>
-    <div class="row">
-      <select id="npc-size">${["Tiny","Small","Medium","Large","Huge","Gargantuan"].map(s => `<option value="${s}" ${(tok.size||"Medium")===s?"selected":""}>${s}</option>`).join("")}</select>
-      <select id="npc-disp"><option value="">neutral</option>${["friend","neutral","hostile"].map(d => `<option value="${d}" ${(tok.disposition||"")===d?"selected":""}>${d}</option>`).join("")}</select>
-      <span class="tiny">Disposition</span>
-    </div>
     <div class="statline">${statCells}</div>
-    ${conditionsHtml(tok)}
     <div class="row chips" id="npc-abil">${abilRolls}</div>
-    <div class="row chips" id="npc-saves">${STATS.map(([k,l]) =>
-      `<label title="${l} saving throw"><input type="checkbox" class="npc-save" data-k="${k}" ${n.saves[k]?"checked":""}>${l}</label>`).join("")}</div>
-    <div class="row"><input id="npc-def-res" placeholder="resist fire, cold" value="${esc((n.defenses && n.defenses.resist || []).join(", "))}" maxlength="80"></div>
-    <div class="row"><input id="npc-def-vuln" placeholder="vulnerable radiant" value="${esc((n.defenses && n.defenses.vulnerable || []).join(", "))}" maxlength="80"></div>
-    <div class="row"><input id="npc-def-imm" placeholder="immune poison" value="${esc((n.defenses && n.defenses.immune || []).join(", "))}" maxlength="80"></div>
     <div class="row"><label><input type="checkbox" id="npc-prof"> proficient</label>
       <select id="npc-adv"><option value="">—</option><option value="adv">ADV</option><option value="dis">DIS</option></select></div>
-    <div class="wlabel">Spell slots (max/level)</div>
-    <div class="row slots">${slotCells.join("")}</div>
-    <div class="wlabel">Spellbook</div>
-    <div id="npc-spells"></div>
-    <div class="row"><button id="npc-spell-add" class="ghost" type="button">＋ Add spell</button></div>
-    <div class="wlabel">Attacks <small style="opacity:.6">(pick a target, then Atk)</small></div>
-    <div id="npc-attacks"></div>
-    <div class="row"><button id="npc-attack-add" class="ghost" type="button">＋ Add attack</button></div>
-    <div class="wlabel">Actions</div>
-    <div id="npc-abilities"></div>
-    <div class="row"><button id="npc-ability-add" class="ghost" type="button">＋ Add action</button></div>
-    <div class="wlabel">Resources <small style="opacity:.6">(refill on long rest)</small></div>
-    <div id="npc-resources"></div>
-    <div class="row"><button id="npc-resource-add" class="ghost" type="button">＋ Add resource</button></div>
-    <div class="wlabel">Notes</div>
-    <div class="row"><textarea id="npc-notes" rows="3" maxlength="1000" placeholder="Tactics, loot, secrets…" style="width:100%">${esc(n.notes||"")}</textarea></div>
+    <details class="sheet-sec"><summary><h3>Conditions</h3></summary>
+      ${conditionsHtml(tok)}</details>
+    <details class="sheet-sec"><summary><h3>Save proficiencies &amp; Defenses</h3></summary>
+      <div class="row chips" id="npc-saves">${STATS.map(([k,l]) =>
+        `<label title="${l} saving throw"><input type="checkbox" class="npc-save" data-k="${k}" ${n.saves[k]?"checked":""}>${l}</label>`).join("")}</div>
+      <div class="row"><input id="npc-def-res" placeholder="resist fire, cold" value="${esc((n.defenses && n.defenses.resist || []).join(", "))}" maxlength="80"></div>
+      <div class="row"><input id="npc-def-vuln" placeholder="vulnerable radiant" value="${esc((n.defenses && n.defenses.vulnerable || []).join(", "))}" maxlength="80"></div>
+      <div class="row"><input id="npc-def-imm" placeholder="immune poison" value="${esc((n.defenses && n.defenses.immune || []).join(", "))}" maxlength="80"></div>
+    </details>
+    <details class="sheet-sec"><summary><h3>Spellcasting</h3></summary>
+      <div class="wlabel">Spell slots (max/level)</div>
+      <div class="row slots">${slotCells.join("")}</div>
+      <div class="wlabel">Spellbook</div>
+      <div id="npc-spells"></div>
+      <div class="row"><button id="npc-spell-add" class="ghost" type="button">＋ Add spell</button></div>
+    </details>
+    <details class="sheet-sec"><summary><h3>Attacks</h3></summary>
+      <div class="tiny" style="margin-bottom:.2rem">pick a target, then Atk</div>
+      <div id="npc-attacks"></div>
+      <div class="row"><button id="npc-attack-add" class="ghost" type="button">＋ Add attack</button></div>
+    </details>
+    <details class="sheet-sec"><summary><h3>Actions</h3></summary>
+      <div id="npc-abilities"></div>
+      <div class="row"><button id="npc-ability-add" class="ghost" type="button">＋ Add action</button></div>
+    </details>
+    <details class="sheet-sec"><summary><h3>Resources</h3></summary>
+      <div class="tiny" style="margin-bottom:.2rem">refill on long rest</div>
+      <div id="npc-resources"></div>
+      <div class="row"><button id="npc-resource-add" class="ghost" type="button">＋ Add resource</button></div>
+    </details>
+    <details class="sheet-sec"><summary><h3>Notes</h3></summary>
+      <div class="row"><textarea id="npc-notes" rows="3" maxlength="1000" placeholder="Tactics, loot, secrets…" style="width:100%">${esc(n.notes||"")}</textarea></div>
+    </details>
     <div class="row">
       <button id="npc-save" class="primary">💾 Save NPC</button>
       <button id="npc-to-best" class="ghost">＋ Bestiary</button>

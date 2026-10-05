@@ -5,19 +5,40 @@ re-exports the few helpers REST/rooms.py reach through ``ws`` (notify, viewer_vi
 token_cell, _last_seen) so those call sites remain thin."""
 import json
 import logging
+import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from . import auth, db, footprint, los, mapmodel
 from .room.dispatch import handle
 from .room.movement import _walks
-from .room.net import (_clients, broadcast, clients, fog_patch, get_map, notify,
-                       send_to, set_map, sys_msg)
+from .room.net import (_clients, attach_ws, broadcast, clients, detach_ws,
+                       fog_patch, get_map, notify, send_to, set_map, sys_msg)
 from .room.visibility import (_last_seen, prune_viewer_last_seen, token_cell,
                               viewer_source_cells, viewer_visible_cells)
 
 log = logging.getLogger("vtt.ws")
 router = APIRouter()
+
+
+def _origin_ok(ws) -> bool:
+    """Same-origin gate for the WebSocket handshake.
+
+    Browsers always send Origin on WS handshakes; the session cookie is
+    SameSite=Lax (which already blocks cross-site WS cookies in modern
+    browsers), but we validate explicitly as a second line of defence.
+    Extra origins (e.g. an https hostname behind a proxy) go into
+    VTT_ALLOWED_ORIGINS as a comma-separated list. Non-browser clients send
+    no Origin and stay protected by the cookie check alone."""
+    origin = (ws.headers.get("origin") or "").strip().lower()
+    if not origin:
+        return True
+    extra = {o.strip().lower() for o in
+             os.environ.get("VTT_ALLOWED_ORIGINS", "").split(",") if o.strip()}
+    if origin in extra:
+        return True
+    host = (ws.headers.get("host") or "").strip().lower()
+    return origin in (f"http://{host}", f"https://{host}")
 
 
 @router.websocket("/ws/{code}")
@@ -30,8 +51,14 @@ async def ws_room(ws: WebSocket, code: str):
     if user is None or room is None or member is None:
         await ws.close(code=4401)
         return
+    if not _origin_ok(ws):
+        log.warning("WS rejected cross-origin handshake (room=%s origin=%s)",
+                    code, ws.headers.get("origin"))
+        await ws.close(code=4403)
+        return
     room_id, is_dm = room["id"], member["role"] == "dm"
     await ws.accept()
+    attach_ws(ws)   # remember the loop this session lives on (net._send)
     socks = clients(room_id).setdefault(user["id"], set())
     first = not socks
     socks.add(ws)
@@ -63,6 +90,7 @@ async def ws_room(ws: WebSocket, code: str):
         pass
     finally:
         socks.discard(ws)
+        detach_ws(ws)
         if not socks:
             clients(room_id).pop(user["id"], None)
             prune_viewer_last_seen(room_id, user["id"])

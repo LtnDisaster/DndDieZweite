@@ -371,7 +371,10 @@ function doorEdit(p){
   if (state.brush === "doorrm"){ if (idx >= 0) g.doors.splice(idx, 1); return; }
   if (idx >= 0) return;
   const locked = !!($("door-locked") && $("door-locked").checked);
-  g.doors.push({ id: eid(), x: e.x, y: e.y, dir: e.dir, closed: true, locked, label: "Door" });
+  const dmOnly = !!($("door-dmonly") && $("door-dmonly").checked);
+  const secret = !!($("door-secret") && $("door-secret").checked);
+  g.doors.push({ id: eid(), x: e.x, y: e.y, dir: e.dir, closed: true, locked,
+                 dm_only: dmOnly, secret, label: "Door" });
 }
 function pinEdit(p){
   const g = state.editMap; if (!g) return;
@@ -400,8 +403,9 @@ function drawPin(pin, c, cam, known){
 function drawDoor(d, c, cam){
   const [A, B] = doorSeg(d, c, cam), len = Math.hypot(B[0]-A[0], B[1]-A[1]);
   ctx.save(); ctx.lineCap = "round";
+  if (d.secret) ctx.globalAlpha = 0.45;   // DM sees secret doors ghosted (players never receive them)
   ctx.strokeStyle = "#0d0f14"; ctx.lineWidth = 6; seg(A, B);
-  if (d.closed){ ctx.strokeStyle = d.locked ? "#7d4f27" : "#b9814a"; ctx.lineWidth = 4; seg(A, B); }
+  if (d.closed){ ctx.strokeStyle = d.dm_only ? "#7a4f9e" : (d.locked ? "#7d4f27" : "#b9814a"); ctx.lineWidth = 4; seg(A, B); }
   else { ctx.strokeStyle = "#6b4d29"; ctx.lineWidth = 3;
     const px = d.dir === "v" ? -1 : 0, py = d.dir === "v" ? 0 : -1;   // leaf swung into its cell
     seg(A, [A[0] + px*len, A[1] + py*len]); }

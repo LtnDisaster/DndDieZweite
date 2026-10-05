@@ -171,6 +171,10 @@ def sanitize(d):
                       "x": x, "y": y, "dir": dir_,
                       "closed": bool(e.get("closed", True)) or locked,
                       "locked": locked,
+                      # dm_only: only the DM may operate it (locked stays physical).
+                      # secret: never transmitted to players at all (secret passages).
+                      "dm_only": bool(e.get("dm_only")),
+                      "secret": bool(e.get("secret")),
                       "label": _label(e.get("label"), "Door")})
     pins, pin_ids = [], set()
     for p in (d.get("pins") or [])[:200]:
@@ -242,6 +246,8 @@ def visible_map(mp, user_id, is_dm, visible_cells=()):
     loot = [l for l in mp["loot"] if l.get("taken_by") == user_id]
     doors = []
     for dr in mp.get("doors", []):
+        if dr.get("secret"):
+            continue  # secret passages are never transmitted to players
         bx, by = neighbor(dr["x"], dr["y"], dr["dir"])
         if seen[dr["y"] * w + dr["x"]] or seen[by * w + bx]:
             doors.append(dr)

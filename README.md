@@ -20,17 +20,27 @@ private encounter templates, a party/selected/DM journal, token footprints and d
 
 ## Run
 
+Docker is the **canonical runtime** — the app never depends on host Python packages:
+
+```bash
+docker compose up --build          # http://127.0.0.1:8000  (Ctrl-C to stop)
+docker compose up --build -d       # detached; docker compose logs -f app
+docker compose down                # keeps ./data
+```
+
+Persistent state (database, signing secret, uploads) lives in **`./data/`** via a bind
+mount, so the container is always disposable. On hosts without the `buildx` plugin
+(Ubuntu docker CLI), prefix builds with `DOCKER_BUILDKIT=0`.
+
+Dev shortcut without Docker (uses a local `.venv`):
+
 ```bash
 ./run.sh                 # http://localhost:8000
 HOST=0.0.0.0 PORT=9000 ./run.sh
 ```
 
-### Docker
-
-```bash
-docker build -t dnd-vtt .
-docker run -d -p 8000:8000 -v dnd-vtt-data:/srv/data dnd-vtt
-```
+**Single process, always.** Room/WebSocket state lives in memory; never run
+`--workers > 1`, replicas, or restart-policies that fan out. One container is the design.
 
 ## How to play
 
@@ -351,20 +361,82 @@ tests/             # pytest unit (footprint/path/LOS/map/gear/dice) + movement-f
 
 | Variable | Default | Effect |
 |---|---|---|
-| `VTT_DATA_DIR` | `./data` | Where `vtt.db` and `secret.key` live |
+| `VTT_DATA_DIR` | `./data` | Where `vtt.db`, `secret.key` and `uploads/` live |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | Bind address (`run.sh` reads these) |
 | `VTT_COOKIE_SECURE` | unset | Force `Secure` on the session cookie |
-| `VTT_TRUST_PROXY` | unset | Trust `X-Forwarded-For` for rate limiting |
+| `VTT_TRUST_PROXY` | unset | Trust `X-Forwarded-For` **and** `X-Forwarded-Proto` (only when a trusted proxy normalises them) |
+| `VTT_ALLOWED_ORIGINS` | unset | Extra comma-separated WS handshake origins (e.g. `https://vtt.example.org`) |
 | `VTT_LOG_LEVEL` | `INFO` | Root logging level |
 
-Session cookies are always `HttpOnly` + `SameSite=Lax`; `Secure` is added automatically
-under HTTPS (direct, or via `X-Forwarded-Proto`) or when `VTT_COOKIE_SECURE=1`. See
-[`.env.example`](.env.example).
+Session cookies are always `HttpOnly` + `SameSite=Lax`; `Secure` is added under direct
+HTTPS, when forced via `VTT_COOKIE_SECURE=1`, or via `X-Forwarded-Proto` **only** with
+`VTT_TRUST_PROXY=1`. WebSocket handshakes additionally enforce same-origin (or
+`VTT_ALLOWED_ORIGINS`) server-side. See [`.env.example`](.env.example).
+
+## Deploying (internet)
+
+Architecture: `internet → HTTPS reverse proxy → this container (loopback only) → ./data volume`.
+
+1. `docker compose up --build -d` (binds `127.0.0.1:8000` — **do not expose 8000 publicly**).
+2. Terminate TLS in a reverse proxy and forward both HTTP and WebSocket upgrades:
+
+   **Caddy** (`Caddyfile`):
+   ```
+   vtt.example.org {
+       reverse_proxy 127.0.0.1:8000
+   }
+   ```
+
+   **Nginx:**
+   ```nginx
+   server {
+     listen 443 ssl; server_name vtt.example.org;
+     ssl_certificate …; ssl_certificate_key …;
+     location / {
+       proxy_pass http://127.0.0.1:8000;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_set_header Host $host;
+       proxy_set_header X-Forwarded-Proto $scheme;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+     }
+   }
+   ```
+3. Set `VTT_TRUST_PROXY=1` (+ `VTT_COOKIE_SECURE=1` is then implied by `X-Forwarded-Proto`;
+   set it explicitly to be safe) — e.g. in a `compose.override.yaml` (git-ignored) or shell env.
+   Without these, spoofed forwarded headers on a direct connection are ignored by design.
+4. If clients reach the site through another origin than the `Host` header, list it in
+   `VTT_ALLOWED_ORIGINS`.
+
+## Backup & Restore
+
+Everything persistent is under `VTT_DATA_DIR` (`./data`): `vtt.db` (+ WAL sidecars),
+`secret.key`, `uploads/`.
+
+```bash
+./scripts/vtt-backup.sh              # → ../backups/dnd-vtt-backup-<stamp>.tar.gz
+./scripts/vtt-restore.sh ../backups/dnd-vtt-backup-<stamp>.tar.gz   # stop the app first!
+```
+
+Backups use SQLite's online backup API (WAL-safe; the app may keep running) and verify
+with `PRAGMA integrity_check` before archiving. Restoring replaces the db (previous one kept
+as `vtt.db.pre-restore.*`), removes stale WAL files and restores secret.key + uploads —
+login sessions survive a restore iff the secret came along. Verify after restore: start the
+app, `GET /api/health`, log in.
 
 ## Tests
 
+Canonical run (identical environment everywhere):
+
 ```bash
-./.venv/bin/python -m pytest          # 219 tests
+docker compose run --rm test            # 263 tests, Python 3.12 + pinned deps
+```
+
+Dev shortcut on the host venv:
+
+```bash
+./.venv/bin/python -m pytest
 ```
 
 The suite mixes fast unit tests (`test_path`, `test_mapmodel`, `test_gear`, `test_dice`,
@@ -381,14 +453,21 @@ parsing, server-authoritative **saving throws**, **typed damage/resistance/immun
 **room journals/handouts**, **map-pin visibility**, **rate-limited pings**, DM-only
 **size/disposition**; **chat/whisper/DM-persona/NPC-speech privacy**, **narrative overlays**,
 **secret events**, **safe audio URL parsing**, **DM-private soundboards**, room ambience and
-**selective audio delivery**. Tests run against an
+**selective audio delivery**, **one-shot trap lifecycle**, **fog-off room flag**,
+**downed movement gates**, **dm-only/secret doors** (`test_doors_dmonly`),
+**cookie/token hardening** (`test_auth_token`, `test_deploy_hygiene`) and
+**uploads under VTT_DATA_DIR**. Tests run against an
 isolated temporary `VTT_DATA_DIR`; no live server, browser, or network is required. Dev deps
 live in [`requirements-dev.txt`](requirements-dev.txt).
 
 
 ## Notes
 
-- Sessions: 30-day HttpOnly cookies signed with `data/secret.key`.
+- Sessions: 30-day HttpOnly cookies signed with `data/secret.key` (padding-free
+  base64 payload — cookie-safe by construction; legacy padded tokens still verify).
+- Map/asset uploads are stored under `<VTT_DATA_DIR>/uploads/` and served from
+  `/uploads/…` — they survive container rebuilds (moved out of the app tree in Sprint 9;
+  run `python scripts/move_uploads.py` once after upgrading an older install).
 - All dice rolls and pathfinding are server-side (clients cannot cheat).
 - Token movement and path previews are server-validated; players may move/preview only their own token.
 - Hidden traps/loot and unexplored terrain are filtered out server-side per viewer,
@@ -398,7 +477,10 @@ live in [`requirements-dev.txt`](requirements-dev.txt).
 - Out-of-sight tokens (per-viewer radius-6 footprint LOS blocked by walls and closed/locked doors)
   are likewise never
   transmitted; what remains client-side is a faded last-seen ghost, not live state.
-- For public internet deployment, put a TLS proxy (nginx/caddy) in front.
+- For public internet deployment use the reverse-proxy setup in **Deploying (internet)**
+  above; the container itself only listens on loopback.
+- Source archives for review: `./scripts/make_release.sh` (excludes `.git`, `.venv`,
+  `data/`, uploads, caches — and verifies that afterwards).
 
 ## License & Attribution
 

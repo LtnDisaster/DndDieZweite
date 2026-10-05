@@ -17,7 +17,7 @@ from .auth import COOKIE, cookie_secure, hash_pw, make_token, require_user, room
 
 router = APIRouter(prefix="/api")
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "uploads")
+UPLOAD_DIR = os.path.join(db.DATA_DIR, "uploads")   # persistent tree (P3) — see scripts/move_uploads.py
 MAX_UPLOAD = 8 * 1024 * 1024
 
 

@@ -43,6 +43,11 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   7. `app/static/js/60_main.js` — DOM wiring and boot.
 - Single mutable global `state` object in `10_core.js`.
 - DOM rendering is imperative `innerHTML`/`createElement` code.
+- Sidebar panels are grouped behind client-local tabs (Game/Chars/Story/DM,
+  `#side-tabs`, `applySideTab()` in `30_room.js`, choice persisted per user in
+  localStorage); Chronicle (chat+dice) and context sheets stay always visible.
+  A `?` help overlay (`#help-overlay`) is opened/closed from `#btn-help`, `?`
+  and `Esc` — content-only, no framework.
 
 ---
 
@@ -51,9 +56,9 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | File / module | Purpose | Important entry points |
 |---|---|---|
 | `app/main.py` | FastAPI app, startup, static mounts | `app`, `startup()` |
-| `app/rooms.py` | REST API, role-filtered room state | `/api/*`, `room_state()` |
+| `app/rooms.py` | REST API, role-filtered room state | `/api/*`, `room_state()`; uploads write to `<VTT_DATA_DIR>/uploads` (D62) |
 | `app/ws.py` | WebSocket auth/lifecycle | `ws_room()` |
-| `app/auth.py` | bcrypt passwords, signed cookie sessions, room access | `read_token()`, `current_user()`, `require_user()`, `room_of()` |
+| `app/auth.py` | bcrypt passwords, signed cookie sessions, room access | `read_token()`, `current_user()`, `require_user()`, `room_of()`; tokens are padding-free base64url (cookie-safe, D62) |
 | `app/db.py` | SQLite schema and migrations | `init_db()`, `q()`, `q1()`, `x()`, `tx()` |
 | `app/gear.py` | Shared sheet/item/skill/spell/defense math | `compute_ac()`, `save_bonus()`, `skill_bonus()`, `apply_defense()` |
 | `app/npc.py` | NPC stat-block model | `clean_npc()`, `load()`, `to_char()` |
@@ -71,7 +76,7 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/room/progression.py` | `class_levels` WS transport (thin) | `handle_class_levels()` |
 | `app/ratelimit.py` | In-memory request limiter | `limit()` |
 | `app/room/dispatch.py` | WebSocket message registry | `HANDLERS`, `handle()` |
-| `app/room/net.py` | Broadcast/map helpers | `broadcast()`, `send_user()`, `sys_msg()`, `get_map()`, `set_map()` |
+| `app/room/net.py` | Broadcast/map helpers | `broadcast()`, `send_user()`, `sys_msg()`, `get_map()`, `set_map()`, `attach_ws()`/`detach_ws()` (socket→loop registry, D61) |
 | `app/room/chat.py` | Chat, personas, whispers, narrative delivery | `handle_chat()`, `handle_narrative()` |
 | `app/room/audio.py` | Safe audio URL parsing and room ambience state | `parse_audio_source()`, `load_state()`, `handle_audio_*()` |
 | `app/room/secret_events.py` | Composes private narrative + optional sound | `handle_secret_event()` |
@@ -80,11 +85,11 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/room/dice.py` | Server dice parser/roller, rolls, saves, attacks, rests | `do_roll()`, `parse_roll()`, `handle_roll()`, `handle_cast()` |
 | `app/room/combat.py` | Initiative and HP handlers | `handle_init_start()`, `handle_init_next()`, `handle_hp()` |
 | `app/room/movement.py` | Walks, stop, trap auto-stop, path previews | `handle_move()`, `handle_stop_move()`, `handle_path_preview()`, `walk()` |
-| `app/room/fog.py` | DM manual exploration edits | `handle_fog_edit()` |
+| `app/room/fog.py` | DM manual exploration edits + room-wide fog on/off | `handle_fog_edit()`, `handle_fog_toggle()` |
 | `app/room/tokens.py` | Token add/remove/NPC edits | `handle_add_token()`, `handle_update_npc()` |
 | `app/room/items.py` | Item use/attune/identify/recharge | `handle_use_item()`, `handle_attune()` |
 | `app/room/traps.py` | Trap and loot resolution | `hit_trap()`, `take_loot()` |
-| `app/room/doors.py` | Door permissions | `handle_door()` |
+| `app/room/doors.py` | Door permissions incl. dm_only/secret (D63) | `handle_door()` |
 | `app/room/visibility.py` | Footprint LOS token delivery and ghosts | `viewer_visible_cells()`, `send_token_event()`, `broadcast_token_add()` |
 | `app/static/js/10_core.js` | Global `state`, API helper, toast | `state`, `api()`, `esc()`, `toast()` |
 | `app/static/js/30_room.js` | Room state, chat, sheet, journal, party rendering | `openRoom()`, `refreshRoom()`, `renderFeed()` |
@@ -144,7 +149,10 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   - `app/path.py` — footprint-aware A*.
   - `app/footprint.py` — size/anchor/collision SSOT.
   - `app/mapmodel.py`
-  - `app/room/doors.py` — open/close/lock plus door-open LOS reveal.
+  - `app/room/doors.py` — open/close/lock plus door-open LOS reveal; `dm_only`
+    doors answer players with "It won't budge." (checked before lock state),
+    `secret` doors are never transmitted to players (silent refusal like a
+    nonexistent edge) and their moves stay out of the chronicle (D63).
 - Client:
   - `app/static/js/50_canvas.js` — requests `path_preview`, renders footprint center, server path cells,
     active-walk ring and DM stop control.
@@ -340,6 +348,69 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   `total_character_level()` — separate axis, table attaches later.
 - Tests: `tests/test_abilities.py`
 
+## Stability & table UX (Sprint 8)
+
+- **Reject-not-reroute (D60):** `move` carrying a client `path` that fails
+  server revalidation → error `route_invalid` ("Route changed — please plan it
+  again"), never a silent different route. Pathless moves (DM drags) still
+  recompute. Diorama clicks resolve cells in ONE camera space (same math as
+  `dioProj`), so both views produce identical previews; armed DM tools
+  (ruler/AoE/ping/spawn/door) work in both views via `clickCell` dispatch.
+- **Downed gate:** `_movement_block_reason` blocks preview/move/teleport at 0 HP
+  and is rechecked per walk step (`stop_reason:"downed"`). NPC tokens at 0 HP
+  remain DM-draggable by design.
+- **Trap lifecycle:** traps carry `triggered`/`triggered_by` beside
+  `discovered`; one-shot re-entry gate is `triggered`; `map_edit` (stale editor
+  snapshots included) preserves runtime flags; only re-placing a fresh trap
+  re-arms. `handle_map_edit` preserves `explored` row-wise on resize.
+- **Fog off:** `fog_toggle` persists `fog_off` in the map (sanitize owns the
+  field; editor snapshots cannot reset it). Terrain+traps visible to all
+  members; `visible_map` keeps the live-token LOS pipeline untouched.
+- **NPC blocks:** `clean_npc` is the ONE normalizer and persists
+  `abilities`/`resources`/`notes`; whitelists in `add_token`/`update_npc` and
+  `CreatureIn`/`_creature_block` carry them (bestiary + spawn round-trip);
+  long rest refills NPC spell slots + resources (HP untouched).
+- **Audio:** `audio_pause` keeps `current_id` (`playing:false`); clients resume
+  direct sources in place, embeds restart (labeled in UI).
+- **UI:** sidebar tabs + `?` help overlay (see Frontend); DM token-add input is
+  `#dm-npc-name` (the sheet's `#npc-name` is the NPC editor's — do not collide).
+- Tests: `test_diorama_parity`, `test_downed_movement`, `test_trap_lifecycle`,
+  `test_fog_off`, `test_npc_workflow`, `test_audio_pause`.
+
+## Deployment & table UX hardening (Sprint 9)
+
+- **Canonical runtime is Docker**: `docker compose up --build` (runtime stage),
+  `docker compose run --rm test` (test stage = full pytest, pinned deps, Python 3.12).
+  Bind mount `./data:/srv/data`; container runs as uid 1000, has a HEALTHCHECK on
+  `/api/health`, `restart: unless-stopped`; single uvicorn process — in-memory rooms
+  make `--workers`/replicas a hard NO (D61). Hosts without buildx: `DOCKER_BUILDKIT=0`.
+- **Persistent tree**: `VTT_DATA_DIR` = db + `secret.key` + `uploads/` (D62).
+  `/uploads/...` URLs unchanged; `scripts/move_uploads.py` migrates legacy files.
+  Backups: `scripts/vtt-backup.sh` (sqlite backup API = WAL-safe, integrity-checked) /
+  `scripts/vtt-restore.sh`. Source packaging: `scripts/make_release.sh`.
+- **Cookie-safe session tokens**: make_token payload is base64url WITHOUT `=`
+  (an unquoted cookie value containing `=` is dropped by cookie parsers — the old
+  intermittent-401 production bug); read_token re-pads so legacy cookies verify (D62).
+  `secret.key` is stored HEX-encoded: raw random bytes can contain whitespace, and
+  the generating call vs. the stripped read-back used to disagree (~1.6% of installs,
+  D62). Legacy raw files load unchanged via the fromhex-fallback.
+- **Trust boundaries**: `X-Forwarded-Proto`/`X-Forwarded-For` honored only with
+  `VTT_TRUST_PROXY=1`; WS handshake enforces same-origin or `VTT_ALLOWED_ORIGINS`
+  (close 4403); cookie flags HttpOnly+Lax(+Secure per D62 rules) (D64).
+- **Loop-safe delivery (D61)**: each socket is registered with its owning event loop
+  (`attach_ws` in `ws.py` pump). `net._send` delivers in-loop; a foreign loop (only
+  ever Starlette TestClient, which gives each WS session its own loop) is crossed via
+  `run_coroutine_threadsafe` — anyio wakeups must never cross loops. Production stays
+  single-loop and hits the fast path.
+- **Doors**: `dm_only` (operation restricted to DM, checked BEFORE lock-state answer)
+  and `secret` (never in any player payload; silent refusal; no chronicle line) are
+  sanitized map fields — both views read the same server data (D63).
+- **UI pass 2**: CSS tokens (`--side-w`, z-scale, --muted…), sticky sidebar tab bar
+  with aria-selected, `details.group` DM-tool sections, NPC sheet sectioned
+  (Identity/Combat/Abilities + collapsible details, ALL `#npc-*` ids kept), PC
+  sheet Skills/Spellbook as `details.sheet-sec`.
+- Tests: `test_doors_dmonly.py`, `test_deploy_hygiene.py`, `test_auth_token.py`.
+
 ---
 
 # 4. WebSocket message map
@@ -366,14 +437,15 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `secret_event` | `room.secret_events.handle_secret_event` | DM only | maybe | narrative + optional targeted sound |
 | `roll` | `room.dice.handle_roll` | member | maybe | visibility public/self/dm/blind |
 | `hp` | `room.combat.handle_hp` | DM | maybe | routed through health reducer |
-| `move` | `room.movement.handle_move` | own token or DM teleport | no | recomputes authoritative footprint-aware path |
+| `move` | `room.movement.handle_move` | own token or DM teleport | no | with `path`: revalidates and refuses silently-different routes (`route_invalid`, D60); without: recomputes authoritative footprint-aware path |
 | `stop_move` | `room.movement.handle_stop_move` | DM | no | cancels active `_walks` task |
 | `path_preview` | `room.movement.handle_path_preview` | own token or DM | yes (requester) | server preview; never mutates token |
 | `fog_edit` | `room.fog.handle_fog_edit` | DM | no | batch reveal/hide shared `explored` memory |
-| `map_edit` | `dispatch.handle_map_edit` | DM | no | map model sanitized |
+| `fog_toggle` | `room.fog.handle_fog_toggle` | DM | no | room-wide `fog_off` flag: terrain+static visible to all, live NPCs stay LOS-filtered (D60) |
+| `map_edit` | `dispatch.handle_map_edit` | DM | no | map model sanitized; preserves trap/loot/fog runtime state; resize carries `explored` overlap |
 | `door` | `room.doors.handle_door` | DM or adjacent player | no | closed/locked edges block movement and LOS |
 | `spawn_encounter` | `room.encounters.handle_spawn_encounter` | DM | no | validates encounter ownership |
-| `audio_add/remove/play/stop` | `room.audio.*` | DM | no | room ambience state |
+| `audio_add/remove/play/pause/stop` | `room.audio.*` | DM | no | room ambience; `pause` = `playing:false` with `current_id` kept (D60) |
 | `sound_trigger` | `room.audio.handle_sound_trigger` | DM | maybe | targeted private SFX |
 | `quest_add/update/obj_add/obj_done/complete/fail/delete` | `room.quests.*` | DM | no | thin transport over `app/quests.py` ops |
 | `class_levels` | `room.progression.handle_class_levels` | owner or DM (room members) | no | multiclass entries; legacy `level` kept in sync |
@@ -582,12 +654,31 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_progression.py` | class-level validation, derived total + PB, legacy-column sync, owner/DM/stranger authorization |
 | `tests/test_effects.py` | point/line/cone/circle/square geometry, clipping, determinism, server≡client `aoeCells` parity (Node vm) |
 | `tests/test_abilities.py` | DC/attack derivation, save-half, resist/immune through defense pipeline, death-pipeline entry, heal, condition, concentration flag, slot+resource consumption, upcast validation, attack-vs-AC+crit, footprint flank, LOS/door, range authority, actor spoofing refusal, hidden-token non-leak |
+| `tests/test_diorama_parity.py` | confirmed-path revalidation refusal (`route_invalid`), shared camera-space click math (Node vm), view-aware click/token/double-click, tool parity, sheet-crash guard |
+| `tests/test_downed_movement.py` | 0-HP preview/move/teleport refusal, per-step downed stop, NPC corpse DM-drag stays allowed |
+| `tests/test_trap_lifecycle.py` | triggered one-shot, stale map_edit keeps traps disarmed, resize carries explored overlap (map-saves-without-traps regression) |
+| `tests/test_fog_off.py` | fog_toggle DM-only, player visibility under fog_off (terrain yes / live foes no), map_edit cannot reset flag |
+| `tests/test_npc_workflow.py` | abilities/resources/notes persist through add/update/bestiary/spawn, long-rest refill, same-name spawn distinct |
+| `tests/test_audio_pause.py` | audio_pause keeps current_id, play resumes, stop clears |
+| `tests/test_doors_dmonly.py` | dm_only/secret doors: sanitize roundtrip, player non-operability, hostile set/remove refusal, secret invisibility + silence, chronicle non-leak, normal/locked regressions |
+| `tests/test_deploy_hygiene.py` | cookie flags + XFP trust gate, WS origin rejection/allowance, uploads under VTT_DATA_DIR served at same URL, health endpoint |
+| `tests/test_auth_token.py` | padding-free tokens, legacy padded verify, tamper/expiry rejection, SimpleCookie roundtrip, secret-key stability across generation |
+
+Canonical full-suite run: `docker compose run --rm test` (pinned Python 3.12 image);
+host dev runs `.venv` (Python 3.14) — the `_fast_bcrypt` + loop-safe `_send`
+make both environments deterministic.
 
 `tests/conftest.py`:
 
 - isolates `VTT_DATA_DIR`
 - initializes DB
 - clears transient in-memory hubs before tests
+- `_fast_bcrypt`: session fixture lowering bcrypt rounds to 4 (bcrypt 5.x +
+  Python 3.14 could deadlock inside TestClient's portal; production default
+  rounds stay 12). Production code must never import this.
+- `recv_until(..., fail_on_error=True)` (test_movement_fog helpers) fails loud
+  with the payload when the server sends an unexpected `error` instead of the
+  awaited event — silent WS hangs become readable failures.
 
 ---
 

@@ -804,6 +804,88 @@ WS smoke suites (still in `/tmp/opencode/`) re-run green after these changes.
 - **Status:** Accepted. Tests: footprint-flank hit, wall/door LOS, out-of-range
   refusal, and a fog-hidden NPC that takes damage but is never named.
 
+## D60 — Sprint 8: reject-not-reroute movement, one-shot traps, fog-off room flag, NPC blocks complete
+- **Movement:** a `move` that carries a `path` is a promise about the preview
+  the client showed. If the server's recomputed A* differs, the move is refused
+  with `route_invalid` — never silently replaced by a different route (a player
+  must never watch a token walk down streets they did not confirm). Moves with
+  no proposed path (DM drags/teleports, integrations) keep recomputing. Both
+  views share one world: the diorama click resolves cells through the same
+  camera space as `dioProj` (absolute canvas coords), so Tactical and Diorama
+  produce identical previews (D59 extended to input).
+- **Downed gate:** `_movement_block_reason` blocks preview/move/teleport at 0
+  HP and is re-checked at every walk step (`stop_reason:"downed"`). NPC tokens
+  at 0 HP stay DM-draggable by design (corpse handling).
+- **Traps:** explicit lifecycle `triggered`/`triggered_by` beside `discovered`;
+  one-shot by `triggered`, runtime flags survive `map_edit` (stale editor
+  snapshots included); only re-placing a fresh trap entity re-arms.
+- **Fog:** `fog_off` is a persisted room-flag inside the map, owned solely by
+  `fog_toggle`; it reveals terrain+static entities to all members while the
+  LOS pipeline still hides live foes. `map_edit` resize preserves the
+  `explored` overlap instead of wiping it.
+- **NPC blocks:** `clean_npc` is the single normalizer and persists
+  `abilities`/`resources`/`notes` through add_token, update_npc, Bestiary and
+  spawn; long rest refills monster spell slots and resources (HP stays DM's
+  call). Players receive `npc:None` — stat blocks are DM-only (unchanged).
+- **Audio:** pause is a distinct state (`playing:false`, `current_id` kept);
+  self-hosted sources resume in place, embeds restart (labeled in UI).
+- **Status:** Accepted. Tests: `test_diorama_parity`, `test_downed_movement`,
+  `test_trap_lifecycle`, `test_fog_off`, `test_npc_workflow`, `test_audio_pause`.
+
+## D61 — Docker is the canonical runtime; delivery is loop-safe; still ONE process
+- `docker compose up --build` runs the app; `docker compose run --rm test` runs the
+  suite in the same pinned environment (multi-stage Dockerfile, exact pins —
+  the host's Python/package state can no longer cause mysterious failures).
+  Bind mount `./data:/srv/data`; run as uid 1000; HEALTHCHECK + `unless-stopped`.
+- In-memory rooms keep the **single-process** assumption absolute: no uvicorn
+  workers, no replicas — documented at compose/Dockerfile/README level.
+- Sockets register their owning event loop (`attach_ws`); `net._send` fast-paths
+  same-loop (production always does) and crosses loops only via
+  `run_coroutine_threadsafe`. This removes a real class of TestClient flakes
+  (starlette >=1.7 gives each WS session its own loop; anyio wakeups must not
+  cross loops) without changing production semantics.
+- **Status:** Accepted. Hosts without the buildx plugin need `DOCKER_BUILDKIT=0`.
+
+## D62 — Everything persistent lives under VTT_DATA_DIR; session tokens are cookie-safe by construction
+- `uploads/` joined `vtt.db` and `secret.key` under `VTT_DATA_DIR`; the container
+  filesystem holds nothing worth keeping. `/uploads/<file>` URLs and DB rows are
+  unchanged; `scripts/move_uploads.py` migrates legacy app-tree uploads.
+- Backups/restore: sqlite online-backup API (WAL-safe, integrity-checked) +
+  secret.key + uploads in one tarball (`scripts/vtt-backup.sh` / `vtt-restore.sh`).
+- `make_token` emits padding-free base64url payloads: a `=` inside an unquoted
+  cookie value makes cookie parsers drop the whole cookie — the old intermittent
+  401 was a real production bug, not a test artifact. `read_token` re-pads, so
+  deployed (padded) tokens keep verifying — no forced logouts on upgrade.
+- `secret.key` is stored HEX-encoded. The old code returned raw random bytes on
+  creation but `.strip()`ed on every read — whitespace bytes inside a fresh key
+  (~1.6%) mutated the effective signing key after the first write. Legacy raw
+  files are read unchanged (fromhex fallback), so deployed installs keep all
+  sessions; hex has no whitespace, so generation/read-back are identical by
+  construction.
+- **Status:** Accepted. Tests: `test_deploy_hygiene`, `test_auth_token`.
+
+## D63 — Doors gain dm_only (operation) and secret (transmission) flags, orthogonal to locked
+- `locked` stays the physical/game-mechanical state; `dm_only` restricts WHO may
+  operate; `secret` restricts WHO may even SEE the door. Player answers are
+  information-minimal: secret door → identical to "no door at this edge" (silent);
+  dm_only → "It won't budge." checked BEFORE any lock-state message; dm-only/
+  secret moves never enter the shared chronicle.
+- Movement/LOS keep reading plain closed state — a hidden closed door still
+  blocks, which is the DM's informed choice. Server enforces everything;
+  Tactical and Diorama cannot diverge because both consume the same filtered map.
+- **Status:** Accepted. Tests: `test_doors_dmonly` (10).
+
+## D64 — Forwarded headers and WebSocket origins are trusted only where declared
+- `X-Forwarded-Proto` influences the Secure cookie flag only with
+  `VTT_TRUST_PROXY=1`; same switch gates rate-limit client IP. Direct internet
+  connections never get header-driven trust.
+- WS handshakes must be same-origin against `Host` or be listed in
+  `VTT_ALLOWED_ORIGINS`; mismatch closes with 4403 before accept. SameSite=Lax
+  already blocks cross-site WS cookies — this is the explicit second line.
+- Deployment shape is fixed: HTTPS reverse proxy (Caddy/Nginx examples in README)
+  → container on loopback only.
+- **Status:** Accepted. Tests: `test_deploy_hygiene`.
+
 ## Cross-cutting assumptions (read before scaling)
 - Single uvicorn process, single event loop; `LOOP` captured in `main.py` for thread-safe broadcasts.
 - `VTT_DATA_DIR` isolates the SQLite/`secret.key`/uploads tree.

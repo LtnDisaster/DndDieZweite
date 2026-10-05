@@ -11,6 +11,10 @@ from . import db, rooms, ws
 from .room import net
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+# User uploads live in the PERSISTENT data tree, never in the (replaceable)
+# app tree / container filesystem. Same public URL (/uploads/...) as before.
+UPLOADS_DIR = os.path.join(db.DATA_DIR, "uploads")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 logging.basicConfig(
     level=os.environ.get("VTT_LOG_LEVEL", "INFO").upper(),
@@ -24,7 +28,6 @@ app = FastAPI(title="D&D VTT")
 @app.on_event("startup")
 async def startup():
     db.init_db()
-    os.makedirs(os.path.join(STATIC_DIR, "uploads"), exist_ok=True)
     net.LOOP = asyncio.get_running_loop()
 
 
@@ -38,7 +41,7 @@ async def unhandled_exception(request: Request, exc: Exception):
 
 app.include_router(rooms.router)
 app.include_router(ws.router)
-app.mount("/uploads", StaticFiles(directory=os.path.join(STATIC_DIR, "uploads")), name="uploads")
+app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
