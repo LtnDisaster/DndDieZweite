@@ -44,3 +44,23 @@ async def handle_fog_edit(ws, room_id, user, is_dm, msg):
             return
         set_map(room_id, mp)
     await broadcast(room_id, "fog_changed", {"cells": changed, "terrain": terrain})
+
+
+async def handle_fog_toggle(ws, room_id, user, is_dm, msg):
+    """Room-wide fog-off flag: terrain+static entities visible to everyone.
+
+    Stored inside the persisted map (survives reloads and map edits; the
+    editor merge in dispatch keeps it off stale snapshots). NPC live
+    visibility is untouched — the LOS pipeline still hides hidden foes.
+    """
+    if not is_dm:
+        await send_to(ws, "error", {"msg": "DM only"})
+        return
+    on = bool(msg.get("on"))
+    async with map_lock(room_id):
+        mp = get_map(room_id)
+        if bool(mp.get("fog_off")) == on:
+            return
+        mp["fog_off"] = on
+        set_map(room_id, mp)
+    await broadcast(room_id, "map_changed", None)

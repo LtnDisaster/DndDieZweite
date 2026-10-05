@@ -12,6 +12,12 @@ def at_cell(items, cx, cy):
 
 
 async def hit_trap(room_id, tok, trap):
+    # One-shot lifecycle: the trap remains in the persistent map state marked
+    # triggered+discovered; walk() will not spring it a second time, and map
+    # edits preserve the flags (dispatch merge). Only a fresh trap entity
+    # (delete + re-place in the editor) re-arms it.
+    trap["triggered"] = True
+    trap["triggered_by"] = tok.get("id")
     trap["discovered"] = True
     events.emit(events.make("trap_triggered", room_id=room_id, actor_id=tok.get("id"),
                             trap_label=trap.get("label"), dc=trap.get("dc"),

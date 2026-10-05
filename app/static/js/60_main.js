@@ -215,7 +215,7 @@ function wire(){
   for (const b of $("hp-btns").querySelectorAll("button"))
     b.onclick = () => hpDelta(+b.dataset.hp);
   $("btn-npc-add").onclick = () => {
-    const n = $("npc-name").value.trim(); if (n){ wsSend({ type:"add_token", label:n }); $("npc-name").value=""; }
+    const n = $("dm-npc-name").value.trim(); if (n){ wsSend({ type:"add_token", label:n }); $("dm-npc-name").value=""; }
   };
   $("btn-edit-map").onclick = () => { state.editing ? editorClose() : editorOpen(); };
   $("btn-long-rest").onclick = () => wsSend({ type: "long_rest",
@@ -234,13 +234,31 @@ function wire(){
   $("view-tactical").onclick = () => setViewMode("tactical");
   $("view-diorama").onclick = () => setViewMode("diorama");
   renderViewToggle();
-  for (const b of document.querySelectorAll(".brush"))
+  const helpOverlay = () => $("help-overlay");
+  const setHelp = on => { const h = helpOverlay(); if (h) h.classList.toggle("hidden", !on); };
+  const helpBtn = $("btn-help");
+  if (helpBtn) helpBtn.onclick = () => setHelp(helpOverlay().classList.contains("hidden"));
+  const helpClose = $("btn-help-close");
+  if (helpClose) helpClose.onclick = () => setHelp(false);
+  const hOverlay = helpOverlay();
+  if (hOverlay) hOverlay.onclick = e => { if (e.target === hOverlay) setHelp(false); };
+  for (const b of document.querySelectorAll("#side-tabs button"))
+    b.onclick = () => { localStorage.setItem(sideTabKey(), b.dataset.tab); applySideTab(); };
+  const ft = $("btn-fog-toggle");
+  if (ft) ft.onclick = () => {
+    if (!state.room || state.room.role !== "dm") return;
+    wsSend({ type: "fog_toggle", on: !(state.grid && state.grid.fog_off) });
+  };
+  for (const b of document.querySelectorAll(".brush")) {
+    if (b.id === "btn-fog-toggle") continue;
     b.onclick = () => { state.brush = b.dataset.b;
       document.querySelectorAll(".brush").forEach(x => x.classList.toggle("active", x === b));
       $("trap-fields").classList.toggle("hidden", b.dataset.b !== "trap");
       $("loot-fields").classList.toggle("hidden", b.dataset.b !== "loot");
       $("door-fields").classList.toggle("hidden", b.dataset.b !== "door");
       const pf = $("pin-fields"); if (pf) pf.classList.toggle("hidden", !["pin","pinrm"].includes(b.dataset.b)); };
+  }
+  renderFogToggle();
   $("btn-ed-save").onclick = () => {
     if (!state.editMap) return;
     wsSend({ type:"map_edit", map: state.editMap, reset_fog: $("ed-fog").checked });

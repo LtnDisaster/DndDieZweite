@@ -44,12 +44,26 @@ def _reveal_player_token(mp, tok):
     return los.visible_cells(mp, footprint.player_source_cells(mp, [tok]), radius=mapmodel.FOG_R), mp
 
 
+def _movement_block_reason(tok):
+    """Authoritative movement gate for incapacitated player characters."""
+    cid = tok.get("character_id")
+    if cid is not None:
+        ch = db.q1("SELECT hp FROM characters WHERE id=?", (cid,))
+        if ch is not None and int(ch.get("hp") or 0) <= 0:
+            return "You cannot move while downed"
+    return None
+
+
 async def handle_move(ws, room_id, user, is_dm, msg):
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:
         return
     if not (is_dm or tok["owner_user_id"] == user["id"]):
         await send_to(ws, "error", {"msg": "You can only move your own token"})
+        return
+    blocked = _movement_block_reason(tok)
+    if blocked:
+        await send_to(ws, "error", {"msg": blocked})
         return
     mp = get_map(room_id)
     cell = mp["cell"]
@@ -85,8 +99,41 @@ async def handle_move(ws, room_id, user, is_dm, msg):
 
     if origin == (tx, ty):
         return
-    path = find_path(mp["w"], mp["h"], mp["cells"], origin, (tx, ty),
-                     blocked_edges=mapmodel.blocked_edges(mp), footprint=side)
+    # A confirmed preview must execute EXACTLY the route the preview showed.
+    # The route is fully revalidated against the current authoritative map,
+    # and walk() revalidates every step again while moving. If the world
+    # changed since the preview (door closed, token nudged, route edited)
+    # the route is REJECTED so the client must re-preview and re-confirm —
+    # the server never silently sends the token on a different route.
+    path = None
+    proposed = msg.get("path")
+    if isinstance(proposed, list) and proposed:
+        candidate = []
+        cur = origin
+        valid = True
+        for point in proposed[:mp["w"] * mp["h"]]:
+            try:
+                nxt = (int(point["x"]), int(point["y"]))
+            except (KeyError, TypeError, ValueError):
+                valid = False
+                break
+            if not step_legal(mp["w"], mp["h"], mp["cells"], cur, nxt,
+                              blocked_edges=mapmodel.blocked_edges(mp), footprint=side):
+                valid = False
+                break
+            candidate.append(nxt)
+            cur = nxt
+        if valid and candidate and candidate[-1] == (tx, ty):
+            path = candidate
+        else:
+            await send_to(ws, "error", {"msg": "Route changed — please plan it again",
+                                        "code": "route_invalid"})
+            return
+    if path is None:
+        # No proposed route at all: DM drags/teleports and direct integrations.
+        # (Interactive player moves always come with a confirmed preview path.)
+        path = find_path(mp["w"], mp["h"], mp["cells"], origin, (tx, ty),
+                         blocked_edges=mapmodel.blocked_edges(mp), footprint=side)
     if path is None:
         await send_to(ws, "error", {"msg": "No path there"})
         return
@@ -106,6 +153,15 @@ async def walk(room_id, token_id, path, mover_ws=None):
             tok = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
             if tok is None or tok["room_id"] != room_id:
                 return
+            # A token that dropped to 0 HP mid-walk (trap on the route, readied
+            # attack between steps) must not finish the trip: the same
+            # authoritative gate as move/preview applies to every step.
+            downed = _movement_block_reason(tok)
+            if downed:
+                stop_reason = "downed"
+                if mover_ws is not None:
+                    await send_to(mover_ws, "error", {"msg": downed})
+                break
             # Revalidate against the CURRENT world before committing the step. Door,
             # wall and map edits hold this same map_lock, so validation + the position
             # write are atomic against them: a route valid when the walk began can no
@@ -132,7 +188,14 @@ async def walk(room_id, token_id, path, mover_ws=None):
                 newly = mapmodel.reveal_cells(mp, visible) if reveals else []
                 map_dirty = False
                 trap = at_cell(mp["traps"], cx, cy)
-                if trap and not trap.get("discovered"):
+                # One-shot re-entry gate: TRIGGERED (sprung), not discovered —
+                # a detected-but-un-sprung trap still springs on a later step.
+                if trap and not trap.get("triggered"):
+                    # Persist discovery before hit_trap emits HP/snapshot events.
+                    # Otherwise a refresh triggered during resolution can briefly
+                    # reload the old hidden trap and make it appear to vanish.
+                    trap["discovered"] = True
+                    set_map(room_id, mp)
                     stop_reason = "trap" if await hit_trap(room_id, tok, trap) else stop_reason
                     map_dirty = True
                 loot = at_cell(mp["loot"], cx, cy)
@@ -190,6 +253,10 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
         return
     if not (is_dm or tok["owner_user_id"] == user["id"]):
         await send_to(ws, "error", {"msg": "You can only preview your own token"})
+        return
+    blocked = _movement_block_reason(tok)
+    if blocked:
+        await send_to(ws, "error", {"msg": blocked})
         return
     try:
         tx, ty = int(msg["tx"]), int(msg["ty"])

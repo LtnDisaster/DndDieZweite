@@ -111,6 +111,7 @@
       <button id="btn-back" class="ghost">← Lobby</button>
       <h1 id="room-title">Room</h1>
       <span id="room-code" class="code"></span>
+      <button id="btn-help" class="ghost" title="Help &amp; keyboard shortcuts (?)">?</button>
       <span id="room-role" class="badge"></span>
       <span id="viewtoggle" title="Personal view (this browser only; other players keep their own view)">
         <button id="view-tactical" class="primary" type="button">Tactical</button>
@@ -192,6 +193,12 @@
           <button data-d="d10">d10</button><button data-d="d12">d12</button><button data-d="d20" class="hot">d20</button>
         </div>
       </div>
+      <div class="row side-tabs" id="side-tabs" title="Group sidebar panels">
+        <button data-tab="game" class="ghost">⚔ Game</button>
+        <button data-tab="chars" class="ghost">👤 Chars</button>
+        <button data-tab="story" class="ghost">📜 Story</button>
+        <button data-tab="dm" class="ghost dm-only">🎲 DM</button>
+      </div>
       <div class="panel hidden" id="sheet-roll">
         <h2 id="sr-name">Rolls</h2>
         <div class="row sr-toggles">
@@ -211,7 +218,7 @@
         <div class="row chips" id="sr-abil"></div>
         <div id="sr-weapons"></div>
       </div>
-      <div class="panel">
+      <div class="panel" data-tab="game">
         <h2>Initiative</h2>
         <ol id="init-list"></ol>
         <div class="row" id="init-btns">
@@ -221,15 +228,15 @@
           <button id="btn-init-end">End</button>
         </div>
       </div>
-      <div class="panel hidden" id="mychars">
+      <div class="panel hidden" id="mychars" data-tab="chars">
         <h2>My Characters</h2>
         <div id="my-chars"></div>
       </div>
-      <div class="panel">
+      <div class="panel" data-tab="game">
         <h2>Party</h2>
         <div id="party"></div>
       </div>
-      <div class="panel">
+      <div class="panel" data-tab="story">
         <h2>Quest Log</h2>
         <div id="quest-list"></div>
         <div class="row hidden" id="quest-new">
@@ -237,7 +244,7 @@
           <button id="btn-q-add" class="ghost">+ Quest</button>
         </div>
       </div>
-      <div class="panel" id="journal">
+      <div class="panel" id="journal" data-tab="story">
         <h2>Journal</h2>
         <div class="row"><select id="note-list" class="journal-list" style="max-height:110px"></select>
           <button id="btn-note-view" class="ghost">View</button></div>
@@ -267,10 +274,10 @@
           <label title="Apply critical damage to selected token"><input id="hp-crit" type="checkbox"> crit</label>
         </div>
       </div>
-      <div class="panel hidden" id="dmtools">
+      <div class="panel hidden" id="dmtools" data-tab="dm">
         <h2>DM Tools</h2>
         <div class="row">
-          <input id="npc-name" placeholder="Enemy / NPC name">
+          <input id="dm-npc-name" placeholder="Enemy / NPC name">
           <button id="btn-npc-add">＋ Token</button>
         </div>
         <div class="row"><small class="meta" style="opacity:.6">Add a token, then click it to edit its
@@ -359,6 +366,7 @@
             <button class="brush" data-b="erase" title="Erase cell">🧹</button>
             <button class="brush" data-b="reveal" title="Reveal explored fog">👁</button>
             <button class="brush" data-b="refog" title="Hide explored fog">🌫</button>
+            <button class="brush" id="btn-fog-toggle" title="Show all terrain to every player. Hidden foes still need line of sight.">💡</button>
           </div>
           <div class="row trapfields hidden" id="trap-fields">
             <input id="trap-label" placeholder="Trap label" maxlength="80" value="Poison Needle">
@@ -394,6 +402,29 @@
     </aside>
   </main>
 </section>
+
+<div id="help-overlay" class="help-overlay hidden">
+  <div class="help-card panel">
+    <div class="row"><h2 style="flex:1">How to play</h2><button id="btn-help-close" class="ghost">✕</button></div>
+    <p><b>Views.</b> Tactical is the top-down grid; Diorama is the same room and the same
+      server pathfinding in an isometric table view. Your token, movement and path previews
+      behave identically in both.</p>
+    <p><b>Movement.</b> Click your token, then click a destination: you get a path preview
+      first. Double-click the previewed goal (or press the confirm button) to walk.
+      The walk stops at traps, closed doors, and if you drop to 0 HP.</p>
+    <p><b>Fog of war.</b> Explored terrain stays explored. The DM's 💡 brush toggles
+      room-wide terrain reveal; hidden creatures still need line of sight either way.</p>
+    <p><b>Sidebar tabs.</b> ⚔ Game (initiative, party) · 👤 Chars (your character) ·
+      📜 Story (quests, journal) · 🎲 DM tools. Chat and dice stay visible always.</p>
+    <p><b>Audio.</b> ▶ starts or resumes the room ambience (self-hosted tracks resume
+      where they were; YouTube/Spotify embeds restart). ⏸ pauses, Stop clears the source.</p>
+    <p><b>Keys.</b> <kbd>?</kbd> help · <kbd>Esc</kbd> close / cancel path ·
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows pan the camera ·
+      middle/right-drag pans too.</p>
+    <p class="meta">Anything surprising? Tell your DM — the server decides everything
+      that matters, so what you see is what really happened.</p>
+  </div>
+</div>
 
 <script src="/static/js/10_core.js"></script>
 <script src="/static/js/20_lobby.js"></script>

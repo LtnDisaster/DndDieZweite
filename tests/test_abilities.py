@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 from app import abilities, db, gear
 from app.main import app
 
-from test_movement_fog import (H, add_npc, base_room, reg, recv_until,
+from test_movement_fog import (H, add_npc, base_room, join_room, reg, recv_until,
                                set_grid, state_of, wall_column, ws_connect)
 
 
@@ -211,8 +211,11 @@ def test_heal_uses_central_health_logic(client, monkeypatch):
 def test_condition_effect_stores_on_existing_condition_system(client, monkeypatch):
     dm, player, code, ch = base_room(client)
     from app import conditions as C
-    npc_tok = make_caster_npc(client, dm, code)
     px, py = player_cell(code, ch)
+    # grapple_bind has 30 ft range (6 cells); spawn the caster within reach of
+    # the assigned token instead of the default corner, or the server correctly
+    # rejects the cast as out of range.
+    npc_tok = make_caster_npc(client, dm, code, x=px + 2, y=py)
     fake_rolls(monkeypatch, {})
     with ws_connect(client, dm, code) as ws:
         ws.send_json({"type": "ability_cast", "token_id": npc_tok,
@@ -340,7 +343,10 @@ def test_attack_resolution_against_existing_ac(client, monkeypatch):
 
 def test_large_token_hit_on_non_origin_cell_only(client, monkeypatch):
     dm, player, code, ch = base_room(client)
-    caster = make_caster_npc(client, dm, code, x=2, y=8)
+    # dart_prick range is 60 ft = 12 cells; aim cell (15,3) and the adjacent
+    # outside cell (16,3) must BOTH be within range, else the cast is rejected
+    # as out of range before footprint targeting can be exercised.
+    caster = make_caster_npc(client, dm, code, x=4, y=8)
     with ws_connect(client, dm, code) as ws:
         tid = add_npc(ws, label="BigOne", cx=14, cy=2)
         db.x("UPDATE tokens SET size='Large' WHERE id=?", (tid,))
@@ -373,9 +379,13 @@ def test_los_required_rejects_wall_allows_open_door(client, monkeypatch):
                       "ability_id": "training_bolt",
                       "target_id": token_of(code, ch["id"])["id"]})
         assert "Line of sight" in recv_until(ws, "error")["payload"]["msg"]
-        # same geometry, door set open in the wall column → allowed
+        # Real door usage: the doorway is a GAP in the wall cell column, the
+        # door object is the EDGE across that gap. Walls are cells, doors are
+        # edges — an edge door on top of a wall cell does not open the sight
+        # line. Clear the gap cell, then add the (open) edge across it.
         g = state_of(client, dm, code)["grid"]
-        g["doors"] = [{"x": wall, "y": py, "dir": "v", "closed": False, "locked": False}]
+        g["cells"][py * g["w"] + wall] = 0
+        g["doors"] = [{"x": wall - 1, "y": py, "dir": "v", "closed": False, "locked": False}]
     with ws_connect(client, dm, code) as ws:
         ws.send_json({"type": "map_edit", "map": g})
         recv_until(ws, "map_changed")
@@ -392,8 +402,9 @@ def test_range_authority(client, monkeypatch):
     fake_rolls(monkeypatch, {"1d20": [1], "3d6": [5]})
     with ws_connect(client, dm, code) as ws:
         ws.send_json({"type": "ability_cast", "token_id": npc_tok,
-                      "ability_id": "training_bolt",
-                      "target_id": token_of(code, ch["id"])["id"]})
+                      # dart_prick has the 60 ft range; training_bolt reaches 120 ft
+                      # and would legitimately hit from 65 ft.
+                      "ability_id": "dart_prick", "x": px, "y": py})
         assert "out of range" in recv_until(ws, "error")["payload"]["msg"]
     assert db.q1("SELECT hp FROM characters WHERE id=?", (ch["id"],))["hp"] == 30
 
@@ -403,17 +414,20 @@ def test_range_authority(client, monkeypatch):
 def test_player_cannot_cast_through_others_malformed_and_dead_socket(client):
     dm, player, code, ch = base_room(client)
     other = reg(client, "pl2")
+    join_room(client, other, code)          # assign requires room membership
     ch2 = client.post("/api/characters", headers=H(other), json={
         "name": "Peer", "race": "Human", "char_class": "Fighter", "level": 5,
         "stats": {}, "hp": 30, "max_hp": 30}).json()["id"]
-    client.post(f"/api/rooms/{code}/assign", json={"character_id": ch2}, headers=H(other))
+    r = client.post(f"/api/rooms/{code}/assign", json={"character_id": ch2}, headers=H(other))
+    assert r.status_code == 200, r.text
     peer_tok = token_of(code, ch2)
+    assert peer_tok is not None
     npc_tok = make_caster_npc(client, dm, code)
     with ws_connect(client, player, code) as ws:
         ws.send_json({"type": "ability_cast", "token_id": peer_tok["id"],
                       "ability_id": "focus_gaze"})                  # someone else's token
         assert "own character" in recv_until(ws, "error")["payload"]["msg"]
-        ws.send_json({"type": "ability_cast", "token_id": npc_tok["id"],
+        ws.send_json({"type": "ability_cast", "token_id": npc_tok,
                       "ability_id": "focus_gaze"})                  # DM's NPC
         assert "own character" in recv_until(ws, "error")["payload"]["msg"]
         ws.send_json({"type": "ability_cast", "token_id": token_of(code, ch["id"])["id"],

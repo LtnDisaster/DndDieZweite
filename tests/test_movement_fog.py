@@ -51,23 +51,32 @@ def ws_connect(client, user, code):
     return client.websocket_connect(f"/ws/{code}", headers={"cookie": user["cookie"]})
 
 
-def recv_until(ws, kind, tries=30):
+def recv_until(ws, kind, tries=30, fail_on_error=True):
+    # An unexpected server "error" means the awaited event will never arrive;
+    # fail loudly with its message instead of blocking on receive_json forever.
+    # Tests that deliberately provoke errors pass fail_on_error=False.
     seen = []
     for _ in range(tries):
         ev = ws.receive_json()
         seen.append(ev.get("kind"))
         if ev.get("kind") == kind:
             return ev
+        if ev.get("kind") == "error" and fail_on_error and kind != "error":
+            raise AssertionError(f"unexpected error while waiting for {kind!r}: "
+                                 f"{ev.get('payload')} (saw {seen})")
     raise AssertionError(f"never saw {kind!r}; saw {seen}")
 
 
-def recv_kinds_until(ws, kind, tries=30):
+def recv_kinds_until(ws, kind, tries=30, fail_on_error=True):
     seen = []
     for _ in range(tries):
         ev = ws.receive_json()
         seen.append(ev.get("kind"))
         if ev.get("kind") == kind:
             return seen
+        if ev.get("kind") == "error" and fail_on_error and kind != "error":
+            raise AssertionError(f"unexpected error while waiting for {kind!r}: "
+                                 f"{ev.get('payload')} (saw {seen})")
     raise AssertionError(f"never saw {kind!r}; saw {seen}")
 
 

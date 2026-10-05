@@ -54,6 +54,8 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
         "speed": base.get("speed"), "spells": base.get("spells"),
         "attacks": base.get("attacks"), "spell_slots": base.get("spell_slots"),
         "saves": base.get("saves"), "defenses": base.get("defenses"),
+        "abilities": base.get("abilities"), "resources": base.get("resources"),
+        "notes": base.get("notes"),
     })
     size = _clean_size(msg.get("size") or base.get("size"))
     disposition = _clean_disposition(msg.get("disposition") or base.get("disposition"))
@@ -81,7 +83,8 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
     base = msg.get("npc") if isinstance(msg.get("npc"), dict) else msg
     merged.update({k: base[k] for k in
                    ("level", "stats", "hp", "max_hp", "ac", "speed", "attacks", "spells",
-                    "spell_slots", "saves", "defenses") if k in base})
+                    "spell_slots", "saves", "defenses",
+                    "abilities", "resources", "notes") if k in base})
     label = str(msg.get("label", tok["label"]))[:32]
     merged["name"] = label
     block = npc.clean_npc(merged)

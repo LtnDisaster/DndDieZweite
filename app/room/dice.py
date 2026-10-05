@@ -529,6 +529,29 @@ async def handle_long_rest(ws, room_id, user, is_dm, msg):
                  m["character_id"]))
             if death is not None:
                 c.execute("UPDATE tokens SET death=NULL WHERE id=?", (tok["id"],))
+    # Monster tokens refill too: per-slot used=0, resources back to max.
+    # HP/conditions are deliberately NOT restored here — the DM decides when
+    # a creature recovers (and clear_conditions already covers conditions).
+    for tok in db.q("SELECT id, npc FROM tokens WHERE room_id=? AND character_id IS NULL "
+                    "AND npc IS NOT NULL", (room_id,)):
+        block = npc.load(tok)
+        if not block:
+            continue
+        changed = False
+        slots = gear.clean_slots(block.get("spell_slots"))
+        if any(d["used"] for d in slots.values()):
+            for lv in slots:
+                slots[lv]["used"] = 0
+            block["spell_slots"] = slots
+            changed = True
+        resources = npc._clean_resources(block.get("resources"))
+        if any(r["cur"] != r["max"] for r in resources):
+            for r in resources:
+                r["cur"] = r["max"]
+            block["resources"] = resources
+            changed = True
+        if changed:
+            db.x("UPDATE tokens SET npc=? WHERE id=?", (db.json_dumps(block), tok["id"]))
     if clear_conditions:
         db.x("UPDATE tokens SET conds='[]' WHERE room_id=?", (room_id,))
     sys_msg(room_id, "🛌 The party takes a long rest — HP, spell slots, hit dice, long-rest "

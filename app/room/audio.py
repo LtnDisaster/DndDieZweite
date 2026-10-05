@@ -226,6 +226,25 @@ async def handle_audio_play(ws, room_id, user, is_dm, msg):
     await _broadcast(room_id)
 
 
+async def handle_audio_pause(ws, room_id, user, is_dm, msg):
+    """Pause = keep current_id, clear playing. Stop remains a separate action.
+
+    Direct (self-hosted) sources resume where they were on every client;
+    YouTube/Spotify embeds restart at 0 — the UI labels this honestly.
+    """
+    if not is_dm:
+        await _error(ws, "DM only")
+        return
+    raw = db.q1("SELECT audio_json FROM room_state WHERE room_id=?", (room_id,))
+    state = load_state((raw or {}).get("audio_json"))
+    if not state["current_id"]:
+        return
+    state["playing"] = False
+    state["updated_at"] = _stamp()
+    save_state(room_id, state)
+    await _broadcast(room_id)
+
+
 async def handle_audio_stop(ws, room_id, user, is_dm, msg):
     if not is_dm:
         await _error(ws, "DM only")

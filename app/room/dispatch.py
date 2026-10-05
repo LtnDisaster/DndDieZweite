@@ -2,8 +2,8 @@
 from .. import db, mapmodel
 from .aoe import handle_aoe
 from .abilities import handle_ability_cast
-from .audio import (handle_audio_add, handle_audio_play, handle_audio_remove,
-                    handle_audio_stop, handle_sound_trigger)
+from .audio import (handle_audio_add, handle_audio_pause, handle_audio_play,
+                    handle_audio_remove, handle_audio_stop, handle_sound_trigger)
 from .chat import handle_chat, handle_narrative
 from .combat import (handle_hp, handle_init_end, handle_init_end_round,
                      handle_init_next, handle_init_start)
@@ -14,7 +14,7 @@ from .encounters import handle_spawn_encounter
 from .dice import (handle_cast, handle_long_rest, handle_npc_attack, handle_resource,
                    handle_roll, handle_short_rest)
 from .items import handle_attune, handle_identify, handle_recharge, handle_use_item
-from .fog import handle_fog_edit
+from .fog import handle_fog_edit, handle_fog_toggle
 from .movement import handle_move, handle_path_preview, handle_stop_move
 from .net import broadcast, get_map, map_lock, send_to, set_map, sys_msg
 from .pings import handle_ping
@@ -37,8 +37,40 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
         return
     async with map_lock(room_id):
         old = get_map(room_id)
-        if (mp_new["w"], mp_new["h"]) == (old["w"], old["h"]) and not msg.get("reset_fog"):
+        same_size = (mp_new["w"], mp_new["h"]) == (old["w"], old["h"])
+        # The fog-off flag is owned by fog_toggle only; editor snapshots
+        # never carry it and must not reset an active reveal.
+        mp_new["fog_off"] = bool(old.get("fog_off"))
+        if msg.get("reset_fog"):
+            mp_new["explored"] = [0] * (mp_new["w"] * mp_new["h"])
+        elif same_size:
             mp_new["explored"] = old["explored"]
+        else:
+            # Resize without reset_fog: carry the overlapping region row-wise.
+            # Copying the old array wholesale (wrong length) used to be dropped
+            # silently by sanitize on the next load — fog vanished with no DM
+            # intent behind it.
+            ow, oh, nw, nh = old["w"], old["h"], mp_new["w"], mp_new["h"]
+            carried = [0] * (nw * nh)
+            for y in range(min(oh, nh)):
+                row = old["explored"][y * ow: y * ow + min(ow, nw)]
+                carried[y * nw: y * nw + len(row)] = row
+            mp_new["explored"] = carried
+
+        # Editor snapshots can be stale while play changes trap/loot runtime state.
+        # Preserve authoritative runtime flags for entities that still exist.
+        old_traps = {e.get("id"): e for e in old.get("traps", [])}
+        for trap in mp_new.get("traps", []):
+            prev = old_traps.get(trap.get("id"))
+            if prev is not None:
+                trap["discovered"] = bool(prev.get("discovered"))
+                trap["triggered"] = bool(prev.get("triggered"))
+                trap["triggered_by"] = prev.get("triggered_by")
+        old_loot = {e.get("id"): e for e in old.get("loot", [])}
+        for loot in mp_new.get("loot", []):
+            prev = old_loot.get(loot.get("id"))
+            if prev is not None:
+                loot["taken_by"] = prev.get("taken_by")
         set_map(room_id, mp_new)
     sys_msg(room_id, "DM updated the map.")
     await broadcast(room_id, "map_changed", None)
@@ -54,6 +86,7 @@ HANDLERS = {
     "stop_move": handle_stop_move,
     "path_preview": handle_path_preview,
     "fog_edit": handle_fog_edit,
+    "fog_toggle": handle_fog_toggle,
     "map_edit": handle_map_edit,
     "add_token": handle_add_token,
     "del_token": handle_del_token,
@@ -85,6 +118,7 @@ HANDLERS = {
     "audio_add": handle_audio_add,
     "audio_remove": handle_audio_remove,
     "audio_play": handle_audio_play,
+    "audio_pause": handle_audio_pause,
     "audio_stop": handle_audio_stop,
     "sound_trigger": handle_sound_trigger,
     "quest_add": handle_quest_add,

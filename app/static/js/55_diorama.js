@@ -11,7 +11,10 @@ const DIO = { wallH: 0.62 };
 function dioProj(lx, ly, c){               // lattice (continuous) -> screen
   return [ (lx - ly) * c * 0.5 + state.cam.ox, (lx + ly) * c * 0.25 + state.cam.oy ];
 }
-function dioUnproj(wx, wy, c){             // screen -> lattice (continuous)
+function dioUnproj(wx, wy, c){             // ABSOLUTE screen -> lattice (continuous).
+                                           // Exact inverse of dioProj: both operate on
+                                           // absolute canvas coordinates and apply state.cam
+                                           // themselves — never pre-subtract the camera.
   const a = (wx - state.cam.ox) / (c * 0.5), b = (wy - state.cam.oy) / (c * 0.25);
   return { lx: b/2 + a/2, ly: b/2 - a/2 };
 }
@@ -178,17 +181,23 @@ function dioDoorClick(wx, wy, c){
 }
 function dioramaDown(p){
   const g = state.grid, c = cellSize();
-  const wx = p.x - state.cam.ox, wy = p.y - state.cam.oy;
-  const t = g ? dioTokenClick(wx, wy, c) : null;
+  // Single coordinate space: dioProj/dioUnproj/token+door hit tests all use
+  // ABSOLUTE canvas coordinates. Panning (cam) must not shift what a click
+  // resolves to — pre-subtracting cam here used to double-subtract it inside
+  // dioUnproj, which sent movement destinations to the wrong cell.
+  const t = g ? dioTokenClick(p.x, p.y, c) : null;
   if (t){ renderSheet(t); return; }
-  const d = g ? dioDoorClick(wx, wy, c) : null;
+  const d = g ? dioDoorClick(p.x, p.y, c) : null;
   if (d){ wsSend({ type:"door", x: d.x, y: d.y, dir: d.dir, action:"toggle" }); return; }
-  renderSheet(null);
-  if (g && state.room && state.room.role !== "dm" && ownToken()){
-    const { lx, ly } = dioUnproj(wx, wy, c);
+  // Empty-space clicks are movement destinations; do not clear the selected
+  // DM/NPC token before resolving ownToken().
+  if (g && state.room && ownToken()){
+    const { lx, ly } = dioUnproj(p.x, p.y, c);
     const cx = Math.floor(lx), cy = Math.floor(ly);
     if (cx < 0 || cy < 0 || cx >= g.w || cy >= g.h) return;
     if (state.plan && state.plan.goal.cx === cx && state.plan.goal.cy === cy) confirmPlan();
     else planMove(cx, cy);          // requests SERVER path preview, same as tactical
+  } else {
+    renderSheet(null);
   }
 }

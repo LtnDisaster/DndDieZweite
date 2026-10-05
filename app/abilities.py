@@ -179,8 +179,11 @@ def target_cells(defn, mp, point, direction="E"):
 
 def tokens_in_cells(mp, room_id, cells, exclude_id=None):
     """Tokens with ANY occupied footprint cell inside ``cells`` — the centralized
-    footprint-aware targeting rule (a 1-cell overlap is enough; D61)."""
-    hit = set(cells)
+    footprint-aware targeting rule (a 1-cell overlap is enough; D61).
+    ``cells`` accepts either (x, y) pairs or flat ``y*w+x`` indices (effects.py
+    returns indices, footprint.py returns pairs — normalize once HERE)."""
+    w = mp["w"]
+    hit = {c if isinstance(c, tuple) else (c % w, c // w) for c in cells}
     out = []
     for tok in db.q("SELECT * FROM tokens WHERE room_id=?", (room_id,)):
         if exclude_id is not None and tok["id"] == exclude_id:

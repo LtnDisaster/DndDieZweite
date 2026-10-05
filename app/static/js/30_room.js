@@ -22,23 +22,39 @@ async function openRoom(code){
   renderFeed();
   updateMoveControls();
   renderParty(); renderInit();   renderOnline();
-  renderMyChars(); renderRolls();
+  renderMyChars(); renderRolls(); applySideTab();
   if (s.map){ state.bg = new Image(); state.bg.src = s.map; } else state.bg = null;
   await loadNotes(s.role);
   if (s.role === "dm"){ await loadBestiary(); await loadEncounters(); }
   else { state.encounters = []; state.encRows = []; state.encId = null; }
   show("room"); resize(); startTick(); connectWS(s.code);
 }
+function sideTabKey(){ return "vtt-side-tab-" + ((state.me && state.me.username) || ""); }
+function applySideTab(){
+  const bar = $("side-tabs"); if (!bar || !state.room) return;
+  let tab = localStorage.getItem(sideTabKey());
+  if (!tab) tab = state.room.role === "dm" ? "dm" : "game";
+  if (tab === "dm" && state.room.role !== "dm") tab = "game";
+  // #sheet and other context panels carry no data-tab: their own logic decides.
+  for (const p of document.querySelectorAll("aside.side .panel[data-tab]"))
+    p.classList.toggle("hidden", p.dataset.tab !== tab);
+  // an unassigned character is a blocking prompt, not a tab-scoped panel:
+  const mc = $("mychars");
+  if (mc && mc.classList.contains("nudge")) mc.classList.remove("hidden");
+  for (const b of bar.querySelectorAll("button")) b.classList.toggle("active", b.dataset.tab === tab);
+}
+
 async function refreshRoom(){
   const s = await api(`/rooms/${state.room.code}/state`);
   state.room = s; state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || []; state.grid = s.grid;
+  if (typeof renderFogToggle === "function") renderFogToggle();
   if (state.plan && !state.tokens.find(t => t.id === state.plan.token_id)) state.plan = null;
   updateMoveHud();
   renderParty(); renderInit(); renderMyChars();
   state.quests = s.quests || []; renderQuests();
   state.messages = s.messages || []; state.chat = s.chat || [];
   applyAudioState(s.audio || {}); renderChatTargets(); renderVoiceTargets(); renderAudio();
-  renderFeed();
+  renderFeed(); applySideTab();
 }
 
 /* ---------- bestiary (DM-owned monster templates) ---------- */
@@ -177,6 +193,7 @@ async function saveNpcToBestiary(n, name, tok){
       hp: n.hp, max_hp: n.max_hp, ac: n.ac, speed: n.speed, attacks: n.attacks || [],
       spells: n.spells || [], spell_slots: n.spell_slots || {},
       saves: n.saves || {}, defenses: n.defenses || {},
+      abilities: n.abilities || [], resources: n.resources || [], notes: n.notes || "",
       size: tok?.size || n.size || "Medium", disposition: tok?.disposition || n.disposition || "" });
     toast("Saved to Bestiary"); await loadBestiary();
   } catch(e){ toast(e.message); }
@@ -466,11 +483,18 @@ function renderAmbience(){
     const title = document.createElement("span"); title.className = "am-title";
     title.textContent = `${s.title || "source"} · ${s.kind || "direct"}`;
     const play = document.createElement("button"); play.textContent = "▶";
+    play.title = s.kind === "direct" ? "Play / resume" : "Play (embeds always start at 0)";
     play.onclick = () => wsSend({ type:"audio_play", source_id:s.id });
     const del = document.createElement("button"); del.textContent = "✕"; del.className = "del";
     del.onclick = () => wsSend({ type:"audio_remove", source_id:s.id });
-    row.append(title, play, del);
-    if (state.audio.state.current_id === s.id && state.audio.state.playing) title.style.color = "var(--gold)";
+    row.append(title, play);
+    if (state.audio.state.current_id === s.id && state.audio.state.playing){
+      const pause = document.createElement("button"); pause.textContent = "⏸"; pause.title = "Pause";
+      pause.onclick = () => wsSend({ type:"audio_pause" });
+      row.append(pause);
+      title.style.color = "var(--gold)";
+    }
+    row.append(del);
     list.appendChild(row);
   }
 }
@@ -483,7 +507,8 @@ function renderAudio(){
   const title = $("audio-title");
   if (title) title.textContent = src ? `${src.title || "Ambience"} · ${src.kind || "direct"}` : "No current ambience";
   const status = $("audio-status");
-  if (status) status.textContent = state.audio.local.muted ? "muted" : (st.playing ? (src?.kind === "direct" ? "playing" : "open embed") : "stopped");
+  if (status) status.textContent = state.audio.local.muted ? "muted"
+    : (st.playing ? (src?.kind === "direct" ? "playing" : "open embed") : (src ? "paused" : "stopped"));
   const mute = $("btn-audio-mute");
   if (mute) mute.textContent = state.audio.local.muted ? "🔇" : "🔊";
   const vol = $("audio-vol");
@@ -497,11 +522,28 @@ function stopAudioPlayback(){
   state.audio.iframe = null;
 }
 function setAudioPlayback(){
-  stopAudioPlayback();
   const st = state.audio.state || {};
   const src = (st.sources || []).find(x => x.id === st.current_id) || null;
   renderAudio();
-  if (!src || !st.playing || state.audio.local.muted) return;
+  const want = !!(src && st.playing && !state.audio.local.muted);
+  let directSame = false;
+  try {
+    directSame = !!(src && src.kind === "direct" && state.audio.element &&
+      state.audio.element.src === new URL(src.url, location.origin).href);
+  } catch { directSame = false; }
+  if (!want){
+    // Paused (or locally muted) direct source: keep the element, pause in
+    // place — ▶ resumes where it stopped. Embeds cannot pause, they stop.
+    if (directSame) state.audio.element.pause();
+    else stopAudioPlayback();
+    return;
+  }
+  if (directSame){
+    state.audio.element.volume = state.audio.local.volume;
+    state.audio.element.play().catch(() => toast("Click ▶ to allow audio playback"));
+    return;
+  }
+  stopAudioPlayback();
   if (src.kind === "direct"){
     try {
       const a = new Audio(src.url);
@@ -647,9 +689,9 @@ function renderSheet(tok){
   panel.classList.remove("hidden");
   const m = state.room.members.find(x => x.user_id === tok.owner_user_id);
   const ch = m && m.char;
-  const clsTxt = (ch.class_levels && ch.class_levels.length)
+  const clsTxt = ch && ch.class_levels && ch.class_levels.length
     ? ch.class_levels.map(e => e.class_id[0].toUpperCase() + e.class_id.slice(1) + " " + e.level).join(" / ")
-    : (ch.char_class || "");
+    : ((ch && ch.char_class) || "");
   $("sheet-name").textContent = tok.label + (ch ? ` (${[ch.race, clsTxt, "Lv" + (ch.total_level || ch.level || 1)].filter(Boolean).join(" ")})` : " [NPC]");
   const body = $("sheet-body");
   if (!ch){
@@ -759,7 +801,7 @@ const _nmod = v => { const m = Math.floor(((+v||10)-10)/2); return (m>=0?"+":"")
 function renderNpcSheet(tok){
   const body = $("sheet-body");
   const n = state.npcEdit = JSON.parse(JSON.stringify(
-    Object.assign({ spells:[], spell_slots:{}, stats:{}, attacks:[] }, tok.npc||{})));
+    Object.assign({ spells:[], spell_slots:{}, stats:{}, attacks:[], abilities:[], resources:[] }, tok.npc||{})));
   n.spell_slots = n.spell_slots || {};
   n.saves = n.saves || {};
   const pb = _pb(n.level || 1);
@@ -812,6 +854,14 @@ function renderNpcSheet(tok){
     <div class="wlabel">Attacks <small style="opacity:.6">(pick a target, then Atk)</small></div>
     <div id="npc-attacks"></div>
     <div class="row"><button id="npc-attack-add" class="ghost" type="button">＋ Add attack</button></div>
+    <div class="wlabel">Actions</div>
+    <div id="npc-abilities"></div>
+    <div class="row"><button id="npc-ability-add" class="ghost" type="button">＋ Add action</button></div>
+    <div class="wlabel">Resources <small style="opacity:.6">(refill on long rest)</small></div>
+    <div id="npc-resources"></div>
+    <div class="row"><button id="npc-resource-add" class="ghost" type="button">＋ Add resource</button></div>
+    <div class="wlabel">Notes</div>
+    <div class="row"><textarea id="npc-notes" rows="3" maxlength="1000" placeholder="Tactics, loot, secrets…" style="width:100%">${esc(n.notes||"")}</textarea></div>
     <div class="row">
       <button id="npc-save" class="primary">💾 Save NPC</button>
       <button id="npc-to-best" class="ghost">＋ Bestiary</button>
@@ -852,11 +902,23 @@ function renderNpcSheet(tok){
     n.attacks.push({ id: eid(), name:"Attack", to_hit:0, dmg:"", dc:0, save:"", reach:5 });
     renderNpcAttacks(tok);
   };
+  $("npc-ability-add").onclick = () => {
+    n.abilities = n.abilities || [];
+    n.abilities.push({ name: "Action", desc: "" });
+    renderNpcAbilities(tok);
+  };
+  $("npc-resource-add").onclick = () => {
+    n.resources = n.resources || [];
+    n.resources.push({ name: "Resource", max: 1, cur: 1 });
+    renderNpcResources(tok);
+  };
+  $("npc-notes").oninput = e => { n.notes = e.target.value; };
   $("npc-save").onclick = () => {
     wsSend({ type:"update_npc", token_id: tok.id, label: ($("npc-name").value||"NPC").slice(0,32),
       level: n.level, stats: n.stats, hp: n.hp, max_hp: n.max_hp, ac: n.ac, speed: n.speed,
       attacks: n.attacks, spells: n.spells, spell_slots: n.spell_slots,
       saves: n.saves, defenses: n.defenses,
+      abilities: n.abilities, resources: n.resources, notes: n.notes,
       size: $("npc-size").value, disposition: $("npc-disp").value || "neutral" });
     toast("NPC saved");
   };
@@ -864,8 +926,48 @@ function renderNpcSheet(tok){
   $("npc-to-best").onclick = () => saveNpcToBestiary(n, ($("npc-name").value || "NPC").slice(0,32), tok);
   renderNpcSpells(tok);
   renderNpcAttacks(tok);
+  renderNpcAbilities(tok);
+  renderNpcResources(tok);
   syncNpcHp();
   wireConditions(tok);
+}
+
+function renderNpcAbilities(tok){
+  const n = state.npcEdit, box = $("npc-abilities"); if (!n || !box) return;
+  n.abilities = n.abilities || [];
+  box.innerHTML = "";
+  n.abilities.forEach((a, i) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<input class="npc-ab-name" placeholder="Breath Weapon" maxlength="32" value="${esc(a.name||"")}" style="width:34%">
+      <input class="npc-ab-desc" placeholder="30ft cone, DC15, 8d6 fire" maxlength="240" value="${esc(a.desc||"")}" style="flex:1">
+      <button class="npc-ab-del" style="color:var(--red)" title="Remove">✕</button>`;
+    row.querySelector(".npc-ab-name").oninput = e => { a.name = e.target.value; };
+    row.querySelector(".npc-ab-desc").oninput = e => { a.desc = e.target.value; };
+    row.querySelector(".npc-ab-del").onclick = () => { n.abilities.splice(i, 1); renderNpcAbilities(tok); };
+    box.appendChild(row);
+  });
+}
+
+function renderNpcResources(tok){
+  const n = state.npcEdit, box = $("npc-resources"); if (!n || !box) return;
+  n.resources = n.resources || [];
+  box.innerHTML = "";
+  n.resources.forEach((r, i) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<input class="npc-res-name" placeholder="Breath Weapon" maxlength="32" value="${esc(r.name||"")}" style="width:44%">
+      <span class="tiny">used</span>
+      <input class="npc-res-cur" type="number" min="0" max="99" value="${r.cur ?? r.max ?? 1}" style="width:46px">
+      <span class="tiny">of</span>
+      <input class="npc-res-max" type="number" min="0" max="99" value="${r.max ?? 1}" style="width:46px">
+      <button class="npc-res-del" style="color:var(--red)" title="Remove">✕</button>`;
+    row.querySelector(".npc-res-name").oninput = e => { r.name = e.target.value; };
+    row.querySelector(".npc-res-cur").oninput = e => { r.cur = Math.max(0, Math.min(99, +e.target.value||0)); };
+    row.querySelector(".npc-res-max").oninput = e => { r.max = Math.max(0, Math.min(99, +e.target.value||0)); };
+    row.querySelector(".npc-res-del").onclick = () => { n.resources.splice(i, 1); renderNpcResources(tok); };
+    box.appendChild(row);
+  });
 }
 
 function renderNpcAttacks(tok){

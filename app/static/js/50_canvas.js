@@ -1,4 +1,11 @@
 /* ---------- canvas: camera, grid, fog, editor ---------- */
+function renderFogToggle(){
+  const b = $("btn-fog-toggle"); if (!b) return;
+  const on = !!(state.grid && state.grid.fog_off);
+  b.classList.toggle("active", on);
+  b.title = on ? "Fog is OFF — all terrain revealed. Click to restore fog of war."
+               : "Show all terrain to every player. Hidden foes still need line of sight.";
+}
 const cv = $("map"), ctx = cv.getContext("2d");
 function cellSize(){ return state.grid ? state.grid.cell : 50; }
 function worldW(){ return state.grid ? state.grid.w * cellSize() : 2000; }
@@ -208,7 +215,12 @@ function evtPos(e){ const r = cv.getBoundingClientRect();
   return { x: cx, y: cy }; }
 function toCell(px, py){ const c = cellSize();
   return { cx: Math.floor((px - state.cam.ox) / c), cy: Math.floor((py - state.cam.oy) / c) }; }
-function canMove(t){ return state.room && (state.room.role === "dm" || t.owner_user_id === state.me.id); }
+function canMove(t){
+  if (!state.room || !t) return false;
+  const m = state.room.members && state.room.members.find(x => x.user_id === t.owner_user_id);
+  if (m && m.char && (+m.char.hp || 0) <= 0) return false;
+  return state.room.role === "dm" || t.owner_user_id === state.me.id;
+}
 function tokenAt(x, y){
   const c = cellSize();
   return [...state.tokens].reverse().find(t => {
@@ -223,8 +235,8 @@ function ownToken(){
   if (!state.room) return null;
   const sel = state.tokens.find(t => t.id === state.sel);
   if (sel && canMove(sel)) return sel;
-  const mine = state.tokens.filter(t => t.owner_user_id === state.me.id);
-  return mine.length === 1 ? mine[0] : (sel || null);
+  const mine = state.tokens.filter(t => t.owner_user_id === state.me.id && canMove(t));
+  return mine.length === 1 ? mine[0] : null;
 }
 function sendMove(cx, cy, teleport=false){
   const t = ownToken();
@@ -261,7 +273,8 @@ function planMove(cx, cy){
 }
 function confirmPlan(){
   if (!state.plan) return; const p = state.plan; clearPlan();
-  wsSend({ type:"move", token_id: p.token_id, tx: p.goal.cx, ty: p.goal.cy, teleport:false });
+  wsSend({ type:"move", token_id: p.token_id, tx: p.goal.cx, ty: p.goal.cy, teleport:false,
+           path: p.path || [] });
 }
 function clearPlan(){ state.plan = null; state.planRequest = null; updateMoveHud(); }
 function updateMoveHud(){
@@ -438,9 +451,13 @@ function onDown(e){
   if (!state.room) return;
   const p = evtPos(e);
   if (e.button === 1 || e.button === 2){ state.pan = { x: p.x - state.cam.ox, y: p.y - state.cam.oy }; e.preventDefault(); return; }
-  if (state.viewMode === "diorama" && !state.editing){ dioramaDown(p); return; }
+  // Armed DM tools take the click in BOTH views (resolved via the view-aware
+  // clickCell); only unarmed diorama clicks are select/move gestures.
+  const toolArmed = state.rulerArmed || state.aoeArmed || state.pingArmed ||
+    (state.spawnCreature && state.room && state.room.role === "dm");
+  if (state.viewMode === "diorama" && !state.editing && !toolArmed){ dioramaDown(p); return; }
   if (state.rulerArmed && !state.editing){
-    const { cx, cy } = toCell(p.x, p.y);
+    const { cx, cy } = clickCell(p);
     if (!state.ruler || state.ruler.done){ state.ruler = { x1:cx, y1:cy, x2:cx, y2:cy }; state.rulerArmed = false; $("btn-ruler").classList.remove("active"); }
     else { state.ruler.x2 = cx; state.ruler.y2 = cy; state.ruler.done = true; state.rulerArmed = false; $("btn-ruler").classList.remove("active"); }
     draw(); return;
@@ -451,7 +468,7 @@ function onDown(e){
     const { cx, cy } = toCell(p.x, p.y); paint(cx, cy); state.drag = { paint:true }; return;
   }
   if (state.aoeArmed && state.room.role === "dm" && !state.editing){
-    const { cx, cy } = toCell(p.x, p.y);
+    const { cx, cy } = clickCell(p);
     const shape = $("aoe-shape").value, dir = $("aoe-dir").value;
     const size = Math.max(0, Math.min(30, +$("aoe-size").value || 5));
     const color = ($("aoe-color") && $("aoe-color").value) || "#e74c3c";
@@ -461,17 +478,18 @@ function onDown(e){
     return;
   }
   if (state.pingArmed && !state.editing){
-    const { cx, cy } = toCell(p.x, p.y);
+    const { cx, cy } = clickCell(p);
     const color = "var(--gold)" === "var(--gold)" ? "#f1c40f" : "#f1c40f";
     wsSend({ type:"ping", x: cx, y: cy, color });
     state.pingArmed = false; const b = $("btn-ping"); if (b) b.classList.remove("active");
     return;
   }
   if (state.spawnCreature && state.room.role === "dm" && !state.editing){
-    const { cx, cy } = toCell(p.x, p.y); const c = state.spawnCreature, blk = c.block || {}, cs = cellSize();
+    const { cx, cy } = clickCell(p); const c = state.spawnCreature, blk = c.block || {}, cs = cellSize();
     wsSend({ type:"add_token", label:c.name, x:(cx+.5)*cs, y:(cy+.5)*cs, level:blk.level, stats:blk.stats,
       hp:blk.hp, max_hp:blk.max_hp, ac:blk.ac, speed:blk.speed, attacks:blk.attacks,
       spells:blk.spells, spell_slots:blk.spell_slots, saves:blk.saves, defenses:blk.defenses,
+      abilities:blk.abilities, resources:blk.resources, notes:blk.notes,
       size:blk.size, disposition:blk.disposition });
     state.spawnCreature = null; return;
   }
@@ -485,11 +503,15 @@ function onDown(e){
   if (!t){
     const d = doorHit(wx, wy);
     if (d){ wsSend({ type:"door", x: d.x, y: d.y, dir: d.dir, action:"toggle" }); return; }
-    renderSheet(null);
-    if (!state.editing && state.room.role !== "dm" && ownToken()){
+    // Keep the selected movable token while clicking an empty destination.
+    // Clearing the sheet here used to clear state.sel before ownToken(), which
+    // made DM/NPC click-to-move silently lose its mover.
+    if (!state.editing && ownToken()){
       const { cx, cy } = toCell(p.x, p.y);
       if (state.plan && state.plan.goal.cx === cx && state.plan.goal.cy === cy) confirmPlan();
       else planMove(cx, cy);
+    } else {
+      renderSheet(null);
     }
     return;
   }
@@ -527,11 +549,26 @@ function onUp(e){
 function sendMoveTo(tokenId, cx, cy, teleport){
   wsSend({ type:"move", token_id: tokenId, tx: cx, ty: cy, teleport });
 }
+function clickCell(p){
+  // The cell a click targets IN THE ACTIVE VIEW. Using the orthogonal toCell()
+  // in diorama resolves a different cell than the isometric one the player
+  // clicked — which made double-click confirms move to a wrong, distant goal.
+  if (state.viewMode === "diorama" && state.grid){
+    const { lx, ly } = dioUnproj(p.x, p.y, cellSize());
+    return { cx: Math.floor(lx), cy: Math.floor(ly) };
+  }
+  return toCell(p.x, p.y);
+}
+function clickToken(p){
+  if (state.viewMode === "diorama") return dioTokenClick(p.x, p.y, cellSize());
+  return tokenAt(p.x - state.cam.ox, p.y - state.cam.oy);
+}
 function onDbl(e){
   if (state.editing) return;
-  const p = evtPos(e), { cx, cy } = toCell(p.x, p.y);
-  const wx = p.x - state.cam.ox, wy = p.y - state.cam.oy;
-  if (tokenAt(wx, wy)) return;
+  const p = evtPos(e), { cx, cy } = clickCell(p);
+  const g = state.grid;
+  if (g && (cx < 0 || cy < 0 || cx >= g.w || cy >= g.h)) return;
+  if (clickToken(p)) return;
   if (state.room.role === "dm"){
     const mine = state.tokens.filter(t => t.owner_user_id === state.me.id);
     if (mine.length === 1) sendMoveTo(mine[0].id, cx, cy, false);
@@ -548,7 +585,13 @@ window.addEventListener("mouseup", onUp); window.addEventListener("touchend", on
 window.addEventListener("resize", resize);
 window.addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
-  if (e.key === "Escape"){ clearPlan(); state.ruler = null; draw(); }
+  if (e.key === "?"){ const h = $("help-overlay");
+    if (h){ h.classList.toggle("hidden"); e.preventDefault(); } return; }
+  if (e.key === "Escape"){
+    const h = $("help-overlay");
+    if (h && !h.classList.contains("hidden")){ h.classList.add("hidden"); return; }
+    clearPlan(); state.ruler = null; draw();
+  }
   state.keys.add(e.key);
 });
 window.addEventListener("keyup", e => state.keys.delete(e.key));

@@ -92,6 +92,13 @@ def _entity(e, w, h):
         dmg = str(e.get("dmg", "1d4"))[:16]
         out["dmg"] = dmg if re.match(r"^\d*d\d+([+-]\d+)?$", dmg.lower()) else "1d4"
         out["discovered"] = bool(e.get("discovered"))
+        # Runtime lifecycle, kept apart from visibility on purpose:
+        # discovered = revealed to players; triggered = already sprung
+        # (one-shot re-entry gate; survives map edits via the merge in
+        # dispatch.handle_map_edit). triggered_by records the token id.
+        out["triggered"] = bool(e.get("triggered"))
+        tb = e.get("triggered_by")
+        out["triggered_by"] = int(tb) if isinstance(tb, (int, float)) else None
     else:
         tb = e.get("taken_by")
         out["taken_by"] = int(tb) if isinstance(tb, (int, float)) else None
@@ -180,7 +187,7 @@ def sanitize(d):
         return None
     out = {"w": w, "h": h, "cell": max(20, min(100, int(d.get("cell", 50)))),
            "cells": cells, "explored": explored, "traps": traps, "loot": loot,
-           "doors": doors, "pins": pins}
+           "doors": doors, "pins": pins, "fog_off": bool(d.get("fog_off"))}
     if len(json.dumps(out)) > MAX_JSON:
         return None
     return out
@@ -216,7 +223,13 @@ def visible_map(mp, user_id, is_dm, visible_cells=()):
     if is_dm:
         return mp
     w, h = mp["w"], mp["h"]
-    seen = [bool(e) for e in mp["explored"]]
+    # Fog-off room flag: terrain and static entities are transmitted to every
+    # member. Live NPC/token positions are NOT handled here — those are
+    # filtered per recipient by the LOS pipeline, so hidden foes stay hidden.
+    if mp.get("fog_off"):
+        seen = [True] * (w * h)
+    else:
+        seen = [bool(e) for e in mp["explored"]]
     for i in visible_cells:
         if isinstance(i, tuple):
             x, y = i
@@ -225,7 +238,7 @@ def visible_map(mp, user_id, is_dm, visible_cells=()):
         elif 0 <= i < w * h:
             seen[i] = True
     cells = [mp["cells"][i] if seen[i] else None for i in range(w * h)]
-    traps = [t for t in mp["traps"] if t.get("discovered")]
+    traps = [t for t in mp["traps"] if t.get("discovered") or mp.get("fog_off")]
     loot = [l for l in mp["loot"] if l.get("taken_by") == user_id]
     doors = []
     for dr in mp.get("doors", []):
@@ -239,4 +252,4 @@ def visible_map(mp, user_id, is_dm, visible_cells=()):
             pins.append({k: p[k] for k in ("id", "x", "y", "type", "color", "title") if k in p})
     return {"w": w, "h": h, "cell": mp["cell"], "cells": cells,
             "explored": mp["explored"], "traps": traps, "loot": loot, "doors": doors,
-            "pins": pins}
+            "pins": pins, "fog_off": bool(mp.get("fog_off"))}

@@ -156,6 +156,9 @@ class CreatureIn(BaseModel):
     spell_slots: dict = {}
     saves: dict = {}
     defenses: dict = {}
+    abilities: list = []
+    resources: list = []
+    notes: str = ""
     size: str = "Medium"
     disposition: str = ""
     tags: str = Field(default="", max_length=120)
@@ -260,6 +263,8 @@ def _creature_block(cr: "CreatureIn"):
                            "hp": cr.hp, "max_hp": cr.max_hp, "ac": cr.ac, "speed": cr.speed,
                            "attacks": cr.attacks, "spells": cr.spells, "spell_slots": cr.spell_slots,
                            "saves": cr.saves, "defenses": cr.defenses,
+                           "abilities": cr.abilities, "resources": cr.resources,
+                           "notes": cr.notes,
                            "size": cr.size, "disposition": cr.disposition})
     block["name"] = cr.name
     return block

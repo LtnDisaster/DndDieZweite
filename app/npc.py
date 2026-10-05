@@ -81,7 +81,41 @@ def clean_npc(d):
         "defenses": gear.clean_defenses(d.get("defenses", {})),
         "size": clean_size(d.get("size")),
         "disposition": clean_disposition(d.get("disposition")),
+        "abilities": _clean_abilities(d.get("abilities")),
+        "resources": _clean_resources(d.get("resources")),
+        "notes": str(d.get("notes", ""))[:1000],
     }
+
+
+def _clean_abilities(v):
+    """Prose action entries ({name, desc}) — the 'Multiattack/Breath' block."""
+    out = []
+    for a in (v or [])[:12]:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name", ""))[:32].strip()
+        desc = str(a.get("desc", ""))[:240].strip()
+        if name or desc:
+            out.append({"name": name or "Action", "desc": desc})
+    return out
+
+
+def _clean_resources(v):
+    """Tracked non-spell resources (breath weapon uses, lair actions...).
+
+    'cur' is live state; a long rest refills it (room.dice handle_long_rest).
+    """
+    out = []
+    for r in (v or [])[:10]:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name", ""))[:32].strip()
+        if not name:
+            continue
+        mx = _clamp(r.get("max", 1), 0, 99, 1)
+        cur = _clamp(r.get("cur", mx), 0, mx, mx)
+        out.append({"name": name, "max": mx, "cur": cur})
+    return out
 
 
 def load(tok):

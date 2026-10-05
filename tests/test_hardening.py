@@ -206,7 +206,7 @@ def test_player_sockets_cannot_reach_dm_operations(client):
         for m in hostile:
             ws.send_json(m)
             ws.send_json({"type": "chat", "text": "marker", "channel": "global"})
-            seen = recv_kinds_until(ws, "chat", tries=30)
+            seen = recv_kinds_until(ws, "chat", tries=30, fail_on_error=False)
             assert not (set(seen) & forbidden), f"DM-only effect {set(seen) & forbidden} for {m['type']}"
             errors += "error" in seen
         assert errors >= 8                                           # handlers answer, not hang
@@ -251,7 +251,8 @@ def test_malformed_messages_are_survivable(client):
         for m in bad:
             ws.send_json(m)
         ws.send_json({"type": "chat", "text": "alive", "channel": "global"})
-        assert recv_until(ws, "chat", tries=60)["payload"]["text"] == "alive"
+        assert recv_until(ws, "chat", tries=60,
+                          fail_on_error=False)["payload"]["text"] == "alive"
 
 
 # ---------- mid-walk route invalidation ----------

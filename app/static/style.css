@@ -57,6 +57,15 @@ button.hot { border-color: var(--gold); color: var(--gold); }
 #toast.show { opacity: .95; }
 .side { display: flex; flex-direction: column; gap: .7rem; overflow-y: auto; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: .6rem .7rem; }
+.help-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center; padding: 1rem; }
+.help-overlay.hidden { display: none; }
+.help-card { max-width: 620px; max-height: 84vh; overflow-y: auto; }
+.help-card kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+  padding: 0 .3em; font-size: .85em; }
+.side-tabs { gap: .3rem; }
+.side-tabs button { flex: 1; padding: .3rem .4rem; font-size: .8rem; opacity: .75; }
+.side-tabs button.active { opacity: 1; outline: 1px solid var(--gold); }
 .panel.grow { flex: 1; display: flex; flex-direction: column; min-height: 220px; }
 .chat { flex: 1; overflow-y: auto; font-size: .88rem; background: #11131a; border-radius: 6px; padding: .4rem .5rem; margin-bottom: .4rem; }
 .chat p { margin: .2rem 0; word-wrap: break-word; }
