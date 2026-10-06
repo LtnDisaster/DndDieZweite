@@ -35,41 +35,42 @@ def room_id_of(code):
 
 def test_door_open_close_los_and_explored_cycle(client):
     dm, player, code, _ = base_room(client)
-    set_grid(client, dm, code, lambda g: wall_column(g, 10))
+    # whole scenario sits in the no-growth safe zone (cols/rows >11, D67)
+    set_grid(client, dm, code, lambda g: wall_column(g, 22))
 
     def add_door(g):                                   # carve a doorway at row 13
-        g["cells"][13 * g["w"] + 10] = 0
-        g["doors"] = [{"id": "d1", "x": 10, "y": 13, "dir": "v",
+        g["cells"][13 * g["w"] + 22] = 0
+        g["doors"] = [{"id": "d1", "x": 22, "y": 13, "dir": "v",
                        "closed": True, "locked": False}]
     set_grid(client, dm, code, add_door)
 
     with ws_connect(client, dm, code) as dws:
         mine = next(t for t in state_of(client, player, code)["tokens"] if t.get("character_id"))
-        move_token(dws, mine["id"], 8, 13, teleport=True)          # bring the player to the door row
+        move_token(dws, mine["id"], 20, 13, teleport=True)          # bring the player to the door row
         recv_until(dws, "step")
-        npc = add_npc(dws, label="Ambush", cx=12, cy=13)           # behind the closed door
+        npc = add_npc(dws, label="Ambush", cx=24, cy=13)            # behind the closed door
 
     pst = state_of(client, player, code)
     assert npc not in [t["id"] for t in pst["tokens"]]              # never transmitted
-    assert pst["grid"]["cells"][13 * 40 + 12] is None                # behind wall: unexplored
+    assert pst["grid"]["cells"][13 * 40 + 24] is None                # behind wall: unexplored
 
     with ws_connect(client, dm, code) as dws:                       # open the door
-        dws.send_json({"type": "door", "x": 10, "y": 13, "dir": "v", "action": "toggle"})
+        dws.send_json({"type": "door", "x": 22, "y": 13, "dir": "v", "action": "toggle"})
         recv_until(dws, "map_changed")
 
     pst = state_of(client, player, code)
     assert npc in [t["id"] for t in pst["tokens"]]                  # visible through the gap
-    assert pst["grid"]["cells"][13 * 40 + 12] is not None            # explored memory grew
+    assert pst["grid"]["cells"][13 * 40 + 24] is not None            # explored memory grew
 
     with ws_connect(client, dm, code) as dws:                       # close again + move NPC away
-        dws.send_json({"type": "door", "x": 10, "y": 13, "dir": "v", "action": "toggle"})
+        dws.send_json({"type": "door", "x": 22, "y": 13, "dir": "v", "action": "toggle"})
         recv_until(dws, "map_changed")
-        dws.send_json({"type": "move", "token_id": npc, "tx": 20, "ty": 13, "teleport": True})
+        dws.send_json({"type": "move", "token_id": npc, "tx": 26, "ty": 13, "teleport": True})
         recv_until(dws, "step")
 
     pst = state_of(client, player, code)
     assert npc not in [t["id"] for t in pst["tokens"]]              # live state not leaked
-    assert pst["grid"]["cells"][13 * 40 + 12] is not None            # persistent memory stays (D45)
+    assert pst["grid"]["cells"][13 * 40 + 24] is not None            # persistent memory stays (D45)
 
     with ws_connect(client, player, code) as pws:                   # live: nothing crosses the door
         with ws_connect(client, dm, code) as dws:
@@ -159,13 +160,18 @@ def test_stop_move_cancels_walk_with_no_orphan_task(client, monkeypatch):
 def test_out_of_range_targets_clamp_inside_the_map(client, monkeypatch):
     monkeypatch.setattr(movement, "STEP_DELAY", .01)                 # walk to completion fast
     dm, player, code, _ = base_room(client)
+
+    def bounds():                                                    # growable world (D67)
+        g = state_of(client, dm, code)["grid"]
+        return g["w"] * g["cell"], g["h"] * g["cell"]
     with ws_connect(client, dm, code) as ws:
         tok = next(t["id"] for t in state_of(client, dm, code)["tokens"]
                    if t.get("owner_user_id"))
         move_token(ws, tok, 9999, 9999, teleport=True)               # clamped to map corner
         move_token(ws, tok, -400, -400, teleport=True)               # clamped to origin
     t = next(t for t in state_of(client, dm, code)["tokens"] if t["id"] == tok)
-    assert 0 <= t["x"] < 40 * 50 and 0 <= t["y"] < 26 * 50
+    bw, bh = bounds()
+    assert 0 <= t["x"] < bw and 0 <= t["y"] < bh
     with ws_connect(client, player, code) as ws:                     # absurd walk: clamped, survives
         ws.send_json({"type": "move", "token_id": tok, "tx": 99999, "ty": 99999})
         done = {}
@@ -176,7 +182,8 @@ def test_out_of_range_targets_clamp_inside_the_map(client, monkeypatch):
                 break
         assert done.get("moving") is False
     t = next(t for t in state_of(client, dm, code)["tokens"] if t["id"] == tok)
-    assert 0 <= t["x"] < 40 * 50 and 0 <= t["y"] < 26 * 50
+    bw, bh = bounds()                                                # world may have grown — still inside
+    assert 0 <= t["x"] < bw and 0 <= t["y"] < bh
 
 
 # ---------- adversarial: DM-only operations refused over a player socket ----------

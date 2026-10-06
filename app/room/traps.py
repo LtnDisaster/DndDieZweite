@@ -1,7 +1,7 @@
 """Hidden traps and loot, triggered by stepping onto a cell."""
 import random
 
-from .. import db, events, npc
+from .. import gear, db, events, npc
 from . import health
 from .dice import dex_mod, do_roll
 from .net import broadcast, send_user, sys_msg
@@ -24,7 +24,8 @@ async def hit_trap(room_id, tok, trap):
                             dmg=trap.get("dmg")))
     owner = tok["owner_user_id"]
     dm = db.q1("SELECT dm_id FROM rooms WHERE id=?", (room_id,))
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)) if tok["character_id"] else None
+    ch = (gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
+              if tok["character_id"] else None)
     if ch and owner:
         mod = dex_mod(ch["id"])
         roll = random.randint(1, 20)
@@ -77,7 +78,8 @@ async def hit_trap(room_id, tok, trap):
 
 async def take_loot(room_id, tok, loot) -> bool:
     owner = tok["owner_user_id"]
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)) if tok["character_id"] else None
+    ch = (gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
+              if tok["character_id"] else None)
     if not owner or ch is None:
         return False
     loot["taken_by"] = owner

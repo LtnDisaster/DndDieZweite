@@ -886,6 +886,174 @@ WS smoke suites (still in `/tmp/opencode/`) re-run green after these changes.
   → container on loopback only.
 - **Status:** Accepted. Tests: `test_deploy_hygiene`.
 
+## D65 — Room UI is a flex app-shell with a three-region sidebar; feeds are single-surface tabs
+- The viewport split is computed by flex (`#view-room` 100vh column,
+  `.room-grid flex:1; min-height:0`), never by `calc(100vh - guessed_topbar)`;
+  a content-driven topbar made the old math push the chat composer below the
+  screen edge on wrapped toolbars.
+- `.side` is non-scrolling with three fixed regions: category tabs (top),
+  chronicle (flex:1 — the ONE main area), `.side-cat` drawer (bounded
+  max-height, own scroll). The previous single-scroll-column + sticky-tab-bar
+  design stacked chat/log/dice against a 220px floor and let panels slide
+  under the bar — the reported overlap; it is structurally gone, and
+  `test_layout_pins.py` fails if the removed patterns (faked viewport height,
+  sticky `.side-tabs`, `min-height:220px`, dice strip as chronicle sibling,
+  multi-surface feed) return.
+- Chat / Game Log / Dice are mutually exclusive feed tabs inside the
+  chronicle (`switchFeed` + `applyFeedPanels`), composer rows are chat-only,
+  roll results mirror to `#dice-out`; the user's last feed tab is remembered
+  per browser profile. Initiative/Party stay stacked in the drawer so combat
+  keeps initiative and chat visible together.
+- **Status:** Accepted. Pending: human browser checklist (MANUAL_FIX_NOTES.md);
+  spatial/movement sprint starts only after that verification.
+
+## D66 — All gear math runs on sheets; gear.as_sheet/as_row are the only row converters
+- The modifier-matrix test exposed a silent production bug: PC save/skill/spell
+  paths passed RAW DB rows (JSON-string columns) into `gear.*` helpers, where a
+  non-dict stats value degrades to modifier 0 — PC saves showed +3 where the NPC
+  equivalent showed +4. The NPC path had always converted correctly.
+- Fix: `db.j` idempotent; **`gear.as_sheet()`/`gear.as_row()` are THE canonical
+  row↔sheet converters**; every load feeding gear math goes through
+  `as_sheet` (single choke point `roller_char` + explicit wraps at each site).
+  `_stat_mod` is shared PC/NPC (clamp floor 1, ceiling 40).
+- NPC `to_hit`/`dmg` stay author-authored complete bonuses — no double-adding
+  of stat/prof by the engine.
+
+## D67 — Maps grow automatically for exploring players (chunk 12, cap 80×60)
+- A PLAYER-owned token within `FOG_R + GROW_MARGIN = 11` cells of an edge
+  (footprint-aware) grows the world by `EXPAND_CHUNK = 12` cells in that
+  direction; new cells are plain floor and unexplored; fog, traps, loot, pins,
+  doors and token positions re-anchor with the world (`mapmodel.grow_map`,
+  `room/growth.maybe_grow_map`).
+- Triggers: end of a WALK that reached its target (`stop_reason is None`) and
+  player teleports. Never: NPC/DM-owned tokens, blocked/downed/trap stops, or
+  mid-walk (a coordinate shift under a running route would corrupt it).
+- Cap stays `MAX_W/MAX_H` (80×60); at the cap growth is a silent no-op.
+  Players receive `map_expanded` and the client compensates the camera by the
+  shift, so the view stays stable. Tests that pin absolute coordinates park
+  tokens in the safe zone (`tests/test_movement_fog.park`).
+
+## D68 — app/movecost.py is the cost SSOT: 5e diagonals 1,2,1,2 for display/budget; search weights stay 10/14
+- Displayed route cost follows the 5e grid rule (first diagonal from the start
+  counts 1, then 2, 1, 2…; difficult terrain and low obstacles double the
+  entering step). The alternation is route-history dependent, therefore the A*
+  keeps its constant search weights (straight 10, diagonal 14, difficult ×2) —
+  cost is computed over the FINAL route, never during search.
+- The preview payload gained `speed_ft`, `budget = speed//5` (squares) and
+  `within_budget`; the move HUD shows `cost/budget squares`. This is a
+  transparency surface only — enforced turn economics remain combat-scope.
+
+## D69 — Terrain registry 0–4: barrier and low obstacle join the vocabulary; wall.py is the semantics facade
+- Cell vocabulary: 0 floor, 1 wall, 2 difficult, **3 barrier** (blocks
+  movement, NOT vision; climbable), **4 low_obstacle** (passable, double cost,
+  climbable). `mapmodel.TERRAIN` is the single registry; `mapmodel.sanitize`
+  clamps 0..4 (an intentional, documented change of the old 0..2 clamp).
+- `path`, `los`, `footprint`, `movecost` consume the registry
+  (`walkable/difficult/blocks_vision`) — no hard-coded cell values left.
+  `wall.py` answers cell queries (blocks_movement/blocks_vision/climbable/
+  height_units) for DM-facing features.
+- Editor brushes: 🚧 barrier, 🪨 low obstacle.
+
+## D70 — Elevation is an integer layer on the map plus tokens.z; one unit per step
+- Map gains `elev: [int]` (-6..6, clamped; missing/invalid → flat — old maps
+  load unchanged), grown/remapped with the world like cells. Players learn
+  height only through explored fog (None = unseen).
+- Stepping between cells whose elevations differ by ≤ 1 unit is legal; ≥ 2 is
+  a cliff (blocks path, preview and forced moves). Movement legality checks
+  newly covered footprint cells against their neighbours.
+- `tokens.z` (additive migration, default 0) always mirrors the ground cell the
+  token rests on — walks and teleports sync it; it is not free-flying.
+- Cover/LOS height interactions and multi-floor maps are explicitly OUT (3D).
+
+## D71 — Forced movement is DM-only, not a walk, and never grows the world
+- `app/room/moveforced.py`: push | pull | shove | knockback | throw move a
+  token along a straight line toward {tx,ty}, stopping at the first cell it may
+  not legally occupy (wall/barrier, occupied square, cliff); teleport is exact.
+  All reuse the authoritative footprint/terrain checks.
+- Explicitly NOT registered in `movement._walks`, no walk budget consumed, and
+  **no automatic world growth even for player-owned tokens** — growth stays an
+  exploration phenomenon. z follows the destination ground; a mid-walk target
+  has its walk cancelled first; player-owned tokens still reveal fog on arrival.
+- DM-only over the socket (`forced_move`); players get an error, tokens of
+  others are fair game for the DM.
+
+## D75 — Every view frames itself: no unframed camera, per-mode camera slots, ?debug diagnostics
+
+Manual browser testing (sprint 10) found the player view COMPLETELY BLACK while
+the DM saw fine, and the Diorama felt like a one-way door. Root causes proven
+by running the REAL renderer code against a player-shaped payload (Node vm):
+
+1. No client ever framed the camera. `openRoom()` left `state.cam` at (0,0);
+   a token living deep in the world renders its known ring far outside the
+   viewport, and unknown cells paint NOTHING -> a black canvas. The DM never
+   notices (their camera was already panned there, and DM sees everything).
+2. The Diorama's isometric projection has no fit either: a default 40x26 map
+   projects past 800x600, so almost all tiles left the screen (3 of 126 in
+   view in the probe) and nothing was clickable; panning was hidden on
+   middle/right-click only. "Can't return" was a black canvas in BOTH
+   directions — the topbar switch itself always worked and is not coverable.
+
+Fix: `centerOnMyToken()` / `fitDiorama()` (both reuse `visibleHere`, so they
+reveal nothing the viewer may not see), called via `initViewCam()` after
+`resize()` in `openRoom`, on assignment ("Bring"), and on mode switch;
+per-mode camera slots `state.camT/camD` make Tactical->Diorama->Tactical a
+guaranteed round-trip. Presentation-only: no server round-trip, no world
+mutation (pinned by tests). `?debug` in the URL shows view mode, map window,
+own token cell, known/explored counts and painted tiles — diagnostics for the
+next "all black" report, derived solely from this viewer's own payload.
+
+## D76 — Room deletion is creator-DM-only, cascades fully, and announces room_deleted
+
+The lobby had no way to remove junk rooms and the server had no endpoint.
+`DELETE /api/rooms/{code}` now requires membership role `dm` AND being
+`rooms.dm_id` (the creator) — a crafted player request 403s, a stranger
+403/404s, a second delete 404s. One transaction cascades this room's rows
+(tokens, messages, room_state, notes, quests, room_members, rooms); only the
+room's OWN `map_image` upload file is removed (never shared assets).
+`net.purge_room_nowait` then announces `room_deleted`, closes every socket on
+the loop that owns it, cancels walks on the loop that created each task
+(`Task.get_loop` — deliberately NOT via the lifespan LOOP, which TestClient
+never starts), and forgets `_clients/_map_locks/_last_seen`. `ws.py` teardown
+checks the room row before any bookkeeping (else the FK on a deleted room
+throws and resurrects zombies). Client: `room_deleted` -> lobby + no reconnect;
+`btn-back` remains the permanent escape in every view and role.
+
+## D77 — Automatic world growth is feature-flagged OFF: a working fixed map beats a broken infinite one
+
+Automatic expansion (D67/D72) survived three rounds of manual regressions
+(token teleport, fog artifacts, player-triggered surprises) without ever being
+verified in a real browser. The human's standing preference: stable fixed map.
+`mapmodel.AUTO_GROW` (env `DNDTABLE_AUTO_GROW=1`) now gates the trigger;
+default OFF. The growth machinery, invariants (world coordinates NEVER move)
+and its full test suite stay in place and run with the flag explicitly enabled
+— re-enabling is a config change, not a rewrite. DM map-editor resize remains
+the manual path. Expansion status: implemented, tested, NOT READY for default.
+
+## D78 — One build token binds the frontend: the black canvas was a mixed script generation, not the grid
+
+Three sprint-rounds of "black screen / Bring fails / fixes work in tests but
+not in the browser" end with a verbatim browser error:
+`ReferenceError: gridOrigin is not defined`. The string proves the mix:
+`50_canvas.js` (D72, calls `gridOrigin`) ran against a cached pre-D72
+`10_core.js` (which does not define it) — `index.html` requested every asset
+under an unchanged URL with no `Cache-Control`, so after rebuilds browsers
+freely assembled half-old/half-new bundles. The first ReferenceError killed
+the `requestAnimationFrame` loop silently -> black canvas; Bring succeeded
+server-side (verified against the live DB) but the presentation code throwing
+right after it made the success look like "grid not found".
+Decision: an asset pipeline WITHOUT a bundler — `app/buildinfo.py` hashes all
+owned JS/CSS + index.html into ONE generation token; `/` renders
+`?v=<token>` onto every asset URL plus inline `window.__BUILD__`; all
+bootstrap/asset responses are `no-cache`; `GET /api/build` publishes token +
+per-file hashes (identity only, no paths/secrets); startup logs `BUILD <tok>`.
+`99_boot.js` loads last, verifies (a) required cross-file globals exist,
+(b) every module stamped itself with the page token, (c) every fetched
+`/static/js/*` carried `?v=<token>`, (d) server token == page token — and on
+ANY mismatch shows a red banner, logs to console and DOES NOT boot, instead of
+degrading into an unexplained black canvas. Bring now reports the
+authoritative result and the presentation result separately, so a placed
+character can never be mislabelled as a failed Bring again.
+
 ## Cross-cutting assumptions (read before scaling)
 - Single uvicorn process, single event loop; `LOOP` captured in `main.py` for thread-safe broadcasts.
 - `VTT_DATA_DIR` isolates the SQLite/`secret.key`/uploads tree.

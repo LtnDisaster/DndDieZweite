@@ -6,6 +6,7 @@ multi-cell footprints extend right and down from that anchor. This representatio
 keeps legacy 1x1 tokens unchanged while giving pathfinding and LOS a deterministic
 footprint.
 """
+from . import mapmodel
 
 FOOTPRINT = {
     "Tiny": 1,
@@ -25,11 +26,13 @@ def token_side(token):
     return side_for_size((token or {}).get("size"))
 
 
-def origin_from_pixel(x, y, cell, w=0, h=0):
+def origin_from_pixel(x, y, cell, mp=None):
+    """Token WORLD pixel centre -> WORLD cell. Clamped to the world when an
+    ``mp`` is given (D72: bounds are the WORLD window, never raw storage)."""
     cx = int(float(x) // float(cell or 50))
     cy = int(float(y) // float(cell or 50))
-    if w and h:
-        cx, cy = max(0, min(w - 1, cx)), max(0, min(h - 1, cy))
+    if mp:
+        cx, cy = clamp_origin(mp, (cx, cy), 1)
     return cx, cy
 
 
@@ -38,40 +41,44 @@ def origin_pixels(origin, side, cell):
     return ((cx + 0.5) * cell, (cy + 0.5) * cell)
 
 
-def origin_cells(w, h, origin, side):
-    """Return cells covered by an anchor, even when it intentionally overflows."""
+def origin_cells(mp, origin, side):
+    """WORLD cells covered by a WORLD anchor, even when it intentionally overflows."""
     cx, cy = origin
     return [(cx + dx, cy + dy) for dy in range(side) for dx in range(side)]
 
 
-def origin_in_bounds(w, h, origin, side):
+def origin_in_bounds(mp, origin, side):
+    """WORLD-space bounds check against the world window (D72)."""
+    x0, y0, x1, y1 = mapmodel.world_bounds(mp)
     cx, cy = origin
-    return 0 <= cx and 0 <= cy and cx + side <= w and cy + side <= h
+    return x0 <= cx and y0 <= cy and cx + side <= x1 and cy + side <= y1
 
 
-def clamp_origin(w, h, origin, side):
+def clamp_origin(mp, origin, side):
+    x0, y0, x1, y1 = mapmodel.world_bounds(mp)
     cx, cy = origin
     side = max(1, int(side))
-    return (max(0, min(max(0, w - side), cx)),
-            max(0, min(max(0, h - side), cy)))
+    return (max(x0, min(max(x0, x1 - side), cx)),
+            max(y0, min(max(y0, y1 - side), cy)))
 
 
 def occupied_origin(mp, token):
     side = token_side(token)
-    origin = origin_from_pixel(token["x"], token["y"], mp["cell"], mp["w"], mp["h"])
-    return clamp_origin(mp["w"], mp["h"], origin, side), side
+    origin = origin_from_pixel(token["x"], token["y"], mp["cell"])
+    return clamp_origin(mp, origin, side), side
 
 
 def occupied_cells(mp, token):
     origin, side = occupied_origin(mp, token)
-    return set(origin_cells(mp["w"], mp["h"], origin, side))
+    return set(origin_cells(mp, origin, side))
 
 
 def valid_terrain_position(mp, origin, side, allowed_cells=None):
-    if not origin_in_bounds(mp["w"], mp["h"], origin, side):
+    if not origin_in_bounds(mp, origin, side):
         return False
-    for (x, y) in origin_cells(mp["w"], mp["h"], origin, side):
-        if not (0 <= x < mp["w"] and 0 <= y < mp["h"]) or mp["cells"][y * mp["w"] + x] == 1:
+    for (x, y) in origin_cells(mp, origin, side):
+        t = mapmodel.terrain_at(mp, x, y)          # WORLD cell (D72)
+        if t is None or not mapmodel.walkable(t):
             return False
         if allowed_cells is not None and (x, y) not in allowed_cells:
             return False
@@ -104,7 +111,7 @@ def valid_final_position(mp, token, origin, tokens=None, allowed_cells=None):
     side = token_side(token)
     if not valid_terrain_position(mp, origin, side, allowed_cells):
         return False
-    cells = set(origin_cells(mp["w"], mp["h"], origin, side))
+    cells = set(origin_cells(mp, origin, side))
     return not (cells & collision_cells(mp, tokens or [], token))
 
 
@@ -123,7 +130,7 @@ def candidate_origins(mp, desired, side, max_distance=None):
 
 def find_valid_origin(mp, token, desired, tokens=None, allowed_cells=None):
     side = token_side(token)
-    clamped = clamp_origin(mp["w"], mp["h"], desired, side)
+    clamped = clamp_origin(mp, desired, side)
     if valid_final_position(mp, token, clamped, tokens, allowed_cells):
         return clamped
     for origin in candidate_origins(mp, desired, side):
@@ -132,14 +139,14 @@ def find_valid_origin(mp, token, desired, tokens=None, allowed_cells=None):
     return None
 
 
-def path_preview_cells(w, h, side, path_origins):
+def path_preview_cells(mp, side, path_origins):
     out, seen = [], set()
     for origin in path_origins:
-        for cell in origin_cells(w, h, origin, side):
-            if not (0 <= cell[0] < w and 0 <= cell[1] < h) or cell in seen:
+        for cell in origin_cells(mp, origin, side):
+            if not mapmodel.in_world(mp, cell[0], cell[1]) or cell in seen:
                 continue
             seen.add(cell)
-            out.append({"x": cell[0], "y": cell[1]})
+            out.append({"x": cell[0], "y": cell[1]})   # WORLD cells on the wire
     return out
 
 
@@ -147,7 +154,7 @@ def source_cells_for_tokens(mp, tokens):
     cells = set()
     for token in tokens:
         origin, side = occupied_origin(mp, token)
-        cells.update(origin_cells(mp["w"], mp["h"], origin, side))
+        cells.update(origin_cells(mp, origin, side))
     return cells
 
 

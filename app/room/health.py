@@ -75,7 +75,7 @@ async def change_hp(room_id, tok, delta, *, crit=False, damage_type=None, broadc
                 "temp_hp": 0, "death": None, "damage": damage, "healed": healed,
                 "changed": hp != prev, "immune": bool(damage_type) and delta < 0 and damage == 0}
 
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
+    ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
     if ch is None:
         return None
     prev = _clamp(ch.get("hp", 0), -9999, 9999, 0)

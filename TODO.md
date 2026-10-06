@@ -4,7 +4,7 @@ Living checklist. "Done" = shipped and covered by an in-repo test.
 Verify state with:
 
 ```bash
-docker compose run --rm test                     # CANONICAL: 263 tests (pinned py3.12 image)
+docker compose run --rm test                     # CANONICAL: 306 tests +7 node-skipped (pinned py3.12 image)
 ./.venv/bin/python -m pytest                     # dev-host run (py3.14 venv)
 ./.venv/bin/python -m compileall -q app          # byte-compile check
 for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
@@ -254,6 +254,45 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [x] **Help overlay:** `?` button + `<kbd>` overlay (Esc/backdrop close), content-only, no framework.
 - [x] Deferred by decision: guided tutorial tour (until this sprint is field-stable), per-player fog
       schema, resumable walk queue.
+
+## Done — gameplay & world sprint (2026-10-06, D66–D71)
+- [x] **DM Game Log growth on rolls** — content-based flex basis replaced by
+      zero-basis chain (`flex:1 1 0` + overflow guards + chat-only composers);
+      pins extended in `test_layout_pins` (1A).
+- [x] **Modifier matrix** — `gear.as_sheet()/as_row()` choke points; PC save/skill/
+      spell paths no longer fed raw JSON-string rows (silent +0 bug fixed);
+      PC≡NPC `_stat_mod` parity; `test_modifier_matrix` (8).
+- [x] **Automatic world growth** — chunk-12 map extension for exploring players,
+      fog/entity re-anchoring, `map_expanded` + camera compensation, cap 80×60;
+      `test_map_expand` (8) (D67).
+- [x] **Movement cost SSOT** — `app/movecost.py` 5e diagonals + budget on the
+      preview (`cost/budget/within_budget`), A* weights untouched; `test_movecost` (8) (D68).
+- [x] **Movement modes** — `gear.clean_speeds` (walk/fly/swim/climb), NPC blob +
+      editor fields, walk stays budget currency; `test_speeds` (3).
+- [x] **Terrain registry** — cells 3 barrier / 4 low obstacle end-to-end
+      (registry → path/los/footprint/movecost → editor brushes), `wall.py` facade;
+      `test_terrain` (8) (D69).
+- [x] **Elevation foundation** — integer `elev` layer (-6..6, fog-gated, grown with
+      the world) + `tokens.z`; |Δz|≤1 step rule; token rests on ground;
+      `test_elevation` (5) (D70).
+- [x] **Forced movement foundation** — `room/moveforced.py` DM-only push/pull/
+      shove/knockback/throw/teleport; obstacle stop + z sync; no walk/budget/growth;
+      `test_forced_move` (3) (D71).
+- [x] Host suite 313 / canonical 306+7 skipped; MANUAL_FIX_NOTES checklist (browser).
+- [ ] **FOUNDATION ONLY (next sprints):** fly/swim/climb path rules; elevation-based
+      cover/LOS and multi-floor maps (explicitly OUT); forced-move combat
+      integration (opportunity/impact damage); enforced per-turn budget (now only
+      shown, not rules-enforced); diorama rendering of barrier/low/elevation.
+
+## Done — sidebar layout fix: chat/log/dice overlap (2026-10-06, D65)
+- [x] Root causes: faked `calc(100vh-topbar)` viewport + single-scroll sidebar
+      (chronicle min-220px vs. 4-row dice strip outside its scroll body) +
+      sticky category bar overlaying content. All removed, not re-layered.
+- [x] Flex app-shell; `.side` = tabs/chronicle/`.side-cat` drawer (bounded);
+      feed tabs Chat|Game Log|Dice single-surface; `#dice-out` results;
+      feed persisted; all legacy ids kept; 6 static pins (`test_layout_pins`).
+- [ ] **Human browser verification (checklist in MANUAL_FIX_NOTES.md)** —
+      gates the spatial/movement sprint.
 
 ## Done — deployment & UX hardening (2026-10-05, Sprint 9, D61–D64)
 - [x] **Root causes:** (a) starlette-1.7 per-session loops vs. anyio cross-loop wakeups

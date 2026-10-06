@@ -66,6 +66,7 @@ def clean_npc(d):
     stats = clean_stats(d.get("stats"))
     max_hp = _clamp(d.get("max_hp", d.get("hp", 10)), 1, 9999, 10)
     hp = _clamp(d.get("hp", max_hp), 0, max_hp, max_hp)
+    speeds = gear.clean_speeds(d)              # walk/fly/swim/climb, SSOT in gear
     return {
         "name": str(d.get("name", ""))[:32],
         "level": _clamp(d.get("level", 1), 1, 30, 1),
@@ -73,7 +74,11 @@ def clean_npc(d):
         "hp": hp,
         "max_hp": max_hp,
         "ac": _clamp(d.get("ac", 10), 1, 40, 10),
-        "speed": _clamp(d.get("speed", 30), 0, 999, 30),
+        "speed": speeds["walk"],
+        "fly": speeds["fly"],
+        "swim": speeds["swim"],
+        "climb": speeds["climb"],
+        "speeds": speeds,
         "attacks": clean_attacks(d.get("attacks", [])),
         "spells": gear.clean_spells(d.get("spells", [])),
         "spell_slots": gear.clean_slots(d.get("spell_slots", {})),
@@ -131,11 +136,9 @@ def to_char(npc, name=""):
 
 
 def stat_mod(npc, ability):
-    try:
-        return (int(npc["stats"].get(ability, 10)) - 10) // 2
-    except (TypeError, ValueError, KeyError, AttributeError):
-        return 0
+    """Delegate to the canonical derivation (D56) — same clamp, same fallback."""
+    return gear.stat_mod(npc if isinstance(npc, dict) else {}, ability)
 
 
 def dex_mod(npc):
-    return stat_mod(npc, "dex")
+    return gear.dex_mod(npc if isinstance(npc, dict) else {})

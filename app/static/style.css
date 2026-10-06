@@ -2,8 +2,8 @@
   --bg: #14161c; --panel: #1d2029; --panel2: #262a36; --ink: #d8dbe6;
   --gold: #d4a017; --red: #c0392b; --green: #27ae60; --line: #333846;
   --muted: #8b90a0; --orange: #f0a35e;
-  /* layout scale (Sprint 9 UI pass) */
-  --gap: .7rem; --pad: .6rem .7rem; --side-w: 360px; --topbar-h: 56px;
+  /* layout scale (Sprint 9 UI pass / layout fix) */
+  --gap: .7rem; --pad: .6rem .7rem; --side-w: 360px;
   --z-movehud: 20; --z-toast: 30; --z-help: 60;
 }
 * { box-sizing: border-box; }
@@ -29,9 +29,16 @@ button.hot { border-color: var(--gold); color: var(--gold); }
 .topbar {
   display: flex; justify-content: space-between; align-items: center; gap: 1rem;
   background: var(--panel); padding: .5rem 1rem; border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
 }
 .online { font-size: .85rem; opacity: .8; }
 .online b { color: var(--green); }
+/* dev diagnostics (D75): visible only when the page is opened with ?debug */
+.dbg { display: none; }
+body.dbg-on .dbg { display: inline-block; font: 11px/1.4 ui-monospace, monospace;
+                   color: #7fd1ff; background: rgba(20,26,40,.7); padding: 2px 8px;
+                   border-radius: 6px; margin-left: auto; white-space: nowrap;
+                   max-width: 52vw; overflow: hidden; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; }
 .narrow { max-width: 380px; margin: 10vh auto; }
 #view-auth .narrow { display: flex; flex-direction: column; gap: .5rem; }
@@ -52,15 +59,20 @@ button.hot { border-color: var(--gold); color: var(--gold); }
 .stats input { width: 58px; flex: 0; text-align: center; }
 .stats label { display: flex; flex-direction: column; font-size: .68rem; align-items: center; gap: 2px; opacity: .85; }
 
-/* room */
+/* room: real app-shell — the viewport is split by flex, NOT by guessing the
+   topbar height. The topbar may wrap freely; nothing can slip below the fold. */
+#view-room { display: flex; flex-direction: column; height: 100vh; }
 .room-grid { display: grid; grid-template-columns: 1fr var(--side-w); gap: var(--gap);
-  padding: var(--gap); height: calc(100vh - var(--topbar-h)); }
+  padding: var(--gap); flex: 1 1 auto; min-height: 0; }
 .mapwrap { position: relative; background: #0d0f14; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 #map { display: block; width: 100%; height: 100%; cursor: crosshair; }
 #toast { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: var(--z-toast);
   background: var(--red); padding: .3rem .9rem; border-radius: 6px; opacity: 0; transition: opacity .3s; pointer-events: none; }
 #toast.show { opacity: .95; }
-.side { display: flex; flex-direction: column; gap: .7rem; overflow-y: auto; }
+/* sidebar = three fixed regions: category tabs / chronicle (main area) /
+   category panels drawer. The column itself never scrolls — scrolling happens
+   inside the chronicle feed and inside .side-cat, and those never overlap. */
+.side { display: flex; flex-direction: column; gap: .7rem; min-height: 0; overflow: hidden; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: .6rem .7rem; }
 .help-overlay { position: fixed; inset: 0; z-index: var(--z-help); background: rgba(0,0,0,.55);
   display: flex; align-items: center; justify-content: center; padding: 1rem; }
@@ -68,15 +80,24 @@ button.hot { border-color: var(--gold); color: var(--gold); }
 .help-card { max-width: 620px; max-height: 84vh; overflow-y: auto; }
 .help-card kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
   padding: 0 .3em; font-size: .85em; }
-/* sidebar tab bar: sticky so category nav never scrolls out of reach */
-.side-tabs { gap: .3rem; position: sticky; top: 0; z-index: 5;
-  background: var(--bg); padding: .35rem 0; margin: 0; }
+/* category tab bar: first sidebar row, always in view (no sticky needed) */
+.side-tabs { flex: 0 0 auto; min-height: 0; gap: .3rem; margin: 0; }
 .side-tabs button { flex: 1; padding: .35rem .4rem; font-size: .8rem; opacity: .7;
   border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0; }
 .side-tabs button.active, .side-tabs button[aria-selected="true"] {
   opacity: 1; background: var(--panel2); border-color: var(--line); border-bottom-color: var(--gold); }
-.panel.grow { flex: 1; display: flex; flex-direction: column; min-height: 220px; }
-.chat { flex: 1; overflow-y: auto; font-size: .88rem; background: #11131a; border-radius: 6px; padding: .4rem .5rem; margin-bottom: .4rem; }
+/* flex-basis 0, NOT auto: the chronicle's height must depend on the viewport,
+   never on how many entries its feeds hold — a content-based basis made the DM
+   log (all visibilities + blind double-posts) physically grow the panel and
+   squeeze the drawer below it. The drawer keeps basis auto on purpose: its
+   height is capped (max-height) and shrinkable, so it can never feed growth
+   back into the chronicle. */
+.panel.grow { flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; }
+/* category/context panels drawer: bounded, own scroll — can never squeeze
+   the chronicle or reach past the viewport */
+.side-cat { flex: 0 1 auto; min-height: 0; max-height: 46%; overflow-y: auto;
+  display: flex; flex-direction: column; gap: .7rem; }
+.chat { flex: 1; min-height: 0; overflow-y: auto; font-size: .88rem; background: #11131a; border-radius: 6px; padding: .4rem .5rem; margin-bottom: .4rem; }
 .chat p { margin: .2rem 0; word-wrap: break-word; }
 .chat .sys { opacity: .55; font-style: italic; font-size: .8rem; }
 .chat .dice { color: var(--gold); }
@@ -217,8 +238,8 @@ button.hot { border-color: var(--gold); color: var(--gold); }
 /* ---- game log, quick dice, future DM panels ---- */
 .tabs { margin: 0 0 6px; }
 .tabs button { flex: 1; padding: 4px 6px; font-size: 11.5px; }
-.log .ts { color: var(--muted); margin-right: 4px; }
-.log .visbadge { color: var(--gold); margin-left: 4px; text-transform: uppercase; font-size: 9px; }
+.chat .ts { color: var(--muted); margin-right: 4px; }
+.chat .visbadge { color: var(--gold); margin-left: 4px; text-transform: uppercase; font-size: 9px; }
 .qdice { gap: 3px; }
 .qdice button { flex: 1; padding: 3px 2px; font-size: 11px; }
 #roll-mod { width: 58px; flex: 0 0 auto; }
@@ -244,8 +265,15 @@ button.hot { border-color: var(--gold); color: var(--gold); }
 .chronicle-head { display: flex; align-items: center; gap: .45rem; justify-content: space-between; }
 .chronicle-head h2 { margin: 0; }
 .chronicle-head button { padding: 0 .45rem; min-width: 28px; }
-#chronicle-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#chronicle-body { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 #chronicle.collapsed #chronicle-body { display: none; }
+/* collapsed chronicle shrinks to its header ONLY: flex-grow must be off, or
+   the .grow rule (flex:1 1 0) keeps it eating all available height with an
+   empty body — the reported "collapses but container stays tall". */
+#chronicle.collapsed { flex: 0 0 auto; }
+/* the drawer absorbs the freed height (bounded by its own max-height);
+   sections move up, reserved space disappears — no JS pixel math */
+.side:has(#chronicle.collapsed) .side-cat { flex: 1 1 auto; }
 .chat-controls { margin: -.15rem 0 .15rem; gap: .25rem; font-size: .8rem; }
 .chat-controls select, .chat-controls input { min-width: 0; }
 .chat-send-row { gap: .25rem; }
@@ -282,9 +310,13 @@ button.hot { border-color: var(--gold); color: var(--gold); }
   .audio-bar { flex-wrap: wrap; }
   .audio-bar .audio-name { flex: 1 1 100%; }
   .chat-send-row select { flex: 1 1 100%; }
-  .room-grid { height: auto; grid-template-columns: 1fr; }
+  /* stacked layout: back to normal page scroll, chronicle keeps a usable height */
+  #view-room { height: auto; }
+  .room-grid { grid-template-columns: 1fr; }
   .mapwrap { height: 60vh; }
-  .side { overflow-y: visible; }
+  .side { overflow: visible; }
+  .side-cat { max-height: none; overflow: visible; }
+  .panel.grow { min-height: 320px; }
 }
 
 /* ---------- Sprint 9 UI pass 2 ---------- */
@@ -306,9 +338,12 @@ details.group > .group-body { padding: .35rem .5rem .5rem; }
 #sheet-body details.sheet-sec > summary h3 { display: inline; }
 #sheet-body details.sheet-sec > summary { cursor: pointer; margin-top: .5rem; }
 
-/* dice toolbar: separate from the chronicle, but one glance away */
-.dice-sep { border-top: 1px solid var(--line); margin: .45rem 0 .3rem; }
-.chronicle-dice { display: flex; flex-direction: column; gap: .1rem; }
+/* dice lives inside the chronicle as the third feed tab (Chat | Log | Dice):
+   controls fixed on top, roll results in their own scroll area. basis 0 again:
+   neither the controls' fixed rows nor the result history may size the panel */
+.dice-panel { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: .1rem; }
+.dice-panel > .row { flex: 0 0 auto; min-height: 0; }
+.dice-out { flex: 1 1 0; min-height: 40px; margin-top: .35rem; }
 
 /* a11y + medium widths */
 button:focus-visible, summary:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }

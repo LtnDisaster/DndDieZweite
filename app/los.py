@@ -8,12 +8,14 @@ through a sealed diagonal corner.
 from . import mapmodel
 
 
-def _inside(w, h, x, y):
-    return 0 <= x < w and 0 <= y < h
+def _inside(mp, x, y):
+    # WORLD cells (D72); the conversion and bounds live in mapmodel.
+    return mapmodel.in_world(mp, x, y)
 
 
 def _wall(mp, x, y):
-    return mp["cells"][y * mp["w"] + x] == 1
+    v = mapmodel.terrain_at(mp, x, y)
+    return v is None or mapmodel.blocks_vision(v)
 
 
 def _edge_closed(a, b, blocked_edges):
@@ -21,15 +23,13 @@ def _edge_closed(a, b, blocked_edges):
 
 
 def _cross(a, b, mp, blocked_edges, target=None):
-    w, h = mp["w"], mp["h"]
-    return (not _inside(w, h, b[0], b[1])
+    return (not _inside(mp, b[0], b[1])
             or _edge_closed(a, b, blocked_edges)
             or (_wall(mp, b[0], b[1]) and b != target))
 
 
 def line_of_sight(mp, source, target, blocked_edges=None):
-    w, h = mp["w"], mp["h"]
-    if not _inside(w, h, source[0], source[1]) or not _inside(w, h, target[0], target[1]):
+    if not _inside(mp, source[0], source[1]) or not _inside(mp, target[0], target[1]):
         return False
     if source == target:
         return True
@@ -54,9 +54,9 @@ def line_of_sight(mp, source, target, blocked_edges=None):
         if left is not None and right is not None and left == right:
             old = (cx, cy)
             horiz, vert, diag = (cx + dx, cy), (cx, cy + dy), (cx + dx, cy + dy)
-            corner_ok = (_inside(w, h, horiz[0], horiz[1])
-                         and _inside(w, h, vert[0], vert[1])
-                         and _inside(w, h, diag[0], diag[1])
+            corner_ok = (_inside(mp, horiz[0], horiz[1])
+                         and _inside(mp, vert[0], vert[1])
+                         and _inside(mp, diag[0], diag[1])
                          and not _edge_closed(old, horiz, be)
                          and not _edge_closed(old, vert, be)
                          and (not _wall(mp, horiz[0], horiz[1]) or horiz == target)
@@ -91,18 +91,21 @@ def line_of_sight(mp, source, target, blocked_edges=None):
 
 
 def visible_cells(mp, sources, radius=mapmodel.FOG_R, blocked_edges=None):
-    w, h = mp["w"], mp["h"]
+    """STORAGE indices of world cells visible from any WORLD ``sources`` cell."""
+    x0w, y0w, x1w, y1w = mapmodel.world_bounds(mp)
     be = blocked_edges if blocked_edges is not None else mapmodel.blocked_edges(mp)
     r = max(0, int(radius))
     seen = set()
     for source in sources:
         sx, sy = source
-        if not _inside(w, h, sx, sy):
+        if not _inside(mp, sx, sy):
             continue
-        x0, x1 = max(0, sx - r), min(w - 1, sx + r)
-        y0, y1 = max(0, sy - r), min(h - 1, sy + r)
+        x0, x1 = max(x0w, sx - r), min(x1w - 1, sx + r)
+        y0, y1 = max(y0w, sy - r), min(y1w - 1, sy + r)
         for y in range(y0, y1 + 1):
             for x in range(x0, x1 + 1):
                 if line_of_sight(mp, (sx, sy), (x, y), be):
-                    seen.add(y * w + x)
+                    i = mapmodel.flat_idx(mp, x, y)      # world -> storage
+                    if i is not None:
+                        seen.add(i)
     return seen

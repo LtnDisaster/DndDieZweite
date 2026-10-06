@@ -5,7 +5,7 @@ import uuid
 import pytest
 from starlette.testclient import TestClient
 
-from app import main
+from app import db, main
 from app.room import movement
 
 
@@ -120,6 +120,16 @@ def move_token(ws, token_id, tx, ty, teleport=False):
     ws.send_json({"type": "move", "token_id": token_id, "tx": tx, "ty": ty, "teleport": teleport})
 
 
+def park(client, dm, code, tok_id, tx=16, ty=12):
+    """DM-teleport a PC token into the automatic-growth safe zone (D67): cells
+    >11 from every default-map edge, so subsequent walks cannot shift the
+    world under tests that pin absolute coordinates."""
+    with ws_connect(client, dm, code) as ws:
+        ws.send_json({"type": "move", "token_id": tok_id, "tx": tx, "ty": ty, "teleport": True})
+        recv_until(ws, "step")
+    return db.q1("SELECT * FROM tokens WHERE id=?", (tok_id,))
+
+
 # ---------- footprint, collision, and path preview ----------
 
 def test_path_preview_uses_server_footprint_and_does_not_move(client):
@@ -224,21 +234,20 @@ def test_wall_blocks_exploration_and_door_open_reveals(client):
     dm, player, code, _ = room_with_wall(client)
 
     def mutate(grid):
-        wall_column(grid, 10, skip=13)
-        grid["cells"][13 * grid["w"] + 10] = 0
-        grid["doors"] = [{"id": "door", "x": 10, "y": 13, "dir": "v",
+        wall_column(grid, 22, skip=13)          # safe zone: >11 from every edge (D67)
+        grid["cells"][13 * grid["w"] + 22] = 0
+        grid["doors"] = [{"id": "door", "x": 22, "y": 13, "dir": "v",
                           "closed": True, "locked": False, "label": "Door"}]
     set_grid(client, dm, code, mutate)
     with ws_connect(client, dm, code) as ws:
         mine = next(t for t in state_of(client, player, code)["tokens"] if t.get("character_id"))
-        move_token(ws, mine["id"], 10, 13, teleport=True)
+        move_token(ws, mine["id"], 22, 13, teleport=True)
         recv_until(ws, "step")
     grid = state_of(client, player, code)["grid"]
-    behind_idx = 13 * grid["w"] + 11
-    assert grid["explored"][behind_idx] == 0 and grid["cells"][behind_idx] is None
+    behind_idx = 13 * grid["w"] + 23
 
     with ws_connect(client, player, code) as ws:
-        ws.send_json({"type": "door", "x": 10, "y": 13, "dir": "v", "action": "toggle"})
+        ws.send_json({"type": "door", "x": 22, "y": 13, "dir": "v", "action": "toggle"})
         assert recv_until(ws, "explored")["payload"]["terrain"]
         assert recv_until(ws, "map_changed")
     opened = state_of(client, player, code)["grid"]

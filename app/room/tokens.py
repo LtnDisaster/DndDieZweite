@@ -2,6 +2,7 @@
 import re
 
 from .. import db, footprint, mapmodel, npc
+from . import movement
 from .net import broadcast, get_map, send_to, sys_msg
 from .visibility import broadcast_token_add, forget_token
 
@@ -31,7 +32,7 @@ def _clean_pos(msg):
 
 def _place_token(mp, token, x, y):
     side = footprint.side_for_size(token.get("size"))
-    desired = footprint.origin_from_pixel(x, y, mp["cell"], mp["w"], mp["h"])
+    desired = footprint.origin_from_pixel(x, y, mp["cell"], mp)
     existing = db.q("SELECT id, x, y, owner_user_id, size FROM tokens WHERE room_id=?",
                     (token.get("room_id"),))
     origin = footprint.find_valid_origin(mp, token, desired, existing)
@@ -82,7 +83,8 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
     merged = npc.load(tok) or {}
     base = msg.get("npc") if isinstance(msg.get("npc"), dict) else msg
     merged.update({k: base[k] for k in
-                   ("level", "stats", "hp", "max_hp", "ac", "speed", "attacks", "spells",
+                   ("level", "stats", "hp", "max_hp", "ac", "speed", "fly", "swim", "climb",
+                    "attacks", "spells",
                     "spell_slots", "saves", "defenses",
                     "abilities", "resources", "notes") if k in base})
     label = str(msg.get("label", tok["label"]))[:32]
@@ -94,7 +96,7 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
     candidate = {**tok, "size": size}
     mp = get_map(room_id)
     existing = db.q("SELECT id, x, y, owner_user_id, size FROM tokens WHERE room_id=?", (room_id,))
-    desired = footprint.origin_from_pixel(tok["x"], tok["y"], mp["cell"], mp["w"], mp["h"])
+    desired = footprint.origin_from_pixel(tok["x"], tok["y"], mp["cell"], mp)
     origin = footprint.find_valid_origin(mp, candidate, desired, existing)
     if origin is None:
         await send_to(ws, "error", {"msg": "No room to resize this token footprint"})
@@ -109,12 +111,16 @@ async def handle_del_token(ws, room_id, user, is_dm, msg):
     if not is_dm:
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
-    if tok and (tok["owner_user_id"] is None or is_dm):
-        if tok["owner_user_id"] is not None:
-            db.x("UPDATE room_members SET character_id=NULL WHERE user_id=? AND room_id=?",
-                 (tok["owner_user_id"], room_id))
-        db.x("UPDATE tokens SET owner_user_id=NULL, character_id=NULL, label='Gone', "
-             "color='#555', npc='' WHERE id=?", (tok["id"],))
-        sys_msg(room_id, f"DM removed token '{tok['label']}'.")
-        await forget_token(room_id, tok["id"])
-        await broadcast(room_id, "snapshot", None)
+    if tok is None:
+        return                      # already deleted — idempotent, no error, no ghost
+    if tok["owner_user_id"] is not None:
+        db.x("UPDATE room_members SET character_id=NULL WHERE user_id=? AND room_id=?",
+             (tok["owner_user_id"], room_id))
+    db.x("DELETE FROM tokens WHERE id=?", (tok["id"],))
+    sys_msg(room_id, f"DM removed token '{tok['label']}'.")
+    await movement._cancel_walk(tok["id"])
+    # Gone is a TRANSIENT sync event, not a stored state: forget_token clears the
+    # server-side last-seen memory and broadcasts token_gone; the row itself is
+    # gone, so no reload/snapshot can ever resurrect it (D73).
+    await forget_token(room_id, tok["id"])
+    await broadcast(room_id, "snapshot", None)

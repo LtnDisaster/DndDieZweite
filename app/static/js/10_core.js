@@ -1,7 +1,8 @@
 /* Core: DOM helpers, shared state, API client. Must load first. */
+(typeof window !== "undefined") && ((window.__BUILDS = window.__BUILDS || {})["10_core.js"] = window.__BUILD__ || "?");
 const $ = (id) => document.getElementById(id);
 const STATS = [["str","STR"],["dex","DEX"],["con","CON"],["int","INT"],["wis","WIS"],["cha","CHA"]];
-const state = { me:null, room:null, ws:null, online:new Set(), tokens:[], ghosts:[], init:null,
+const state = { me:null, room:null, roomDeleted:false, ws:null, online:new Set(), tokens:[], ghosts:[], init:null,
                 bg:null, sel:null, drag:null, pan:null, charEdit:null, weaponRows:[], itemRows:[],
                  plan:null, planRequest:null, moving:new Set(), reconnectTimer:null,
                  grid:null, editMap:null, editing:false, brush:"wall", fogTouched:{},
@@ -14,7 +15,8 @@ const state = { me:null, room:null, ws:null, online:new Set(), tokens:[], ghosts
                          local:{volume:0.7,muted:false}, element:null, iframe:null, lastSoundId:null },
                  sounds:[],
                  notes:[], encounters:[], creatures:[], encRows:[], encId:null, noteId:null,
-                  cam:{ox:0, oy:0}, keys:new Set(), tickOn:false,
+                  cam:{ox:0, oy:0}, camT:{ox:0, oy:0}, camD:{ox:0, oy:0},
+                  keys:new Set(), tickOn:false,
                   viewMode:"tactical" };
 const VISION_R = 6;
 const SIZE_FOOTPRINT = { Tiny:1, Small:1, Medium:1, Large:2, Huge:3, Gargantuan:4 };
@@ -44,11 +46,32 @@ const CONDITIONS = {
 const condLabel = k => (CONDITIONS[k] ? CONDITIONS[k][0] : String(k).slice(0, 24));
 const condColor = k => (CONDITIONS[k] ? CONDITIONS[k][1] : "#7f8c8d");
 
-/* AoE targeting templates (client-side geometry preview only — no game resolution). */
+/* ---------- world <-> storage coordinates (D72) ----------
+   Everything on the wire (tokens, pins, doors, traps, preview cells) lives in
+   WORLD coordinates. The per-cell arrays (cells/elev/explored) are STORAGE —
+   a window at grid.origin. THESE are the only conversions the client uses;
+   renderers and hit tests must not derive offsets of their own.
+   Cells are WORLD cells unless a name says storage; array indexes are STORAGE. */
+function gridOrigin(g){ const o = (g && g.origin) || [0, 0]; return [o[0] | 0, o[1] | 0]; }
+function w2s(g, x, y){ const [ox, oy] = gridOrigin(g); return [x - ox, y - oy]; }   // world cell -> storage cell
+function s2w(g, x, y){ const [ox, oy] = gridOrigin(g); return [x + ox, y + oy]; }   // storage cell -> world cell
+function wIdx(g, x, y){                                                              // world cell -> flat storage idx
+  if (!g) return -1;
+  const [sx, sy] = w2s(g, x, y);
+  return (sx >= 0 && sy >= 0 && sx < g.w && sy < g.h) ? sy * g.w + sx : -1;
+}
+function inWorld(g, x, y){
+  if (!g) return false;
+  const [sx, sy] = w2s(g, x, y);
+  return sx >= 0 && sy >= 0 && sx < g.w && sy < g.h;
+}
+
+/* AoE targeting templates (client-side geometry preview only — no game resolution).
+   Anchor and result cells are WORLD cells; clipping uses the world window. */
 const DIRV = { N:[0,-1], NE:[1,-1], E:[1,0], SE:[1,1], S:[0,1], SW:[-1,1], W:[-1,0], NW:[-1,-1] };
-function aoeCells(shape, cx, cy, size, w, h, dir){
-  const cells = [], ok = (x, y) => x >= 0 && y >= 0 && x < w && y < h;
-  const push = (x, y) => { if (ok(x, y)) cells.push(y * w + x); };
+function aoeCells(shape, cx, cy, size, g, dir){
+  const cells = [], ok = (x, y) => inWorld(g, x, y);
+  const push = (x, y) => { if (ok(x, y)) cells.push({x, y}); };
   const R = Math.max(0, Math.round(size));
   const d = (DIRV[dir] || DIRV.E);
   if (shape === "line"){
@@ -120,10 +143,19 @@ function saveViewMode(){
 function setViewMode(mode){
   const next = normalizeViewMode(mode);
   if (next === state.viewMode) return;
+  // Each renderer frames its own camera; the shared state.cam must be saved
+  // into the outgoing mode's slot and restored from the incoming one, or a
+  // Diorama fit would fling the Tactical view into empty space (and vice
+  // versa). Presentation-only: the world is untouched either way.
+  const outSlot = state.viewMode === "diorama" ? state.camD : state.camT;
+  const inSlot  = next === "diorama" ? state.camD : state.camT;
+  outSlot.ox = state.cam.ox; outSlot.oy = state.cam.oy;
   state.viewMode = next;
+  state.cam.ox = inSlot.ox; state.cam.oy = inSlot.oy;
   saveViewMode();
   renderViewToggle();
   if (next === "tactical" && typeof clampCam === "function") clampCam();
+  if (next === "diorama" && typeof fitDiorama === "function") fitDiorama();
   draw();
 }
 function renderViewToggle(){

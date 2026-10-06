@@ -9,7 +9,7 @@ lives on the **token** (``tokens.death``), because it is a play-time combat cond
 not part of the character library.
 NPC/monster tokens never enter it: they just sit at 0 HP.
 """
-from .. import db
+from .. import gear, db
 from .dice import dice_post, do_roll
 from .net import broadcast, send_to, sys_msg
 
@@ -71,7 +71,7 @@ async def handle_death_save(ws, room_id, user, is_dm, msg):
     if tok is False:
         await send_to(ws, "error", {"msg": "Not your character"})
         return
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
+    ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
     death = load(tok)
     if ch is None or ch["hp"] > 0 or death is None or death["stable"] or death["dead"]:
         await send_to(ws, "error", {"msg": "Not making death saves right now"})

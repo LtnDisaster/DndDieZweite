@@ -6,7 +6,7 @@ from .. import db, npc
 from .. import conditions as C
 from . import death as D, health
 from .dice import dex_mod
-from .net import broadcast, sys_msg
+from .net import broadcast, send_to, sys_msg
 
 
 def step_conditions(room_id):
@@ -45,6 +45,83 @@ def set_init(room_id, init):
     db.x("UPDATE room_state SET initiative=? WHERE room_id=?", (json.dumps(init), room_id))
 
 
+# ---------- turn state (D74: one turn = move + action + bonus + reaction) -----
+# init["turn"] = {"token_id", "round", "move_total", "move_spent",
+#                 "action", "bonus", "reaction"}  — slots are "available"/"used".
+# Everything lives in the ONE initiative object; there is no second tracker.
+
+def token_speed_ft(tok):
+    from .movement import _walk_speed          # local: movement imports this module
+    return _walk_speed(tok)
+
+
+def begin_turn(init):
+    """(Re)set the per-turn resource state for the currently active token."""
+    order = init.get("order") or []
+    idx = int(init.get("active", -1))
+    if not init.get("combat") or not (0 <= idx < len(order)):
+        init["turn"] = None
+        return init
+    tid = order[idx]["token_id"]
+    tok = db.q1("SELECT * FROM tokens WHERE id=?", (tid,))
+    speed = token_speed_ft(tok) if tok else 30
+    init["turn"] = {"token_id": tid, "round": int(init.get("round", 1)),
+                    "move_total": speed, "move_spent": 0,
+                    "action": "available", "bonus": "available", "reaction": "available"}
+    return init
+
+
+def advance(init):
+    """Move to the next turn; wrapping the order starts a new round.
+    Returns True when the round incremented."""
+    wrapped = False
+    init["active"] = (int(init["active"]) + 1) % len(init["order"])
+    if init["active"] == 0:
+        init["round"] = int(init.get("round", 1)) + 1
+        wrapped = True
+    return begin_turn(init), wrapped
+
+
+def is_listed(init, token_id):
+    return init.get("combat") and any(o["token_id"] == token_id for o in init.get("order", []))
+
+
+def turn_token(init):
+    return (init.get("turn") or {}).get("token_id")
+
+
+def move_remaining(init, token_id):
+    """Feet this token may still move under the action economy, or None when
+    the economy does not apply (no combat / token not in the order)."""
+    if not is_listed(init, token_id):
+        return None
+    t = init.get("turn") or {}
+    if t.get("token_id") != token_id:
+        return 0
+    return max(0, int(t["move_total"]) - int(t["move_spent"]))
+
+
+def spend_move(room_id, token_id, feet):
+    init = get_init(room_id)
+    t = init.get("turn") or {}
+    if t.get("token_id") != token_id:
+        return None                      # turn moved on (or DM walk): nothing to charge
+    t["move_spent"] = int(t["move_spent"]) + int(feet)
+    set_init(room_id, init)
+    return init
+
+
+def spend_slot(room_id, token_id, slot):
+    """Mark action/bonus/reaction used. No-op outside that token's own turn."""
+    init = get_init(room_id)
+    t = init.get("turn") or {}
+    if slot not in ("action", "bonus", "reaction") or t.get("token_id") != token_id:
+        return None
+    t[slot] = "used"
+    set_init(room_id, init)
+    return init
+
+
 async def handle_init_start(ws, room_id, user, is_dm, msg):
     if not is_dm:
         return
@@ -56,6 +133,7 @@ async def handle_init_start(ws, room_id, user, is_dm, msg):
                       "mod": mod, "roll": roll, "total": roll + mod})
     order.sort(key=lambda o: o["total"], reverse=True)
     init = {"combat": True, "round": 1, "order": order, "active": 0}
+    begin_turn(init)
     set_init(room_id, init)
     sys_msg(room_id, "Combat started! — Round 1")
     await broadcast(room_id, "initiative", init)
@@ -66,9 +144,40 @@ async def handle_init_next(ws, room_id, user, is_dm, msg):
         return
     init = get_init(room_id)
     if init["combat"] and init["order"]:
-        init["active"] = (init["active"] + 1) % len(init["order"])
+        wrapped = False
+        init, wrapped = advance(init)
+        if wrapped:
+            for token_id, conds in step_conditions(room_id):
+                await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
+            sys_msg(room_id, f"— Round {init['round']} —")
         set_init(room_id, init)
         await broadcast(room_id, "initiative", init)
+
+
+async def _end_turn_common(ws, room_id, user, is_dm):
+    """Shared by init_next-style advance and the End Turn button."""
+    init = get_init(room_id)
+    if not init["combat"] or not init["order"]:
+        await send_to(ws, "error", {"msg": "No combat running"})
+        return
+    turn = init.get("turn") or {}
+    if not is_dm:
+        tok = db.q1("SELECT owner_user_id FROM tokens WHERE id=? AND room_id=?",
+                    (turn.get("token_id", -1), room_id))
+        if tok is None or tok["owner_user_id"] != user["id"]:
+            await send_to(ws, "error", {"msg": "Only the active token's owner (or the DM) can end the turn"})
+            return
+    init, wrapped = advance(init)
+    if wrapped:
+        for token_id, conds in step_conditions(room_id):
+            await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
+        sys_msg(room_id, f"— Round {init['round']} —")
+    set_init(room_id, init)
+    await broadcast(room_id, "initiative", init)
+
+
+async def handle_end_turn(ws, room_id, user, is_dm, msg):
+    await _end_turn_common(ws, room_id, user, is_dm)
 
 
 async def handle_init_end_round(ws, room_id, user, is_dm, msg):
@@ -82,6 +191,7 @@ async def handle_init_end_round(ws, room_id, user, is_dm, msg):
         return
     init["round"] = int(init.get("round", 1)) + 1
     init["active"] = 0
+    begin_turn(init)
     set_init(room_id, init)
     for token_id, conds in step_conditions(room_id):
         await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
@@ -92,9 +202,64 @@ async def handle_init_end_round(ws, room_id, user, is_dm, msg):
 async def handle_init_end(ws, room_id, user, is_dm, msg):
     if not is_dm:
         return
-    init = {"combat": False, "order": [], "active": -1, "round": 0}
+    init = {"combat": False, "order": [], "active": -1, "round": 0, "turn": None}
     set_init(room_id, init)
     sys_msg(room_id, "Combat ended.")
+    await broadcast(room_id, "initiative", init)
+
+
+async def handle_dash(ws, room_id, user, is_dm, msg):
+    """5e Dash: spend the bonus action to gain this turn's speed again as
+    movement. Strict: only the token whose turn it is (D74)."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    if not (is_dm or tok["owner_user_id"] == user["id"]):
+        await send_to(ws, "error", {"msg": "You can only dash with your own token"})
+        return
+    init = get_init(room_id)
+    if not init["combat"]:
+        await send_to(ws, "error", {"msg": "Dash needs combat (turn-based movement)"})
+        return
+    turn = init.get("turn") or {}
+    if turn.get("token_id") != tok["id"]:
+        await send_to(ws, "error", {"msg": "It is not your turn"})
+        return
+    if turn.get("bonus") == "used":
+        await send_to(ws, "error", {"msg": "No bonus action left this turn"})
+        return
+    turn["bonus"] = "used"
+    turn["move_total"] = int(turn["move_total"]) + token_speed_ft(tok)
+    init["turn"] = turn
+    set_init(room_id, init)
+    sys_msg(room_id, f"{tok['label']} dashes.")
+    await broadcast(room_id, "initiative", init)
+
+
+async def handle_turn_mark(ws, room_id, user, is_dm, msg):
+    """Table bookkeeping: mark action/bonus/reaction available|used on the
+    ACTIVE turn — by the DM or that token's owner."""
+    try:
+        tid = int(msg.get("token_id", -1))
+    except (TypeError, ValueError):
+        return
+    slot = str(msg.get("slot", ""))
+    value = str(msg.get("value", ""))
+    if slot not in ("action", "bonus", "reaction") or value not in ("available", "used"):
+        return
+    init = get_init(room_id)
+    turn = init.get("turn") or {}
+    if turn.get("token_id") != tid:
+        await send_to(ws, "error", {"msg": "Slots can only be marked on the active turn"})
+        return
+    if not is_dm:
+        tok = db.q1("SELECT owner_user_id FROM tokens WHERE id=? AND room_id=?", (tid, room_id))
+        if tok is None or tok["owner_user_id"] != user["id"]:
+            await send_to(ws, "error", {"msg": "Not your token"})
+            return
+    turn[slot] = value
+    init["turn"] = turn
+    set_init(room_id, init)
     await broadcast(room_id, "initiative", init)
 
 

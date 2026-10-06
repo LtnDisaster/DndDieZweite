@@ -67,36 +67,30 @@ def _load_death(tok):
 
 
 def dex_mod(character_id):
+    """DEX mod for initiative/trap saves — canonical derivation via as_sheet (D56/D70)."""
     if not character_id:
         return 0
-    ch = db.q1("SELECT stats FROM characters WHERE id=?", (character_id,))
-    dex = (db.j(ch["stats"], {}) or {}).get("dex", 10) if ch else 10
-    try:
-        return (int(dex) - 10) // 2
-    except (TypeError, ValueError):
-        return 0
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (character_id,))
+    return gear.dex_mod(gear.as_sheet(ch)) if ch else 0
 
 
 def char_stats(ch):
-    return (db.j(ch["stats"], {}) if ch else {}) or {}
+    return db.j((ch or {}).get("stats"), {}) or {}
 
 
 def stat_mod(stats, ability):
-    try:
-        return (int(stats.get(ability, 10)) - 10) // 2
-    except (TypeError, ValueError):
-        return 0
-
-
-def prof_bonus(level):
-    return 2 + (max(1, int(level)) - 1) // 4
+    """Compatibility wrapper — delegates to the canonical derivation (D56/D70)."""
+    return gear.stat_mod({"stats": stats if isinstance(stats, dict) else {}}, ability)
 
 
 def roller_char(room_id, user_id):
     m = db.q1("SELECT character_id FROM room_members WHERE room_id=? AND user_id=?",
               (room_id, user_id))
     if m and m["character_id"]:
-        return db.q1("SELECT * FROM characters WHERE id=?", (m["character_id"],))
+        # ONE choke point: every game-math consumer below must see a SHEET
+        # (parsed JSON columns). Raw rows carrying JSON strings are how the
+        # "stat modifier silently 0" bug reached saves/skills/spells (D70).
+        return gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (m["character_id"],)))
     return None
 
 
@@ -254,11 +248,9 @@ def _target_ac(room_id, target_id):
     if t is None:
         return None, None
     if t["character_id"]:
-        ch = db.q1("SELECT * FROM characters WHERE id=?", (t["character_id"],))
+        ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (t["character_id"],)))
         if ch is None:
             return None, t["label"]
-        ch["items"] = db.j(ch.get("items"), []) or []
-        ch["stats"] = db.j(ch.get("stats"), {}) or {}
         return gear.compute_ac(ch), t["label"]
     blk = npc.load(t)
     return (blk.get("ac", 10) if blk else None), t["label"]
@@ -328,7 +320,7 @@ async def handle_roll(ws, room_id, user, is_dm, msg):
         ab = str(msg.get("ability", "")).lower()
         ch = roller_char(room_id, user["id"]) if ab in ABILITIES else None
         if ch is not None:
-            mod = res["mod"] + stat_mod(char_stats(ch), ab) + (prof_bonus(ch["level"]) if bool(msg.get("prof")) else 0)
+            mod = res["mod"] + gear.stat_mod(ch, ab) + (gear.prof_bonus(ch) if bool(msg.get("prof")) else 0)
             total = res["kept"] + mod
             text = (f"🎲 {ch['name']} — {res['expr']} ({ab.upper()}"
                     f"{' prof' if msg.get('prof') else ''}){label}: "
@@ -360,7 +352,7 @@ async def handle_roll(ws, room_id, user, is_dm, msg):
             mod = gear.save_bonus(ch, saves, ab)
             prof = bool(saves.get(ab))
         else:
-            mod = stat_mod(stats, ab) + (prof_bonus(ch["level"]) if bool(msg.get("prof")) else 0)
+            mod = gear.stat_mod(ch, ab) + (gear.prof_bonus(ch) if bool(msg.get("prof")) else 0)
             prof = bool(msg.get("prof"))
         res = do_roll("1d20", adv)
         total = res["kept"] + mod
@@ -425,7 +417,7 @@ async def handle_roll(ws, room_id, user, is_dm, msg):
                             None, visibility=vis, is_dm=is_dm, meta={"mode": "total-cover"})
             return
         cover_mod = _cover_bonus(cover)
-        to_hit = stat_mod(stats, wab) + (prof_bonus(ch["level"]) if w.get("proficient") else 0) + bonus
+        to_hit = gear.stat_mod(ch, wab) + (gear.prof_bonus(ch) if w.get("proficient") else 0) + bonus
         res = do_roll("1d20", adv)
         nat = res["kept"]
         crit = nat == 20
@@ -504,7 +496,7 @@ async def handle_long_rest(ws, room_id, user, is_dm, msg):
     clear_conditions = bool(msg.get("clear_conditions"))
     for m in db.q("SELECT user_id, character_id FROM room_members "
                   "WHERE room_id=? AND character_id IS NOT NULL", (room_id,)):
-        ch = db.q1("SELECT * FROM characters WHERE id=?", (m["character_id"],))
+        ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (m["character_id"],)))
         if ch is None:
             continue
         slots = gear.clean_slots(db.j(ch["spell_slots"], {}))
@@ -569,7 +561,7 @@ async def handle_short_rest(ws, room_id, user, is_dm, msg):
         owner = roller_char(room_id, user["id"])
         if owner is None or owner["id"] != tok["character_id"]:
             return
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
+    ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
     if ch is None:
         return
     try:
@@ -579,7 +571,7 @@ async def handle_short_rest(ws, room_id, user, is_dm, msg):
     hd = gear.clean_hit_die(ch.get("hit_die", 8))
     avail = max(0, gear.hit_dice_max(ch) - max(0, min(gear.hit_dice_max(ch), int(ch.get("hit_dice_spent") or 0))))
     spend = min(count, avail)
-    con_mod = (max(1, min(30, int((db.j(ch.get("stats"), {}) or {}).get("con", 10)))) - 10) // 2
+    con_mod = gear.stat_mod(ch, "con")
     healed = 0
     rolltxt = ""
     if spend:
@@ -611,7 +603,7 @@ async def handle_resource(ws, room_id, user, is_dm, msg):
         owner = roller_char(room_id, user["id"])
         if owner is None or owner["id"] != tok["character_id"]:
             return
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
+    ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
     if ch is None:
         return
     resources = gear.clean_resources(db.j(ch.get("resources"), []))

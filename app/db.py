@@ -206,6 +206,7 @@ def init_db():
     migrate("tokens", "death", "death TEXT")
     migrate("tokens", "disposition", "disposition TEXT DEFAULT ''")
     migrate("tokens", "size", "size TEXT DEFAULT 'Medium'")
+    migrate("tokens", "z", "z INTEGER DEFAULT 0")
     migrate("messages", "visibility", "visibility TEXT NOT NULL DEFAULT 'public'")
     migrate("messages", "recipient_user_id", "recipient_user_id INTEGER REFERENCES users(id)")
     migrate("messages", "meta", "meta TEXT DEFAULT '{}'")
@@ -252,6 +253,11 @@ def json_dumps(d) -> str:
 
 
 def j(s, default=None):
+    """Parse a JSON column. Idempotent: an already-parsed dict/list passes
+    through unchanged — sheets loaded via gear.as_sheet() hold parsed columns,
+    and re-'parsing' them must never silently yield the default."""
+    if isinstance(s, (dict, list)):
+        return s
     try:
         return json.loads(s) if s else default
     except (ValueError, TypeError):

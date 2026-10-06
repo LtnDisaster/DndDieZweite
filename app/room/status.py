@@ -19,7 +19,7 @@ async def _own_char(room_id, user, is_dm, msg):
         owner = roller_char(room_id, user["id"])
         if owner is None or owner["id"] != tok["character_id"]:
             return None, None
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
+    ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
     return tok, ch
 
 
@@ -65,7 +65,7 @@ async def handle_exhaustion(ws, room_id, user, is_dm, msg):
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None or tok["character_id"] is None:
         return
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
+    ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
     if ch is None:
         return
     cur = max(0, min(6, _int(ch.get("exhaustion"), 0)))

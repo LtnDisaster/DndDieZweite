@@ -1,4 +1,5 @@
 /* ---------- wiring ---------- */
+(typeof window !== "undefined") && ((window.__BUILDS = window.__BUILDS || {})["60_main.js"] = window.__BUILD__ || "?");
 /* ---------- chat / narration / ambience wiring ---------- */
 function resolveChatTargetName(name){
   const needle = String(name || "").trim().toLowerCase();
@@ -201,6 +202,7 @@ function wire(){
   for (const b of document.querySelectorAll(".qd")) b.onclick = () => roll(b.dataset.expr);
   $("tab-chat").onclick = () => switchFeed("chat");
   $("tab-log").onclick = () => switchFeed("log");
+  if ($("tab-dice")) $("tab-dice").onclick = () => switchFeed("dice");
   $("roll-expr").addEventListener("keydown", e => { if (e.key === "Enter") roll(); });
   $("mh-go").onclick = confirmPlan;
   $("mh-cancel").onclick = clearPlan;
@@ -278,13 +280,16 @@ function wire(){
   };
 }
 
-(async function boot(){
+/* Boot is NOT started here any more (D78): 99_boot.js runs the bundle
+   integrity gate after every script exists and only then calls appBoot(). */
+async function appBoot(){
   wire();
   wireEncounters();
   wireNotes();
   wireQuestUI();
   wireRoomAtmosphere();
   clearPings();
+  if (typeof DEBUG !== "undefined" && DEBUG) document.body.classList.add("dbg-on");
   try { await loadLobby(); }
   catch { show("auth"); }
-})();
+}

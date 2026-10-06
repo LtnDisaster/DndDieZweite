@@ -1,12 +1,15 @@
 /* ---------- room ---------- */
+(typeof window !== "undefined") && ((window.__BUILDS = window.__BUILDS || {})["30_room.js"] = window.__BUILD__ || "?");
 async function openRoom(code){
   const s = await api(`/rooms/${code}/state`);
-  state.room = s; state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || [];
+  state.room = s; state.roomDeleted = false;   // fresh visit — re-arms auto-reconnect
+  state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || [];
   state.grid = s.grid; state.editing = false; state.editMap = null; state.sel = null;
   state.plan = null; state.planRequest = null; state.moving = new Set();
   state.pings = []; state.ruler = null; state.rulerArmed = false; state.pingArmed = false; state.aoe = null;
   state.online = new Set([state.me.username]);
   state.cam.ox = state.cam.oy = 0;
+  state.camT = { ox: 0, oy: 0 }; state.camD = { ox: 0, oy: 0 };
   $("room-title").textContent = s.name;
   $("room-code").textContent = s.code;
   $("room-code").onclick = () => { navigator.clipboard?.writeText(s.code); toast("Code copied"); };
@@ -15,11 +18,15 @@ async function openRoom(code){
   for (const o of document.querySelectorAll(".dm-only")) o.style.display = s.role === "dm" ? "" : "none";
   $("dmtools").classList.toggle("hidden", s.role !== "dm");
   $("init-btns").classList.toggle("hidden", s.role !== "dm");
-  state.messages = s.messages || []; state.chat = s.chat || []; state.feed = "chat"; state.unread.chat = 0;
+  state.messages = s.messages || []; state.chat = s.chat || [];
+  const savedFeed = localStorage.getItem("vtt-feed");
+  state.feed = ["chat", "log", "dice"].includes(savedFeed) ? savedFeed : "chat";
+  state.unread.chat = 0;
   applyAudioState(s.audio || {});
   renderChatControls(); renderChatTargets(); renderVoiceTargets();
   if (s.role === "dm") loadSounds();
   renderFeed();
+  applyFeedPanels();
   updateMoveControls();
   renderParty(); renderInit();   renderOnline();
   renderMyChars(); renderRolls(); applySideTab();
@@ -27,7 +34,12 @@ async function openRoom(code){
   await loadNotes(s.role);
   if (s.role === "dm"){ await loadBestiary(); await loadEncounters(); }
   else { state.encounters = []; state.encRows = []; state.encId = null; }
-  show("room"); resize(); startTick(); connectWS(s.code);
+  show("room"); resize();
+  // D78: a camera framing failure must not abort the room join (WS would never
+  // connect) — presentation errors are logged, never escalated as join errors.
+  try { if (typeof initViewCam === "function") initViewCam(); }   // D75: open the view ON the action
+  catch(e){ if (typeof dbgErr === "function") dbgErr(e, "initViewCam"); else console.error("[room] initViewCam", e); }
+  startTick(); connectWS(s.code);
 }
 function sideTabKey(){ return "vtt-side-tab-" + ((state.me && state.me.username) || ""); }
 function applySideTab(){
@@ -57,7 +69,7 @@ async function refreshRoom(){
   state.quests = s.quests || []; renderQuests();
   state.messages = s.messages || []; state.chat = s.chat || [];
   applyAudioState(s.audio || {}); renderChatTargets(); renderVoiceTargets(); renderAudio();
-  renderFeed(); applySideTab();
+  renderFeed(); applySideTab(); applyFeedPanels();
 }
 
 /* ---------- bestiary (DM-owned monster templates) ---------- */
@@ -217,8 +229,22 @@ function renderMyChars(){
       <div class="meta">${esc(c.race)} ${esc(c.char_class)} · HP ${c.hp}/${c.max_hp} · AC ${c.ac}</div>`;
     const b = d.querySelector('[data-a="bring"]');
     if (b) b.onclick = async () => {
-      try { await api(`/rooms/${state.room.code}/assign`, "POST", { character_id: c.id });
-            await refreshRoom(); toast(`${c.name} takes a seat at the table`); } catch(e){ toast(e.message); }
+      b.disabled = true;
+      // D78: the authoritative result and the presentation result are reported
+      // apart — a placed token must never look like a failed Bring because
+      // camera/render setup threw afterwards (that mislabel burned a whole sprint).
+      try { await api(`/rooms/${state.room.code}/assign`, "POST", { character_id: c.id }); }
+      catch(e){ state._bringLast = "server FAIL: " + e.message; toast(e.message); b.disabled = false; return; }
+      state._bringLast = "ok @ " + new Date().toISOString().slice(11, 19);
+      toast(`${c.name} takes a seat at the table`);
+      try {
+        await refreshRoom();
+        if (typeof initViewCam === "function") initViewCam();   // land on my token (D75)
+      } catch(e){
+        state._bringLast += " | render FAIL: " + e.message;
+        console.error("[bring] presentation error", e);
+        toast("Character is seated — but the view could not initialize: " + e.message);
+      }
     };
     el.appendChild(d);
   }
@@ -355,6 +381,13 @@ function renderFeed(msgs){
     for (const m of state.messages || []) appendTo(l, feedEntry(m, "log"), false);
     l.scrollTop = l.scrollHeight;
   }
+  const dout = $("dice-out");
+  if (dout){
+    dout.innerHTML = "";
+    for (const m of (state.messages || []).filter(x => x && x.type === "dice").slice(-50))
+      appendTo(dout, feedEntry(m, "log"), false);
+    dout.scrollTop = dout.scrollHeight;
+  }
   renderTabs();
 }
 function _dedupeAppend(arr, item, cap){
@@ -378,9 +411,14 @@ function appendChatMessage(m){
 function appendGameLogMessage(m){
   m = m || {};
   _dedupeAppend(state.messages, m, 500);
-  if (state.feed === "log" && !$("chronicle").classList.contains("collapsed")){
+  const open = !$("chronicle").classList.contains("collapsed");
+  if (state.feed === "log" && open){
     const l = $("log");
     if (l) appendTo(l, feedEntry(m, "log"), stickToBottom(l));
+  }
+  if (m.type === "dice" && state.feed === "dice" && open){
+    const d = $("dice-out");
+    if (d) appendTo(d, feedEntry(m, "log"), stickToBottom(d));
   }
   renderTabs();
 }
@@ -396,9 +434,12 @@ function renderTabs(){
   if (log) log.textContent = `Game Log (${(state.messages || []).length})`;
   if (chat) chat.className = state.feed === "chat" ? "primary" : "ghost";
   if (log) log.className = state.feed === "log" ? "primary" : "ghost";
+  const dice = $("tab-dice");
+  if (dice) dice.className = state.feed === "dice" ? "primary" : "ghost";
 }
 function switchFeed(which){
-  state.feed = which === "log" ? "log" : "chat";
+  state.feed = which === "log" ? "log" : which === "dice" ? "dice" : "chat";
+  localStorage.setItem("vtt-feed", state.feed);
   if (state.feed === "chat"){
     state.unread.chat = 0;
     if (!$("chronicle").classList.contains("collapsed")) renderFeed();
@@ -406,9 +447,19 @@ function switchFeed(which){
   } else {
     renderFeed();
   }
+  applyFeedPanels();
+  renderTabs();
+}
+// exactly one feed surface (chat | log | dice) is visible; the composer rows
+// belong to chat alone — dice never shares the panel area with them.
+function applyFeedPanels(){
   $("chat").classList.toggle("hidden", state.feed !== "chat");
   $("log").classList.toggle("hidden", state.feed !== "log");
-  renderTabs();
+  const d = $("dice-panel");
+  if (d) d.classList.toggle("hidden", state.feed !== "dice");
+  const send = document.querySelector(".chat-send-row");
+  if (send) send.classList.toggle("hidden", state.feed !== "chat");
+  renderChatControls();
 }
 function setChronicleOpen(open){
   state.chatOpen = !!open;
@@ -417,15 +468,15 @@ function setChronicleOpen(open){
   if (open){
     state.unread.chat = 0;
     renderFeed();
-    $("chat").classList.toggle("hidden", state.feed !== "chat");
-    $("log").classList.toggle("hidden", state.feed !== "log");
-    const target = $("chat"); if (target) target.scrollTop = target.scrollHeight;
+    applyFeedPanels();
+    const target = $(state.feed === "dice" ? "dice-out" : "chat");
+    if (target) target.scrollTop = target.scrollHeight;
   }
   renderTabs();
 }
 function renderChatControls(){
   const row = $("chat-persona-row");
-  if (row) row.classList.toggle("hidden", !state.room || state.room.role !== "dm");
+  if (row) row.classList.toggle("hidden", state.feed !== "chat" || !state.room || state.room.role !== "dm");
   const ch = $("chat-channel"); if (ch) syncChatTarget();
 }
 function renderChatTargets(){
@@ -836,6 +887,9 @@ function renderNpcSheet(tok){
       <span class="tiny">AC</span><input id="npc-ac" type="number" min="1" max="40" value="${n.ac||10}" style="width:46px">
       <span class="tiny">Lv</span><input id="npc-lvl" type="number" min="1" max="30" value="${n.level||1}" style="width:42px">
       <span class="tiny">Spd</span><input id="npc-spd" type="number" min="0" value="${n.speed||30}" style="width:46px">
+      <span class="tiny">fly</span><input id="npc-fly" type="number" min="0" value="${n.fly||0}" style="width:46px">
+      <span class="tiny">swim</span><input id="npc-swim" type="number" min="0" value="${n.swim||0}" style="width:46px">
+      <span class="tiny">climb</span><input id="npc-climb" type="number" min="0" value="${n.climb||0}" style="width:46px">
     </div>
     <div class="statline">${statCells}</div>
     <div class="row chips" id="npc-abil">${abilRolls}</div>
@@ -888,6 +942,9 @@ function renderNpcSheet(tok){
   $("npc-mhp").oninput = e => { n.max_hp = Math.max(1, +e.target.value||1); if (n.hp>n.max_hp) n.hp=n.max_hp; syncNpcHp(); };
   $("npc-ac").oninput = e => n.ac = Math.max(1, Math.min(40, +e.target.value||10));
   $("npc-spd").oninput = e => n.speed = Math.max(0, +e.target.value||0);
+  $("npc-fly").oninput = e => n.fly = Math.max(0, +e.target.value||0);
+  $("npc-swim").oninput = e => n.swim = Math.max(0, +e.target.value||0);
+  $("npc-climb").oninput = e => n.climb = Math.max(0, +e.target.value||0);
   $("npc-lvl").oninput = e => { n.level = Math.max(1, Math.min(30, +e.target.value||1)); renderNpcSpells(tok); };
   for (const b of body.querySelectorAll(".npc-slot")) b.oninput = () => {
     const lv = b.dataset.lv; const prev = n.spell_slots[String(lv)] || {used:0};
@@ -928,6 +985,7 @@ function renderNpcSheet(tok){
   $("npc-save").onclick = () => {
     wsSend({ type:"update_npc", token_id: tok.id, label: ($("npc-name").value||"NPC").slice(0,32),
       level: n.level, stats: n.stats, hp: n.hp, max_hp: n.max_hp, ac: n.ac, speed: n.speed,
+      fly: n.fly || 0, swim: n.swim || 0, climb: n.climb || 0,
       attacks: n.attacks, spells: n.spells, spell_slots: n.spell_slots,
       saves: n.saves, defenses: n.defenses,
       abilities: n.abilities, resources: n.resources, notes: n.notes,

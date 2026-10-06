@@ -1,6 +1,8 @@
 """Magic items, armor, potions: schema validation, AC computation, unidentified masking."""
 import re
 
+from . import db
+
 KINDS = ("armor", "shield", "potion", "scroll", "wand", "staff", "ring",
          "tool", "wondrous", "spellbook", "other")
 RECHARGES = (None, "long")
@@ -79,11 +81,7 @@ def clean_items(items):
 
 
 def dex_mod(char):
-    stats = char.get("stats") if isinstance(char.get("stats"), dict) else {}
-    try:
-        return (int(stats.get("dex", 10)) - 10) // 2
-    except (TypeError, ValueError):
-        return 0
+    return _stat_mod(char, "dex")
 
 
 def compute_ac(char, items=None):
@@ -143,6 +141,65 @@ def stat_mod(char, ability):
     if ability not in ABILITIES:
         return 0
     return _stat_mod(char, ability)
+
+
+# JSON-backed character columns. as_sheet/as_row are the ONLY row↔sheet
+# converters: game math (this module, room/dice, abilities) always sees a
+# sheet with PARSED columns — a raw DB row carries stats/saves/skills as JSON
+# strings, and _stat_mod correctly treats a non-dict as missing, which is how
+# "ability modifier is silently 0" production bugs are born (2026-10 sprint).
+_JSON_COLUMNS = ("stats", "skills", "saves", "items", "spells", "spell_slots",
+                 "defenses", "resources", "abilities", "class_levels")
+_JSON_LIST_DEFAULTS = ("items", "spells", "resources", "abilities")
+
+
+def as_sheet(char):
+    """THE canonical DB row -> game-calculation sheet (D70). Idempotent: a
+    sheet already holds parsed columns. Keeps the caller's dict (mutating the
+    parsed columns on a q1() result is safe — rows are throwaway dicts)."""
+    if not isinstance(char, dict):
+        return char
+    for col in _JSON_COLUMNS:
+        if col not in char:
+            continue
+        dflt = [] if col in _JSON_LIST_DEFAULTS else {}
+        parsed = db.j(char.get(col), dflt)
+        char[col] = parsed if isinstance(parsed, type(dflt)) else dflt
+    return char
+
+
+def as_row(char):
+    """THE canonical sheet -> DB row (inverse of as_sheet): JSON columns back to
+    strings for persistence. Idempotent for already-stringified columns."""
+    if not isinstance(char, dict):
+        return char
+    for col in _JSON_COLUMNS:
+        if col in char and not isinstance(char[col], str):
+            char[col] = db.json_dumps(char[col])
+    return char
+
+
+def clean_speeds(char):
+    """Canonical movement modes (5e): {"walk","fly","swim","climb"} in feet.
+    Accepts a PC row/sheet (speed column), an NPC blob (speed + optional
+    fly/swim/climb fields), a plain int (legacy walk speed) or None.
+    walk defaults to 30 ft — the other modes default to 0 = not available.
+    Foundation for mode-dependent movement rules; the movement budget currently
+    spends walk only (app/room/movement._walk_speed)."""
+    if isinstance(char, (int, float)) and not isinstance(char, bool):
+        src = {"speed": int(char)}
+    elif isinstance(char, dict):
+        src = char
+    else:
+        src = {}
+
+    def ft(key, dflt=0):
+        try:
+            return max(0, min(int(src.get(key) or dflt), 999))
+        except (TypeError, ValueError):
+            return dflt
+    walk = ft("speed") or ft("walk") or 30
+    return {"walk": walk, "fly": ft("fly"), "swim": ft("swim"), "climb": ft("climb")}
 
 
 def prof_bonus(char):

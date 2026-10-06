@@ -4,7 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>D&D Tabletop</title>
-<link rel="stylesheet" href="/static/style.css">
+<script>
+/* D78: this inline block is part of the bootstrap HTML (never cached beyond
+   the page itself). It pins the expected build token and captures runtime
+   errors from the very first script on — a broken bundle must announce
+   itself, not die silently as a black canvas. */
+window.__BUILD__ = "__BUILDTOKEN__";
+window.__BOOTERRORS = [];
+window.addEventListener("error", function(ev){
+  window.__BOOTERRORS.push({msg: String(ev.message || ""), file: String(ev.filename || "").split("/").pop(),
+                            line: ev.lineno || 0});
+  if (console && console.error) console.error("[boot]", ev.message, ev.filename + ":" + ev.lineno);
+});
+window.addEventListener("unhandledrejection", function(ev){
+  var m = ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason);
+  window.__BOOTERRORS.push({msg: "promise: " + m, file: "", line: 0});
+  if (console && console.error) console.error("[boot]", m, ev.reason);
+});
+</script>
+<link rel="stylesheet" href="/static/style.css?v=__BUILDTOKEN__">
 </head>
 <body>
 
@@ -113,6 +131,7 @@
       <span id="room-code" class="code"></span>
       <button id="btn-help" class="ghost" title="Help &amp; keyboard shortcuts (?)">?</button>
       <span id="room-role" class="badge"></span>
+      <span id="dbg" class="dbg" title="debug view (open page with ?debug)"></span>
       <span id="viewtoggle" title="Personal view (this browser only; other players keep their own view)">
         <button id="view-tactical" class="primary" type="button">Tactical</button>
         <button id="view-diorama" class="ghost" type="button">Diorama</button>
@@ -137,6 +156,12 @@
       </div>
     </div>
     <aside class="side">
+      <div class="row side-tabs" id="side-tabs" role="tablist" title="Group sidebar panels">
+        <button data-tab="game" class="ghost" role="tab" aria-selected="false">⚔ Game</button>
+        <button data-tab="chars" class="ghost" role="tab" aria-selected="false">👤 Chars</button>
+        <button data-tab="story" class="ghost" role="tab" aria-selected="false">📜 Story</button>
+        <button data-tab="dm" class="ghost dm-only" role="tab" aria-selected="false">🎲 DM</button>
+      </div>
       <div class="panel grow" id="chronicle">
         <div class="chronicle-head">
           <h2>Chronicle</h2>
@@ -146,6 +171,7 @@
         <div class="row tabs">
           <button id="tab-chat" class="primary">Chat</button>
           <button id="tab-log" class="ghost">Game Log</button>
+          <button id="tab-dice" class="ghost" title="Dice (keyboard shortcut coming via Roll input)">Dice</button>
         </div>
         <div id="audio-bar" class="audio-bar hidden" title="Room ambience">
           <span id="audio-title" class="audio-name">No ambience</span>
@@ -172,9 +198,7 @@
           <input id="chat-in" placeholder="Message… (/w Bob hi)" maxlength="4000">
           <button id="btn-chat" class="primary">➤</button>
         </div>
-        </div>
-        <div class="dice-sep" aria-hidden="true"></div>
-        <div class="chronicle-dice">
+        <div id="dice-panel" class="dice-panel hidden">
         <div class="row dice">
           <input id="roll-expr" value="1d20" placeholder="2d6+3">
           <input id="roll-mod" type="number" placeholder="±mod" min="-500" max="500">
@@ -194,14 +218,11 @@
           <button data-d="d4">d4</button><button data-d="d6">d6</button><button data-d="d8">d8</button>
           <button data-d="d10">d10</button><button data-d="d12">d12</button><button data-d="d20" class="hot">d20</button>
         </div>
+        <div id="dice-out" class="chat dice-out" aria-live="polite"></div>
+        </div>
         </div>
       </div>
-      <div class="row side-tabs" id="side-tabs" role="tablist" title="Group sidebar panels">
-        <button data-tab="game" class="ghost" role="tab" aria-selected="false">⚔ Game</button>
-        <button data-tab="chars" class="ghost" role="tab" aria-selected="false">👤 Chars</button>
-        <button data-tab="story" class="ghost" role="tab" aria-selected="false">📜 Story</button>
-        <button data-tab="dm" class="ghost dm-only" role="tab" aria-selected="false">🎲 DM</button>
-      </div>
+      <div class="side-cat" id="side-cat">
       <div class="panel hidden" id="sheet-roll">
         <h2 id="sr-name">Rolls</h2>
         <div class="row sr-toggles">
@@ -380,6 +401,10 @@
             <button class="brush" data-b="wall" title="Wall (blocks path)">🧱</button>
             <button class="brush" data-b="floor" title="Floor">⬜</button>
             <button class="brush" data-b="rough" title="Difficult terrain (2× walk)">🌿</button>
+            <button class="brush" data-b="barrier" title="Barrier (blocks movement, not sight; climbable)">🚧</button>
+            <button class="brush" data-b="low" title="Low obstacle (passable, 2× cost; climbable)">🪨</button>
+            <button class="brush" data-b="raise" title="Raise elevation +1 (step = 1 unit)">⛰️+</button>
+            <button class="brush" data-b="lower" title="Lower elevation −1">⛰️−</button>
             <button class="brush" data-b="trap" title="Hidden trap">⚠️</button>
             <button class="brush" data-b="loot" title="Hidden loot">🎁</button>
             <button class="brush" data-b="door" title="Door: click a cell edge">🚪</button>
@@ -424,6 +449,7 @@
           </div>
         </div>
       </div>
+      </div><!-- /side-cat -->
     </aside>
   </main>
 </section>
@@ -458,12 +484,13 @@
   </div>
 </div>
 
-<script src="/static/js/10_core.js"></script>
-<script src="/static/js/20_lobby.js"></script>
-<script src="/static/js/30_room.js"></script>
-<script src="/static/js/40_ws.js"></script>
-<script src="/static/js/50_canvas.js"></script>
-<script src="/static/js/55_diorama.js"></script>
-<script src="/static/js/60_main.js"></script>
+<script src="/static/js/10_core.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/20_lobby.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/30_room.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/40_ws.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/50_canvas.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/55_diorama.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/60_main.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/99_boot.js?v=__BUILDTOKEN__"></script>
 </body>
 </html>

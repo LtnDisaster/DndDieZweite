@@ -167,23 +167,28 @@ def in_range(defn, from_cell, to_cell):
 
 def target_cells(defn, mp, point, direction="E"):
     """Cells an ability aims at (anchor cell first in the list is NOT guaranteed —
-    use defn['targeting'] to know semantics). Empty list = invalid geometry."""
+    use defn['targeting'] to know semantics). Empty list = invalid geometry.
+    WORLD in, WORLD tuples or flat STORAGE indices out (tokens_in_cells
+    normalizes). effects.py is space-free grid maths, so the anchor is shifted
+    into the map's STORAGE space (D72) and the flat results stay storage-based."""
     w, h = mp["w"], mp["h"]
+    ox, oy = mapmodel.origin_of(mp)
     x, y = point
-    if not (0 <= x < w and 0 <= y < h):
+    if not mapmodel.in_world(mp, x, y):
         return []
     if defn["targeting"] == "area":
-        return effects.effect_cells(defn["shape"], defn["size_ft"], x, y, w, h, direction)
+        return effects.effect_cells(defn["shape"], defn["size_ft"], x - ox, y - oy, w, h, direction)
     return [(x, y)]
 
 
 def tokens_in_cells(mp, room_id, cells, exclude_id=None):
     """Tokens with ANY occupied footprint cell inside ``cells`` — the centralized
     footprint-aware targeting rule (a 1-cell overlap is enough; D61).
-    ``cells`` accepts either (x, y) pairs or flat ``y*w+x`` indices (effects.py
-    returns indices, footprint.py returns pairs — normalize once HERE)."""
+    ``cells`` accepts WORLD ``(x, y)`` pairs or flat STORAGE ``y*w+x`` indices
+    (effects.py returns indices, footprint.py returns pairs — normalize once
+    HERE; flat indices are converted through mapmodel, D72)."""
     w = mp["w"]
-    hit = {c if isinstance(c, tuple) else (c % w, c // w) for c in cells}
+    hit = {c if isinstance(c, tuple) else mapmodel.world_of(mp, c % w, c // w) for c in cells}
     out = []
     for tok in db.q("SELECT * FROM tokens WHERE room_id=?", (room_id,)):
         if exclude_id is not None and tok["id"] == exclude_id:
@@ -444,7 +449,7 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
         visible = ws.viewer_visible_cells(room_id, actor_user_id, mp)
         for e in entries:
             t = db.q1("SELECT x, y FROM tokens WHERE id=?", (e["token_id"],))
-            e["visible"] = ((origin_cell(mp, t)[1] * mp["w"] + origin_cell(mp, t)[0])
+            e["visible"] = (mapmodel.flat_idx(mp, origin_cell(mp, t)[0], origin_cell(mp, t)[1])
                             in visible) if t else False
     else:
         for e in entries:

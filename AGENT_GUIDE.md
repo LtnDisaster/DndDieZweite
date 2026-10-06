@@ -110,12 +110,24 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   - `app/rooms.py`
   - `app/ws.py`
   - `app/db.py`
+  - Room deletion (D76): `DELETE /api/rooms/{code}` — creator-DM only (role `dm`
+    AND `rooms.dm_id`), cascades tokens/messages/room_state/notes/quests/
+    room_members/rooms, removes the room's own `map_image` upload only, then
+    `net.purge_room_nowait()` announces `room_deleted`, closes every socket on
+    its owning loop, cancels walks via `Task.get_loop()` and forgets
+    `_clients/_map_locks/_last_seen`. `ws.py` teardown checks the room row first
+    (deleted room → skip bookkeeping, else FK fails and zombies return).
 - Client:
-  - `app/static/js/20_lobby.js`
+  - `app/static/js/20_lobby.js` — DM-only two-step Delete (arm + confirm)
   - `app/static/js/30_room.js`
-  - `app/static/js/60_main.js`
+  - `app/static/js/40_ws.js` — `room_deleted` case: leave to lobby, never
+    reconnect (reconnect is also guarded by `state.roomDeleted`)
+  - `app/static/js/60_main.js` — `btn-back` is the permanent "← Lobby" escape
+    (works in Tactical AND Diorama; kills reconnect + ws)
 - Tests:
   - `tests/test_integration.py`
+  - `tests/test_room_delete.py` — authorization matrix, cascade, idempotency,
+    `room_deleted` + registry purge
 
 ## Characters / ownership
 
@@ -133,8 +145,13 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 
 - Server:
   - `app/room/tokens.py`
-  - `app/npc.py`
+  - `app/npc.py` — clean_npc normalises movement modes via `gear.clean_speeds`
+    (walk/fly/swim/climb persisted as blob fields + `speeds` dict); authoring UI
+    in the NPC editor. `to_hit`/`dmg` stay complete author bonuses (no engine
+    double-add, D66).
   - `app/rooms.py` creature CRUD
+- Token row: `z` column = elevation units of the ground cell the token rests on
+  (walk/teleport/forced-move sync it; D70).
 - Client:
   - `app/static/js/30_room.js`
   - `app/static/js/50_canvas.js`
@@ -145,8 +162,21 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 ## Movement / footprints / pathfinding / doors
 
 - Server:
-  - `app/room/movement.py` — walk task, stop move, trap auto-stop and path previews.
-  - `app/path.py` — footprint-aware A*.
+  - `app/room/movement.py` — walk task, stop move, trap auto-stop and path previews;
+    preview surfaces `cost`/`speed_ft`/`budget`/`within_budget`; walk end (reason None)
+    and player teleports are the ONLY automatic-growth triggers (D67).
+  - `app/room/moveforced.py` — DM-only forced movement (push/pull/shove/knockback/
+    throw/teleport): stops at first illegal cell, syncs z, never a walk, no budget,
+    never world growth (D71). Not in `_walks`.
+  - `app/room/growth.py` + `mapmodel.grow_map` — automatic chunk growth (12) for
+    player-owned tokens within 11 cells of an edge, cap 80×60; broadcasts `map_expanded`.
+    **Feature-flagged OFF by default (D77)**: `mapmodel.AUTO_GROW` =
+    `DNDTABLE_AUTO_GROW=1` env; `maybe_grow_map` returns immediately when off.
+    The machinery stays fully implemented and tested (`test_map_expand.py`
+    enables the flag explicitly); DM map-editor resize is the manual path.
+  - `app/movecost.py` — cost SSOT (5e diagonals 1,2,1,2; difficult ×2; budget = speed//5).
+    A* weights in `path.py` stay 10/14 — cost is a route post-processing, not search.
+  - `app/path.py` — footprint-aware A*; optional `elev=` gates steps at |Δz| ≤ 1 (D70).
   - `app/footprint.py` — size/anchor/collision SSOT.
   - `app/mapmodel.py`
   - `app/room/doors.py` — open/close/lock plus door-open LOS reveal; `dm_only`
@@ -155,13 +185,17 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
     nonexistent edge) and their moves stay out of the chronicle (D63).
 - Client:
   - `app/static/js/50_canvas.js` — requests `path_preview`, renders footprint center, server path cells,
-    active-walk ring and DM stop control.
+    active-walk ring and DM stop control; HUD shows `cost/budget squares`;
+    `map_expanded` NEVER moves the camera (D72: world coordinates do not move;
+    in Diorama the known-world fit is re-applied after the state refresh).
 - Tests:
   - `tests/test_path.py`
   - `tests/test_footprint_path.py`
   - `tests/test_mapmodel.py`
   - `tests/test_movement_fog.py`
   - `tests/test_integration.py`
+  - `tests/test_movecost.py`, `tests/test_map_expand.py`, `tests/test_terrain.py`,
+    `tests/test_elevation.py`, `tests/test_forced_move.py`
 
 ## Vision / fog / manual DM reveal
 
@@ -185,7 +219,12 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 ## Map / traps / loot / pins
 
 - Server:
-  - `app/mapmodel.py`
+  - `app/mapmodel.py` — cell vocabulary via **TERRAIN registry** (D69): 0 floor,
+    1 wall, 2 difficult, 3 barrier (move✗/vision✓, climbable), 4 low_obstacle
+    (move✓ ×2 cost, climbable); `elev` integer layer -6..6 (D70, missing = flat,
+    fog-gated in `visible_map`); `grow_map`/`growth_needed` (D67).
+  - `app/wall.py` — semantics facade: blocks_movement/blocks_vision/climbable/
+    height_units per cell; never re-encode cell values in features.
   - `app/room/movement.py` — triggers traps/loot on walk and stops movement on a trap.
   - `app/room/traps.py`
   - `app/room/net.py`
@@ -405,10 +444,16 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 - **Doors**: `dm_only` (operation restricted to DM, checked BEFORE lock-state answer)
   and `secret` (never in any player payload; silent refusal; no chronicle line) are
   sanitized map fields — both views read the same server data (D63).
-- **UI pass 2**: CSS tokens (`--side-w`, z-scale, --muted…), sticky sidebar tab bar
-  with aria-selected, `details.group` DM-tool sections, NPC sheet sectioned
-  (Identity/Combat/Abilities + collapsible details, ALL `#npc-*` ids kept), PC
-  sheet Skills/Spellbook as `details.sheet-sec`.
+- **UI layout (post-sprint fix, 2026-10-06)**: `#view-room` is a flex app-shell
+  (`100vh`, topbar auto-height, `.room-grid flex:1; min-height:0` — NEVER guess
+  the topbar height again). `.side` never scrolls: three fixed regions —
+  `#side-tabs` (category nav, top), `#chronicle` (the single main feed area:
+  tabs Chat|Game Log|Dice via `switchFeed`, `applyFeedPanels` keeps exactly one
+  surface + chat-only composer rows, feed persisted in localStorage `vtt-feed`),
+  and `.side-cat` (drawer for category/context panels, `max-height:46%`, own
+  scroll). Roll results mirror into `#dice-out`. NPC sheet sectioned (all
+  `#npc-*` ids kept). Static pins: `tests/test_layout_pins.py` — change the
+  layout there, in the same PR, if you must change this structure.
 - Tests: `test_doors_dmonly.py`, `test_deploy_hygiene.py`, `test_auth_token.py`.
 
 ---
@@ -439,7 +484,8 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `hp` | `room.combat.handle_hp` | DM | maybe | routed through health reducer |
 | `move` | `room.movement.handle_move` | own token or DM teleport | no | with `path`: revalidates and refuses silently-different routes (`route_invalid`, D60); without: recomputes authoritative footprint-aware path |
 | `stop_move` | `room.movement.handle_stop_move` | DM | no | cancels active `_walks` task |
-| `path_preview` | `room.movement.handle_path_preview` | own token or DM | yes (requester) | server preview; never mutates token |
+| `path_preview` | `room.movement.handle_path_preview` | own token or DM | yes (requester) | server preview; never mutates token; carries `cost`/`budget`/`within_budget` (D68) |
+| `forced_move` | `room.moveforced.handle_forced_move` | DM | yes (DM) | push/pull/shove/knockback/throw/teleport; stops on first illegal cell; no walk/budget/growth (D71) |
 | `fog_edit` | `room.fog.handle_fog_edit` | DM | no | batch reveal/hide shared `explored` memory |
 | `fog_toggle` | `room.fog.handle_fog_toggle` | DM | no | room-wide `fog_off` flag: terrain+static visible to all, live NPCs stay LOS-filtered (D60) |
 | `map_edit` | `dispatch.handle_map_edit` | DM | no | map model sanitized; preserves trap/loot/fog runtime state; resize carries `explored` overlap |
@@ -469,10 +515,13 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `initiative` | combat | room | no |
 | `cond` / `death` | conditions/death | room or snapshot | usually no |
 | `ping` | pings | room | no |
+| `map_expanded` | room.growth | room | no | auto world growth (D67, flag-off default D77): new `w,h,origin`; NO pixel shift (D72) — clients refetch; player-owned token walks/teleports only |
+| `forced_moved` | room.moveforced | DM socket | private | final cell + z of a forced move (D71); movement itself rides `step` |
 | `quests_changed` | room quests | room | no | payload-less; clients refetch filtered `/state` |
 | `ability_result` | caster socket | private | yes | entries privacy-filtered; hidden targets counted, never named |
 | `system` | gamelog notices (incl. quest notices) | per visibility | maybe | chronicle line, never reconstruction source |
 | `error` | various | sender socket | private |
+| `room_deleted` | rooms.delete_room → net.purge | room, then sockets close | no | room permanently deleted (D76); clients leave to lobby and must not reconnect |
 
 ---
 
@@ -530,6 +579,9 @@ Frontend filtering may improve presentation but may not be the security boundary
 
 ## Proficiency and sheet math
 
+- `app/gear.py::as_sheet()` / `as_row()` — THE canonical DB-row↔sheet converters;
+  every `gear.*` calculation must receive an `as_sheet()` result (D66 — raw rows
+  silently produced modifier 0)
 - `app/gear.py::prof_bonus()`
 - `app/gear.py::skill_bonus()`
 - `app/gear.py::save_bonus()`
@@ -541,6 +593,11 @@ Frontend filtering may improve presentation but may not be the security boundary
 
 - `app/path.py::find_path()`
 - `app/path.py::path_footprint_cost()`
+- `app/movecost.py::route_cost()` / `walk_budget()` (cost & budget SSOT, D68)
+- `app/mapmodel.py::TERRAIN` / `walkable()` / `difficult()` / `blocks_vision()` (D69)
+- `app/wall.py::blocks_movement()` / `blocks_vision()` / `height_units()` (D69)
+- `app/gear.py::clean_speeds()` (walk/fly/swim/climb SSOT)
+- `app/room/moveforced.py::handle_forced_move()` (D71)
 - `app/footprint.py::valid_final_position()`
 - `app/footprint.py::find_valid_origin()`
 - `app/los.py::line_of_sight()`
@@ -953,11 +1010,38 @@ links only; they never grant redistribution rights.
 - Diorama interaction covers token selection, door toggle and server path
   preview/move confirm. DM tools (ruler, AoE, ping, spawn-drop, map editor)
   are tactical-view tools; switch to Tactical to use them.
-- Manual verification checklist (frontend has no browser test automation):
-  1. Join a room → Tactical loads normally; move a token.
-  2. Switch to Diorama → same token position shown as a billboard.
-  3. Second browser stays Tactical → the first stays Diorama (independent).
-  4. Open/close a door from either view → both views reflect the same state.
-  5. A hidden NPC never appears in Diorama (server filtered it already).
-  6. Switch back to Tactical → movement and path preview still work.
-  7. Reload the page → the local view preference persists (localStorage).
+- **View framing (D75, fixes the manual "black screen / one-way door")**:
+  opening a room calls `initViewCam()` AFTER `resize()` — Tactical centers on
+  the player's own token (`centerOnMyToken`), Diorama centers the camera on the
+  viewer's KNOWN world (`fitDiorama`, reuses `visibleHere` so it reveals
+  nothing new). Each mode keeps its own camera (`state.camT`/`state.camD`);
+  `setViewMode` saves and restores the slots so a fit never corrupts the other
+  view. Tactical→Diorama→Tactical must always round-trip the world unchanged
+  and restore the user's own camera — pinned by `test_view_mode.py` (Node vm,
+  real renderer code, player-shaped payload).
+- Diagnostics for future "all black" bugs: open the page with `?debug` —
+  the topbar shows build token + `integrity=ok/FAIL/DRIFT` (D78), view mode,
+  canvas size/DPR, cam/camT/camD, camInit trace, `grid=y/n` + window
+  (origin, w×h, cell), own token's world cell and screen position,
+  known/explored/painted counts, `bring=<last result/error>` and the last
+  client/boot exception (all derived from this viewer's own filtered payload
+  or build identity; counts only, never hidden entities).
+- **Frontend generation integrity (D78 — read before touching ANY file in
+  `app/static/js/`)**: the black-canvas saga was a mixed script generation
+  (new 50_canvas calling `gridOrigin` against a cached pre-D72 10_core), not
+  a game-rule bug. Rules that keep it from returning: (1) `app/buildinfo.py`
+  computes ONE build token over all owned JS/CSS + index.html; `/` injects it
+  into every asset URL and `window.__BUILD__` — never add an asset URL without
+  `?v=__BUILDTOKEN__`. (2) Every module stamps `window.__BUILDS["<file>"]`
+  (first line) — copy the line when creating a new file and add it to
+  `MODULES` in `99_boot.js` and to index.html in load order. (3) A genuinely
+  required cross-file global must be added to `REQUIRED` in `99_boot.js`;
+  `tests/test_frontend_bundle.py` then proves definition-before-call in load
+  order (it reproduces the exact incident as a negative control). (4) Boot
+  belongs to `99_boot.js` ONLY (`appBoot()` in 60_main is never self-called).
+  (5) Gameplay results and presentation results stay separate: a successful
+  server operation must never be toasted as failed because camera/render
+  setup threw afterwards.
+- Manual verification for frontend changes: follow
+  `MANUAL_BROWSER_CHECKLIST.md` — BUILD CHECK first (console `BUILD <token>`
+  == `/api/build` == asset `?v=` == no mismatch banner), then the smoke test.

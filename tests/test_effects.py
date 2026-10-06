@@ -75,7 +75,9 @@ def test_effect_geometry_matches_client_aoecells():
     extra = (
         "const out=[];"
         f"for (const [s,n,x,y,d] of {json.dumps(matrix)})"
-        "  out.push(aoeCells(s,x,y,n," + f"{W},{H},d));"
+        # aoeCells speaks WORLD cells against the map's window (D72); encode
+        # the result back to flat storage indexes for the parity comparison.
+        "  out.push(aoeCells(s,x,y,n," + f"{{w:{W},h:{H}}},d).map(pt => pt.y*{W} + pt.x));"
         "console.log(JSON.stringify(out));"
     )
     client = json.loads(_node_vm([JS_10], extra))

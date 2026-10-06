@@ -91,11 +91,15 @@ async def ws_room(ws: WebSocket, code: str):
     finally:
         socks.discard(ws)
         detach_ws(ws)
-        if not socks:
-            clients(room_id).pop(user["id"], None)
-            prune_viewer_last_seen(room_id, user["id"])
-            sys_msg(room_id, f"{user['username']} disconnected.")
-            await broadcast(room_id, "presence", {"username": user["username"], "online": False})
+        if db.q1("SELECT 1 AS ok FROM rooms WHERE id=?", (room_id,)) is not None:
+            if not socks:
+                clients(room_id).pop(user["id"], None)
+                prune_viewer_last_seen(room_id, user["id"])
+                sys_msg(room_id, f"{user['username']} disconnected.")
+                await broadcast(room_id, "presence", {"username": user["username"], "online": False})
+        # D76: if the room row is gone it was deleted mid-session — purge_room
+        # owns that cleanup; leaving teardown bookkeeping and a disconnect
+        # message behind would fail the FK and resurrect zombie registries.
 
 
 def _reveal_token(mp, token):

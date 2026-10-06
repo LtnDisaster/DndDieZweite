@@ -12,7 +12,9 @@ from . import conditions as C
 from . import npc
 from .room import audio, chat
 from .room import death as D
+from . import events as game_events
 from .room import gamelog
+from .room import net as room_net
 from .auth import COOKIE, cookie_secure, hash_pw, make_token, require_user, room_of, verify_pw
 
 router = APIRouter(prefix="/api")
@@ -509,6 +511,45 @@ def join_room(body: JoinIn, user=Depends(require_user)):
     return {"code": room["code"], "name": room["name"]}
 
 
+@router.delete("/rooms/{code}")
+def delete_room(code: str, request: Request):
+    """Delete a room permanently (D76). Only the room's DM (creator-equivalent
+    membership role) may do this — a player crafting the HTTP request gets 403,
+    a stranger gets 403/404 via room_of(); repeated calls 404 (idempotent-safe).
+
+    Cascades exactly this room's persistent rows, removes the room's own
+    background upload (never shared assets), and purges every in-memory trace
+    (clients, map locks, ghost memory, walks) with a final room_deleted event
+    so sockets land in the lobby instead of zombie-reconnecting."""
+    user, room = room_of(request, code)
+    if room["_role"] != "dm" or user["id"] != room["dm_id"]:
+        raise HTTPException(403, "Only the room's DM can delete the room")
+    room_id = room["id"]
+    tok_ids = [t["id"] for t in db.q("SELECT id FROM tokens WHERE room_id=?", (room_id,))]
+    image = room.get("map_image") or ""
+    with db.tx() as c:
+        for table in ("tokens", "messages", "room_state", "notes", "quests",
+                      "room_members"):
+            c.execute(f"DELETE FROM {table} WHERE room_id=?", (room_id,))
+        c.execute("DELETE FROM rooms WHERE id=?", (room_id,))
+    if image.startswith("/uploads/"):
+        # rooms.map_image is written exclusively by THIS room's upload endpoint
+        # (single-purpose file) — deleting it can never touch shared assets.
+        fname = os.path.basename(image)
+        if fname and fname != os.path.basename(fname):
+            fname = None                      # path traversal guard
+        if fname:
+            try:
+                os.remove(os.path.join(UPLOAD_DIR, fname))
+            except OSError:
+                pass                          # missing/unwritable: deletion is done
+    game_events.recent = type(game_events.recent)(
+        (e for e in game_events.recent if e.get("room_id") != room_id),
+        maxlen=game_events.recent.maxlen)
+    room_net.purge_room_nowait(room_id, code, tok_ids)
+    return {"ok": True, "deleted": code}
+
+
 @router.get("/rooms/{code}/state")
 def room_state(code: str, request: Request):
     user, room = room_of(request, code)
@@ -537,7 +578,8 @@ def room_state(code: str, request: Request):
             if t["owner_user_id"] == user["id"]:
                 return True
             origin, side = footprint.occupied_origin(mp, t)
-            return any((y * mp["w"] + x) in visible for (x, y) in footprint.origin_cells(mp["w"], mp["h"], origin, side))
+            return any((i := mapmodel.flat_idx(mp, x, y)) is not None and i in visible
+                       for (x, y) in footprint.origin_cells(mp, origin, side))   # D72
         tokens = [t for t in tokens_all if _visible_token(t)]
         for t in tokens:                                   # NPC stat blocks are DM-only
             t["npc"] = None
@@ -589,7 +631,7 @@ def assign_char(code: str, body: AssignIn, request: Request):
         strow = c.execute("SELECT map_json FROM room_state WHERE room_id=?", (room["id"],)).fetchone()
         mp = mapmodel.load(strow["map_json"] if strow else "")
         size = tok["size"] if tok else "Medium"
-        desired = footprint.origin_from_pixel(px, py, mp["cell"], mp["w"], mp["h"])
+        desired = footprint.origin_from_pixel(px, py, mp["cell"], mp)
         candidate = {"id": tok["id"] if tok else -1, "owner_user_id": user["id"],
                      "size": size, "x": px, "y": py}
         existing = [dict(r) for r in c.execute(

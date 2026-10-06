@@ -49,6 +49,9 @@ HOST=0.0.0.0 PORT=9000 ./run.sh
    a **weapon list** (name, ability, proficient, damage dice like `1d8+3`, optional
    **magic bonus** `+N`), and an **Armor & Items** list (see *Items* below).
 3. **Create a room** (you become the DM) or **join** one via its 6-character code.
+   A room can be removed permanently from the lobby — the **Delete** button is
+   DM-only and asks for a deliberate second confirmation (D76). Before any deep
+   manual testing, run the 14-step smoke checklist in `MANUAL_BROWSER_CHECKLIST.md`.
 4. In a room, click **Bring** on a character — it becomes your colored token.
 5. **Two-click move** (players): click a destination to *plan* the route (a gold path
    preview appears; walls block, difficult terrain counts double), then a **second
@@ -430,7 +433,7 @@ app, `GET /api/health`, log in.
 Canonical run (identical environment everywhere):
 
 ```bash
-docker compose run --rm test            # 263 tests, Python 3.12 + pinned deps
+docker compose run --rm test            # 330 tests (+9 node-skipped), Python 3.12 + pinned deps
 ```
 
 Dev shortcut on the host venv:
@@ -455,8 +458,12 @@ parsing, server-authoritative **saving throws**, **typed damage/resistance/immun
 **secret events**, **safe audio URL parsing**, **DM-private soundboards**, room ambience and
 **selective audio delivery**, **one-shot trap lifecycle**, **fog-off room flag**,
 **downed movement gates**, **dm-only/secret doors** (`test_doors_dmonly`),
-**cookie/token hardening** (`test_auth_token`, `test_deploy_hygiene`) and
-**uploads under VTT_DATA_DIR**. Tests run against an
+**cookie/token hardening** (`test_auth_token`, `test_deploy_hygiene`),
+**uploads under VTT_DATA_DIR**, PC/NPC **modifier parity** (`test_modifier_matrix`),
+**automatic map growth** (`test_map_expand`), **5e movement cost + budget**
+(`test_movecost`), **movement modes** (`test_speeds`), **terrain vocabulary**
+barrier/low-obstacle (`test_terrain`), **elevation layer + token z**
+(`test_elevation`) and **DM forced movement** (`test_forced_move`). Tests run against an
 isolated temporary `VTT_DATA_DIR`; no live server, browser, or network is required. Dev deps
 live in [`requirements-dev.txt`](requirements-dev.txt).
 

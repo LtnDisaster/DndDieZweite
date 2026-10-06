@@ -16,6 +16,7 @@ from .dice import (handle_cast, handle_long_rest, handle_npc_attack, handle_reso
 from .items import handle_attune, handle_identify, handle_recharge, handle_use_item
 from .fog import handle_fog_edit, handle_fog_toggle
 from .movement import handle_move, handle_path_preview, handle_stop_move
+from .moveforced import handle_forced_move
 from .net import broadcast, get_map, map_lock, send_to, set_map, sys_msg
 from .pings import handle_ping
 from .progression import handle_class_levels
@@ -85,6 +86,7 @@ HANDLERS = {
     "move": handle_move,
     "stop_move": handle_stop_move,
     "path_preview": handle_path_preview,
+    "forced_move": handle_forced_move,
     "fog_edit": handle_fog_edit,
     "fog_toggle": handle_fog_toggle,
     "map_edit": handle_map_edit,
