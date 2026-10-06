@@ -301,3 +301,30 @@ def test_view_switch_controls_live_in_stable_chrome():
     for elem in ('id="btn-back"', 'id="view-tactical"', 'id="view-diorama"'):
         assert elem in header, f"{elem} must live in the room header chrome"
     assert 'id="viewtoggle"' in header
+
+
+@needs_node
+def test_view_switch_never_touches_combat_state():
+    """D79 §8: combat state is world state. A Tactical→Diorama→Tactical round
+    trip (with renders on both sides) must not move tokens, spend/reset the
+    turn budget, touch A/B/R slots, advance initiative or drop a planned route."""
+    out = _run_renderers(_PLAYER_SCENE + """
+        state.init = { combat:true, round:1, active:0,
+          order:[{token_id:1,label:"Hero",total:15,roll:13,mod:2},
+                 {token_id:2,label:"Goblin",total:11,roll:10,mod:1}],
+          turn:{token_id:1,round:1,move_total:6,move_spent:2,
+                action:"used",bonus:"available",reaction:"available"} };
+        state.plan = { token_id:1, goal:{cx:38,cy:21}, path:[{x:38,y:21}],
+                       cells:[{x:38,y:21}], cost:4, side:1 };
+        const initBefore = JSON.stringify(state.init);
+        const planBefore = JSON.stringify(state.plan);
+        const snapBefore = snap();
+        initViewCam();
+        drawTactical(); setViewMode("diorama"); drawDiorama();
+        setViewMode("tactical"); drawTactical();
+        console.log([JSON.stringify(state.init) === initBefore,
+                     JSON.stringify(state.plan) === planBefore,
+                     snap() === snapBefore,
+                     state.viewMode === "tactical"].join(","));
+        """)
+    assert out == "true,true,true,true"

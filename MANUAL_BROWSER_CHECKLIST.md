@@ -38,6 +38,31 @@ BLOCKED until steps B1–B5 pass. Report, don't continue, on any failure.
     armed button (`Delete "<name>" permanently?`).
 15. The room is gone from both lists; joining by its old code fails.
 
+## COMBAT LOOP (D79 — after smoke passes)
+
+1. **Exploration movement:** before any combat, walk your token a clearly
+   long route (> speed) — it must complete. No combat budget applies.
+2. **Start combat:** DM clicks ⚔️ Start. The Initiative panel shows the round
+   line, the order, and the compact turn bar (active name, move x/y, A/B/R).
+3. **Active token movement:** when it's your turn, move — the turn bar's
+   movement counter drops by exactly the route cost shown in the preview
+   (e.g. 3 of 6 for 3 straight steps).
+4. **Budget display:** remaining/total visible at a glance; the path preview
+   shows `cost/budget` and marks an unaffordable route.
+5. **Over-budget attempt:** confirm a too-long route — the token walks until
+   the budget runs out and stops with "Out of movement — Dash or End Turn"
+   (never silently beyond).
+6. **Dash:** click 💨 Dash — the Action chip flips to spent and the movement
+   total grows by one speed (e.g. 6 → 12); you can now walk the extra range.
+7. **Second Dash:** must be refused ("No action left this turn").
+8. **End Turn:** click End Turn (or DM clicks Next) — initiative advances.
+9. **Next combatant:** the turn bar shows the new active token with a FULL
+   budget (x/6) and fresh A/B/R.
+10. **Tactical → Diorama → Tactical** mid-turn: move spent, A/B/R, token
+    position and initiative must be exactly as before the round trip.
+11. **End combat:** DM clicks End — turn bar disappears, combat ends.
+12. **Exploration again:** walk a long route — no budget applies any more.
+
 ## Extended manual checks (after smoke passes)
 
 - Two clients: one stays Diorama while the other stays Tactical (views are

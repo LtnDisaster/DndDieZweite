@@ -720,10 +720,40 @@ function renderParty(){
     el.appendChild(d);
   }
 }
+const SLOT_ABBR = { action: "A", bonus: "B", reaction: "R" };
 function renderInit(){
   const ol = $("init-list"); ol.innerHTML = "";
+  const bar = $("turn-bar");
+  if (bar){ bar.innerHTML = ""; bar.classList.add("hidden"); }
   const i = state.init;
   if (!i || !i.combat){ ol.innerHTML = "<li style='opacity:.5'>No combat</li>"; return; }
+  // Compact turn bar (D79): who acts, movement left, A/B/R slots, Dash/End Turn.
+  // Pure rendering of the server's initiative object — no client-side economy.
+  const t = i.turn;
+  if (bar && t){
+    const mine = ownToken(), isDM = state.room && state.room.role === "dm";
+    const myTurn = t.token_id === (mine && mine.id);
+    const who = ((i.order || [])[i.active] || {}).label || "?";
+    const rem = Math.max(0, (t.move_total || 0) - (t.move_spent || 0));
+    let h = `<div class="tb-who">▶ ${esc(who)}</div>` +
+            `<span class="tb-move" title="movement units left this turn">${rem}/${t.move_total || 0}</span>`;
+    for (const slot of ["action", "bonus", "reaction"]){
+      const used = t[slot] === "used";
+      const click = myTurn || isDM;
+      h += `<button class="slot-chip${used ? " spent" : ""}" data-slot="${slot}"${click ? "" : " disabled"}
+             title="${slot}${click ? " — click to toggle" : " (table bookkeeping)"}">${SLOT_ABBR[slot]} ${used ? "·" : "✓"}</button>`;
+    }
+    if (myTurn || isDM)
+      h += `<button class="ghost" data-a="dash"${t.action === "used" ? " disabled" : ""} title="Dash: spend the action for extra movement">💨 Dash</button>` +
+           `<button class="primary" data-a="endturn">End Turn</button>`;
+    bar.innerHTML = h;
+    bar.classList.remove("hidden");
+    bar.querySelector('[data-a="dash"]').onclick = () => wsSend({ type: "dash", token_id: t.token_id });
+    bar.querySelector('[data-a="endturn"]').onclick = () => wsSend({ type: "end_turn" });
+    for (const b of bar.querySelectorAll(".slot-chip"))
+      b.onclick = () => wsSend({ type: "turn_mark", token_id: t.token_id, slot: b.dataset.slot,
+                                 value: (t[b.dataset.slot] === "used") ? "available" : "used" });
+  }
   const rd = document.createElement("li"); rd.className = "roundline";
   rd.textContent = `— Round ${i.round || 1} —`; ol.appendChild(rd);
   i.order.forEach((o, idx) => {

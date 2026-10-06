@@ -133,6 +133,15 @@ body.dbg-on .dbg { display: inline-block; font: 11px/1.4 ui-monospace, monospace
 #init-list { list-style: decimal inside; padding: 0; margin: 0 0 .4rem; font-size: .9rem; }
 #init-list li { padding: 2px 4px; border-radius: 4px; }
 #init-list li.active { background: #4a3a12; font-weight: 700; }
+.turn-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 4px 6px; margin-bottom: 6px; border: 1px solid var(--line);
+  border-radius: 8px; background: rgba(255,255,255,.03); font-size: .85rem; }
+.turn-bar .tb-who { font-weight: 700; flex: 1 1 auto; }
+.turn-bar .tb-move { font-family: monospace; opacity: .9; }
+.slot-chip { padding: 0 8px; border-radius: 10px; border: 1px solid var(--line);
+  background: transparent; color: inherit; cursor: pointer; font-size: .8rem; }
+.slot-chip.spent { opacity: .45; text-decoration: line-through; }
+.slot-chip:disabled { cursor: default; }
 .prow { display: flex; align-items: center; gap: .4rem; margin: .25rem 0; font-size: .9rem; }
 .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex: 0; }
 .prow .kick { margin-left: auto; background: none; border: none; color: var(--red); }

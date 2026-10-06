@@ -2,7 +2,7 @@
 import json
 import random
 
-from .. import db, npc
+from .. import db, movecost, npc
 from .. import conditions as C
 from . import death as D, health
 from .dice import dex_mod
@@ -49,6 +49,10 @@ def set_init(room_id, init):
 # init["turn"] = {"token_id", "round", "move_total", "move_spent",
 #                 "action", "bonus", "reaction"}  — slots are "available"/"used".
 # Everything lives in the ONE initiative object; there is no second tracker.
+# UNITS (D79): move_total/move_spent are in movecost UNITS (squares) — the very
+# same unit in which route_cost/path_footprint_cost price routes and walk()
+# charges steps. Storing feet here while charging squares made the budget 5x
+# too generous; the SSOT conversion is movecost.walk_budget().
 
 def token_speed_ft(tok):
     from .movement import _walk_speed          # local: movement imports this module
@@ -66,7 +70,7 @@ def begin_turn(init):
     tok = db.q1("SELECT * FROM tokens WHERE id=?", (tid,))
     speed = token_speed_ft(tok) if tok else 30
     init["turn"] = {"token_id": tid, "round": int(init.get("round", 1)),
-                    "move_total": speed, "move_spent": 0,
+                    "move_total": movecost.walk_budget(speed), "move_spent": 0,
                     "action": "available", "bonus": "available", "reaction": "available"}
     return init
 
@@ -91,8 +95,9 @@ def turn_token(init):
 
 
 def move_remaining(init, token_id):
-    """Feet this token may still move under the action economy, or None when
-    the economy does not apply (no combat / token not in the order)."""
+    """Movement units (squares) this token may still spend under the action
+    economy, or None when the economy does not apply (no combat / token not in
+    the order)."""
     if not is_listed(init, token_id):
         return None
     t = init.get("turn") or {}
@@ -101,12 +106,14 @@ def move_remaining(init, token_id):
     return max(0, int(t["move_total"]) - int(t["move_spent"]))
 
 
-def spend_move(room_id, token_id, feet):
+def spend_move(room_id, token_id, units):
+    """Charge walked movecost UNITS to the active turn (same unit walk()
+    validated with). No-op when the turn has moved on (or DM walk)."""
     init = get_init(room_id)
     t = init.get("turn") or {}
     if t.get("token_id") != token_id:
         return None                      # turn moved on (or DM walk): nothing to charge
-    t["move_spent"] = int(t["move_spent"]) + int(feet)
+    t["move_spent"] = int(t["move_spent"]) + int(units)
     set_init(room_id, init)
     return init
 
@@ -209,8 +216,10 @@ async def handle_init_end(ws, room_id, user, is_dm, msg):
 
 
 async def handle_dash(ws, room_id, user, is_dm, msg):
-    """5e Dash: spend the bonus action to gain this turn's speed again as
-    movement. Strict: only the token whose turn it is (D74)."""
+    """Dash: spend the ACTION to gain this turn's speed again as movement
+    (generic tabletop rule, D74/D79). Strict: only the token whose turn it is;
+    a spent Action can never dash a second time. Never modifies the creature's
+    stored speed — the bonus is this turn's move_total only."""
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:
         return
@@ -225,11 +234,11 @@ async def handle_dash(ws, room_id, user, is_dm, msg):
     if turn.get("token_id") != tok["id"]:
         await send_to(ws, "error", {"msg": "It is not your turn"})
         return
-    if turn.get("bonus") == "used":
-        await send_to(ws, "error", {"msg": "No bonus action left this turn"})
+    if turn.get("action") == "used":
+        await send_to(ws, "error", {"msg": "No action left this turn"})
         return
-    turn["bonus"] = "used"
-    turn["move_total"] = int(turn["move_total"]) + token_speed_ft(tok)
+    turn["action"] = "used"
+    turn["move_total"] = int(turn["move_total"]) + movecost.walk_budget(token_speed_ft(tok))
     init["turn"] = turn
     set_init(room_id, init)
     sys_msg(room_id, f"{tok['label']} dashes.")

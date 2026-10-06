@@ -1054,6 +1054,28 @@ degrading into an unexplained black canvas. Bring now reports the
 authoritative result and the presentation result separately, so a placed
 character can never be mislabelled as a failed Bring again.
 
+## D79 — The turn/movement loop is completed in place: squares everywhere, Dash spends the Action
+
+The D74 engine (turn inside the ONE initiative object, movement.py
+enforcement, movecost SSOT pricing) existed but had never been wired whole:
+`end_turn`/`dash`/`turn_mark` were not registered in dispatch (three finished
+handlers were dead code), and `move_total` was seeded in FEET while `walk()`
+and the preview priced routes in movecost UNITS (squares) — a listed token
+could walk five times its turn budget, and `within_budget` lied during
+combat. Decision: complete, do not redesign. `begin_turn` now prices
+`move_total = movecost.walk_budget(speed)` — the same single formula that
+validates, charges and previews; there is still no second tracker and no
+second cost function. Dash spends the ACTION (correcting the D74-era bonus
+experiment) and adds one turn-speed to `move_total` for this turn only —
+stored speed untouched, a spent Action can never dash twice. End Turn is the
+owner-of-active-turn (DM exempt as everywhere), advances the existing
+initiative and hands the next combatant fresh resources. Outside combat the
+economy provably does not apply (movement stays unlimited; pathfinding,
+fog, doors, traps, footprints unchanged). The compact turn bar in the
+Initiative panel renders the server's initiative object only — Diorama and
+Tactical share it because combat is world state, and a pinned Node test
+proves the view round-trip mutates none of it.
+
 ## Cross-cutting assumptions (read before scaling)
 - Single uvicorn process, single event loop; `LOOP` captured in `main.py` for thread-safe broadcasts.
 - `VTT_DATA_DIR` isolates the SQLite/`secret.key`/uploads tree.

@@ -289,3 +289,37 @@ Manual browser verification PENDING (human): rebuild, then run the new
 checklist beginning (BUILD token + /api/build + asset URLs + no banner) before
 any gameplay step. Automated tests cannot prove the browser's cache story —
 the checklist's step 1–5 can.
+
+---
+
+# Sprint 13 — Combat turn & movement loop completed in place (D79)
+
+The D74 engine was fully written but never wired whole: `end_turn`, `dash`
+and `turn_mark` had no dispatch registration (dead handlers), and the turn's
+`move_total` carried FEET while `walk()`/preview priced routes in movecost
+SQUARES — a 30-ft token could walk 30 squares per turn and `within_budget`
+lied in combat.
+
+## Fixed / shipped
+- `combat.py` — turn money is movecost units: `begin_turn` seeds
+  `move_total = movecost.walk_budget(speed)`; Dash now spends the ACTION
+  (D74-era bonus usage corrected) and adds one turn-speed of units for THIS
+  turn only (stored speed untouched; no second dash once the Action is used).
+- `dispatch.py` — `end_turn`, `dash`, `turn_mark` registered; the completed
+  handlers (owner-of-active-turn / DM exempt, slot marking, broadcasts) go
+  live against the ONE initiative object.
+- Client turn bar (`30_room.js renderInit`, `index.html #turn-bar`,
+  `style.css` chips) — active token, movement remaining/total, A/B/R chips
+  (owner/DM can mark), Dash + End Turn where appropriate. Pure rendering of
+  the authoritative `initiative` payload; Diorama/Tactical share it.
+
+## Tests added
+`tests/test_combat_turn.py` (11): exploration unlimited; combat move charges
+the budget in the SAME units (3 steps → move_spent 3, move_total pinned at
+walk_budget(30)=6); over-budget walk stops at the budget with reason=budget
+at the right cell; inactive listed combatant blocked; preview reports
+cost/remaining/within_budget in cost units; Dash (action spent, +6 units,
+stored speed untouched, no second dash, not-on-own-turn refused); End Turn
+(advances, next gets fresh 6/x + available slots; stranger refused); full
+round resets resources. `test_view_mode.py`: view round-trip never mutates
+initiative/plan/token positions.

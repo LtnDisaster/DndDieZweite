@@ -5,8 +5,9 @@ from .abilities import handle_ability_cast
 from .audio import (handle_audio_add, handle_audio_pause, handle_audio_play,
                     handle_audio_remove, handle_audio_stop, handle_sound_trigger)
 from .chat import handle_chat, handle_narrative
-from .combat import (handle_hp, handle_init_end, handle_init_end_round,
-                     handle_init_next, handle_init_start)
+from .combat import (handle_dash, handle_end_turn, handle_hp, handle_init_end,
+                     handle_init_end_round, handle_init_next, handle_init_start,
+                     handle_turn_mark)
 from .conditions import handle_cond_add, handle_cond_remove
 from .death import handle_death_clear, handle_death_save
 from .doors import handle_door
@@ -103,6 +104,9 @@ HANDLERS = {
     "init_next": handle_init_next,
     "init_end_round": handle_init_end_round,
     "init_end": handle_init_end,
+    "end_turn": handle_end_turn,          # D79: owner of the active token or DM
+    "dash": handle_dash,
+    "turn_mark": handle_turn_mark,
     "hp": handle_hp,
     "use_item": handle_use_item,
     "attune": handle_attune,

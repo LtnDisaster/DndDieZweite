@@ -1019,6 +1019,19 @@ links only; they never grant redistribution rights.
   view. Tactical→Diorama→Tactical must always round-trip the world unchanged
   and restore the user's own camera — pinned by `test_view_mode.py` (Node vm,
   real renderer code, player-shaped payload).
+- **Turn & movement economy (D74 + D79 — extend, never fork)**: combat state
+  lives ONLY in `room_state.initiative` (`combat.py`: `get_init/begin_turn/
+  advance/move_remaining/spend_move/spend_slot`). The turn's
+  `move_total/move_spent` are in **movecost units (squares)** — the same
+  `movecost.route_cost`/`walk_budget` that prices previews and charges steps
+  (`movement.walk`). Never convert feet back into turn fields, never add a
+  second cost function. Outside combat the economy does not apply (unlisted
+  or no combat → unlimited movement, all geometry/fog rules intact). Inside
+  combat: listed tokens move only on their own turn (DM exempt), Dash spends
+  the **action** for +1×speed units this turn, `end_turn` advances initiative
+  and `begin_turn` hands fresh resources to the next combatant. The client's
+  turn bar (`renderInit` in 30_room.js) only renders the broadcast initiative
+  object; the server re-enforces everything, the preview is a hint.
 - Diagnostics for future "all black" bugs: open the page with `?debug` —
   the topbar shows build token + `integrity=ok/FAIL/DRIFT` (D78), view mode,
   canvas size/DPR, cam/camT/camD, camInit trace, `grid=y/n` + window
