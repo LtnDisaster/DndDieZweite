@@ -1,3 +1,6 @@
-fastapi>=0.110
-uvicorn>=0.29
-bcrypt>=4.0
+# Exact pins — the Docker image is the canonical runtime; bump deliberately.
+# NOTE: uvicorn needs an explicit websocket implementation package.
+fastapi==0.142.2
+uvicorn==0.54.0
+websockets==17.2
+bcrypt==4.3.0

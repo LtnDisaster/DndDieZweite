@@ -27,3 +27,12 @@ app/static/uploads/*
 # Logs / tmp
 *.log
 tmp/
+
+# Packaging / Windows mark-of-the-web artifacts
+*.zip
+*.tar.gz
+*Zone.Identifier
+
+# Docker compose local overrides (proxy ports, extra env)
+compose.override.yaml
+compose.override.yml

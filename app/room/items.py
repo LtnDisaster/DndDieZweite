@@ -14,7 +14,7 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
     if not (is_dm or tok["owner_user_id"] == user["id"]):
         await send_to(ws, "error", {"msg": "Not your character"})
         return
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
+    ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
     items = gear.clean_items(db.j(ch["items"], []))
     it = next((i for i in items if i["id"] == msg.get("item_id")), None)
     if it is None:

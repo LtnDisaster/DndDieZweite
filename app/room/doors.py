@@ -63,6 +63,15 @@ async def handle_door(ws, room_id, user, is_dm, msg):
             else:
                 door["closed"] = not door["closed"]
         else:
+            if door.get("secret"):
+                # A player must not even learn that a secret door exists here:
+                # respond exactly like "no door at this edge" (silent return).
+                return
+            if door.get("dm_only"):
+                # Checked BEFORE the lock branch so a dm_only+locked door cannot
+                # leak its lock state through the message either.
+                await send_to(ws, "error", {"msg": "It won't budge."})
+                return
             if door["locked"]:
                 await send_to(ws, "error", {"msg": "The door is locked"})
                 return
@@ -85,7 +94,9 @@ async def handle_door(ws, room_id, user, is_dm, msg):
                 set_map(room_id, mp)
     state = "closes" if door["closed"] else "swings open"
     verb = "locks" if door["locked"] and door["closed"] else state
-    sys_msg(room_id, f"🚪 The door {verb}.")
+    if not (door.get("dm_only") or door.get("secret")):
+        # dm-only/secret door moves must not leak into the shared chronicle.
+        sys_msg(room_id, f"🚪 The door {verb}.")
     # Fact emitted AFTER the committed change (D52): the door state lives in the map.
     events.emit(events.make("door_opened" if opened else "door_closed", room_id=room_id,
                             actor_id=user["id"], x=door["x"], y=door["y"], dir=door["dir"],

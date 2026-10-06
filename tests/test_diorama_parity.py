@@ -20,7 +20,7 @@ from starlette.testclient import TestClient
 from app import db
 from app.main import app
 
-from test_movement_fog import (H, base_room, recv_until, set_grid, state_of,
+from test_movement_fog import (H, base_room, park as _park, recv_until, set_grid, state_of,
                                wall_column, ws_connect)
 
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
@@ -62,11 +62,17 @@ def await_walk_end(ws, token_id, tries=80):
     raise AssertionError("walk never ended")
 
 
+def park(client, dm, code, tok_id, tx=16, ty=12):
+    """Shared helper (test_movement_fog): teleports the PC token into the
+    automatic-growth safe zone so route-parity walks cannot shift the world."""
+    return _park(client, dm, code, tok_id, tx, ty)
+
+
 # ---------- preview ≡ executed (server authority) ----------
 
 def test_medium_preview_route_is_executed_exactly(client):
     dm, player, code, ch = base_room(client)
-    tok = player_token_row(code, ch)
+    tok = park(client, dm, code, player_token_row(code, ch)["id"])
     px, py = cell_of(tok)
     # wall column two cells right of the token, gap at row py+1 → forces a turn
     def mutate(g):
@@ -94,7 +100,7 @@ def test_medium_preview_route_is_executed_exactly(client):
 
 def test_large_token_preview_route_is_executed_exactly(client):
     dm, player, code, ch = base_room(client)
-    tok = player_token_row(code, ch)
+    tok = park(client, dm, code, player_token_row(code, ch)["id"])
     db.x("UPDATE tokens SET size='Large' WHERE id=?", (tok["id"],))
     px, py = cell_of(tok)                       # occupies (px,py)+(px+1,py)+row+1
     goal = (px + 5, py)
@@ -217,14 +223,15 @@ def test_dio_unproj_is_exact_inverse_under_any_camera():
 
 # Stubs MUST be defined inside the vm context: arrow functions written in the
 # host script would close over the host scope, not the sandbox globals.
+# 10_core.js is loaded FIRST (browser order) — state/SIZE_FOOTPRINT are core's,
+# assign only, never redeclare (const collision).
 _DIO_STUBS = """
 var rec = {};
-var state = { cam: { ox: 137, oy: -59 },
+Object.assign(state, { cam: { ox: 137, oy: -59 },
               grid: { w: 10, h: 10, cells: [0], doors: [{ id: 'd', x: 5, y: 5, dir: 'v', closed: true }] },
               tokens: [{ id: 9, label: 'T', x: 125, y: 175, size: 'Medium', owner_user_id: 1 }],
-              room: true, plan: null };
+              room: true, plan: null });
 var cellSize = () => 50;
-var SIZE_FOOTPRINT = { Medium: 1, Large: 2 };
 var ownToken = () => state.tokens[0];
 var planMove = (cx, cy) => { rec.moved = [cx, cy]; };
 var confirmPlan = () => { rec.confirmed = (rec.confirmed || 0) + 1; };
@@ -243,7 +250,7 @@ var segDist = (px, py, A, B) => {
 @needs_node
 def test_diorama_click_resolves_cell_independent_of_camera():
     """A click on the visual cell X must plan a move to X even while panned."""
-    out = _node_vm([str(JS / "55_diorama.js")], _DIO_STUBS + """
+    out = _node_vm([str(JS / "10_core.js"), str(JS / "55_diorama.js")], _DIO_STUBS + """
                    // destination = visual centre of cell (4,6) with cam = (137,-59)
                    const [sx, sy] = dioProj(4.5, 6.5, 50);
                    dioramaDown({ x: sx, y: sy });

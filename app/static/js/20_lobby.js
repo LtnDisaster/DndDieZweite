@@ -1,4 +1,5 @@
 /* Auth + lobby + character editor. */
+(typeof window !== "undefined") && ((window.__BUILDS = window.__BUILDS || {})["20_lobby.js"] = window.__BUILD__ || "?");
 
 const ITEM_KINDS = [["armor","armor"],["shield","shield"],["potion","potion"],["scroll","scroll"],
   ["wand","wand"],["staff","staff"],["ring","ring"],["tool","tool"],["wondrous","wondrous"],
@@ -27,6 +28,29 @@ async function loadLobby(){
     const d = document.createElement("div"); d.className = "roomrow";
     d.innerHTML = `<span><b>${esc(r.name)}</b> <small>${esc(r.code)}</small></span>
                    <span class='badge'>${esc(r.role)}</span>`;
+    if (r.role === "dm"){
+      // D76 room deletion — deliberately TWO actions: first click arms with the
+      // room name spelled out, second click confirms. Server re-checks that the
+      // caller is the room's creator-DM; a player crafting the request gets 403.
+      const del = document.createElement("button");
+      del.className = "ghost"; del.textContent = "Delete"; del.style.marginLeft = "10px";
+      const disarm = () => { if (!del.isConnected || !del.dataset.armed) return;
+        delete del.dataset.armed; del.classList.add("ghost"); del.textContent = "Delete"; };
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        if (del.dataset.armed){
+          delete del.dataset.armed; del.disabled = true;
+          try { await api(`/rooms/${encodeURIComponent(r.code)}`, "DELETE");
+                toast(`Room "${r.name}" deleted`); await loadLobby(); }
+          catch(err){ toast(err.message); del.disabled = false; disarm(); }
+          return;
+        }
+        del.dataset.armed = "1"; del.classList.remove("ghost");
+        del.textContent = `Delete "${r.name}" permanently?`;
+        setTimeout(disarm, 6000);
+      };
+      d.appendChild(del);
+    }
     d.onclick = () => openRoom(r.code);
     rl.appendChild(d);
   }
@@ -49,14 +73,25 @@ function renderChars(){
     };
     const use = d.querySelector('[data-a="use"]');
     if (use) use.onclick = async () => {
+      // D78 separation: opening the room / placing the character is the
+      // gameplay result; camera setup afterwards is presentation only.
       try {
         if (!state.room) {
           if (!state.rooms || !state.rooms.length) return toast("Join or create a room first");
           await openRoom(state.rooms[0].code);
         }
         await api(`/rooms/${state.room.code}/assign`, "POST", { character_id: c.id });
+      } catch(e){ toast(e.message); return; }
+      state._bringLast = "ok @ " + new Date().toISOString().slice(11, 19);
+      toast(`${c.name} takes a seat at the table`);
+      try {
         await refreshRoom();
-      } catch(e){ toast(e.message); }
+        if (typeof initViewCam === "function") initViewCam();       // land on my token (D75)
+      } catch(e){
+        state._bringLast += " | render FAIL: " + e.message;
+        console.error("[bring] presentation error", e);
+        toast("Character is seated — but the view could not initialize: " + e.message);
+      }
     };
     cl.appendChild(d);
   }

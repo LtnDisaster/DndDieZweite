@@ -39,10 +39,11 @@ def test_sanitize_rejects_wrong_cells_length():
     assert mm.sanitize({"w": 10, "h": 8, "cells": [0, 1, 2]}) is None
 
 
-def test_sanitize_clamps_cells_to_0_1_2():
-    cells = [5, -3, 9, 1, 0, 2] + [0] * (80 - 6)
+def test_sanitize_clamps_cells_to_the_terrain_vocabulary():
+    # D69: the cell vocabulary is 0..4 (floor/wall/difficult/barrier/low_obstacle)
+    cells = [5, -3, 9, 1, 0, 4] + [0] * (80 - 6)
     out = mm.sanitize(mk(cells=cells))
-    assert out["cells"][:6] == [2, 0, 2, 1, 0, 2]
+    assert out["cells"][:6] == [4, 0, 4, 1, 0, 4]
 
 
 def test_sanitize_clamps_up_undersized_grid():

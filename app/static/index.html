@@ -4,7 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>D&D Tabletop</title>
-<link rel="stylesheet" href="/static/style.css">
+<script>
+/* D78: this inline block is part of the bootstrap HTML (never cached beyond
+   the page itself). It pins the expected build token and captures runtime
+   errors from the very first script on — a broken bundle must announce
+   itself, not die silently as a black canvas. */
+window.__BUILD__ = "__BUILDTOKEN__";
+window.__BOOTERRORS = [];
+window.addEventListener("error", function(ev){
+  window.__BOOTERRORS.push({msg: String(ev.message || ""), file: String(ev.filename || "").split("/").pop(),
+                            line: ev.lineno || 0});
+  if (console && console.error) console.error("[boot]", ev.message, ev.filename + ":" + ev.lineno);
+});
+window.addEventListener("unhandledrejection", function(ev){
+  var m = ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason);
+  window.__BOOTERRORS.push({msg: "promise: " + m, file: "", line: 0});
+  if (console && console.error) console.error("[boot]", m, ev.reason);
+});
+</script>
+<link rel="stylesheet" href="/static/style.css?v=__BUILDTOKEN__">
 </head>
 <body>
 
@@ -113,6 +131,7 @@
       <span id="room-code" class="code"></span>
       <button id="btn-help" class="ghost" title="Help &amp; keyboard shortcuts (?)">?</button>
       <span id="room-role" class="badge"></span>
+      <span id="dbg" class="dbg" title="debug view (open page with ?debug)"></span>
       <span id="viewtoggle" title="Personal view (this browser only; other players keep their own view)">
         <button id="view-tactical" class="primary" type="button">Tactical</button>
         <button id="view-diorama" class="ghost" type="button">Diorama</button>
@@ -137,6 +156,12 @@
       </div>
     </div>
     <aside class="side">
+      <div class="row side-tabs" id="side-tabs" role="tablist" title="Group sidebar panels">
+        <button data-tab="game" class="ghost" role="tab" aria-selected="false">⚔ Game</button>
+        <button data-tab="chars" class="ghost" role="tab" aria-selected="false">👤 Chars</button>
+        <button data-tab="story" class="ghost" role="tab" aria-selected="false">📜 Story</button>
+        <button data-tab="dm" class="ghost dm-only" role="tab" aria-selected="false">🎲 DM</button>
+      </div>
       <div class="panel grow" id="chronicle">
         <div class="chronicle-head">
           <h2>Chronicle</h2>
@@ -146,6 +171,7 @@
         <div class="row tabs">
           <button id="tab-chat" class="primary">Chat</button>
           <button id="tab-log" class="ghost">Game Log</button>
+          <button id="tab-dice" class="ghost" title="Dice (keyboard shortcut coming via Roll input)">Dice</button>
         </div>
         <div id="audio-bar" class="audio-bar hidden" title="Room ambience">
           <span id="audio-title" class="audio-name">No ambience</span>
@@ -172,7 +198,7 @@
           <input id="chat-in" placeholder="Message… (/w Bob hi)" maxlength="4000">
           <button id="btn-chat" class="primary">➤</button>
         </div>
-        </div>
+        <div id="dice-panel" class="dice-panel hidden">
         <div class="row dice">
           <input id="roll-expr" value="1d20" placeholder="2d6+3">
           <input id="roll-mod" type="number" placeholder="±mod" min="-500" max="500">
@@ -192,13 +218,11 @@
           <button data-d="d4">d4</button><button data-d="d6">d6</button><button data-d="d8">d8</button>
           <button data-d="d10">d10</button><button data-d="d12">d12</button><button data-d="d20" class="hot">d20</button>
         </div>
+        <div id="dice-out" class="chat dice-out" aria-live="polite"></div>
+        </div>
+        </div>
       </div>
-      <div class="row side-tabs" id="side-tabs" title="Group sidebar panels">
-        <button data-tab="game" class="ghost">⚔ Game</button>
-        <button data-tab="chars" class="ghost">👤 Chars</button>
-        <button data-tab="story" class="ghost">📜 Story</button>
-        <button data-tab="dm" class="ghost dm-only">🎲 DM</button>
-      </div>
+      <div class="side-cat" id="side-cat">
       <div class="panel hidden" id="sheet-roll">
         <h2 id="sr-name">Rolls</h2>
         <div class="row sr-toggles">
@@ -220,6 +244,7 @@
       </div>
       <div class="panel" data-tab="game">
         <h2>Initiative</h2>
+        <div id="turn-bar" class="turn-bar hidden" title="Active turn (server-authoritative)"></div>
         <ol id="init-list"></ol>
         <div class="row" id="init-btns">
           <button id="btn-init-start">⚔️ Start</button>
@@ -290,43 +315,55 @@
           <button id="btn-long-rest" title="Restore HP, spell slots, hit dice and long-rest resources">🛌 Long rest</button>
           <label title="Do not clear arbitrary conditions unless checked"><input id="long-rest-conds" type="checkbox"> clear conditions</label>
         </div>
-        <div class="wlabel">Narration & Ambience</div>
-        <div class="row chat-controls">
-          <select id="narr-target" title="Narration target"></select>
-          <select id="narr-style" title="Style">
-            <option value="overlay">Overlay</option><option value="voice">Private voice</option>
-            <option value="normal">Normal</option>
-          </select>
-          <select id="narr-sender" title="Speak as">
-            <option value="user">Self</option><option value="persona">Persona</option><option value="npc">NPC</option>
-          </select>
-          <input id="narr-persona" placeholder="Persona" maxlength="64" class="hidden">
-          <select id="narr-npc" class="hidden"></select>
-        </div>
-        <div class="row"><input id="narr-text" placeholder="Temporary narration or secret event…" maxlength="4000">
-          <select id="secret-sound" title="Optional sound"><option value="">No sound</option></select>
-        </div>
-        <div class="row">
-          <button id="btn-narrate" class="primary">Send narration</button>
-          <button id="btn-secret-event" class="ghost">Secret event</button>
-        </div>
-        <div class="wlabel">Ambience</div>
-        <div class="row">
-          <input id="audio-title-in" placeholder="Title" maxlength="80">
-          <input id="audio-url-in" placeholder="YouTube / Spotify / direct audio URL" maxlength="2048">
-          <select id="audio-cat"><option value="ambience">ambience</option><option value="music">music</option>
-            <option value="sfx">sfx</option></select>
-          <button id="btn-audio-add" class="ghost">＋</button>
-        </div>
-        <div class="row"><button id="btn-ambience-stop" class="ghost">Stop ambience</button></div>
-        <div id="ambience-list" class="journal-list"></div>
-        <div class="wlabel">Soundboard</div>
-        <div class="row">
-          <input id="sound-name" placeholder="Sound name" maxlength="80">
-          <input id="sound-url" placeholder="Direct mp3/ogg URL" maxlength="2048">
-          <button id="btn-sound-add" class="ghost">＋ Save</button>
-        </div>
-        <div id="sound-list" class="journal-list"></div>
+        <details class="group" open>
+          <summary>Narration</summary>
+          <div class="group-body">
+            <div class="row chat-controls">
+              <select id="narr-target" title="Narration target"></select>
+              <select id="narr-style" title="Style">
+                <option value="overlay">Overlay</option><option value="voice">Private voice</option>
+                <option value="normal">Normal</option>
+              </select>
+              <select id="narr-sender" title="Speak as">
+                <option value="user">Self</option><option value="persona">Persona</option><option value="npc">NPC</option>
+              </select>
+              <input id="narr-persona" placeholder="Persona" maxlength="64" class="hidden">
+              <select id="narr-npc" class="hidden"></select>
+            </div>
+            <div class="row"><input id="narr-text" placeholder="Temporary narration or secret event…" maxlength="4000">
+              <select id="secret-sound" title="Optional sound"><option value="">No sound</option></select>
+            </div>
+            <div class="row">
+              <button id="btn-narrate" class="primary">Send narration</button>
+              <button id="btn-secret-event" class="ghost">Secret event</button>
+            </div>
+          </div>
+        </details>
+        <details class="group">
+          <summary>Ambience</summary>
+          <div class="group-body">
+            <div class="row">
+              <input id="audio-title-in" placeholder="Title" maxlength="80">
+              <input id="audio-url-in" placeholder="YouTube / Spotify / direct audio URL" maxlength="2048">
+              <select id="audio-cat"><option value="ambience">ambience</option><option value="music">music</option>
+                <option value="sfx">sfx</option></select>
+              <button id="btn-audio-add" class="ghost">＋</button>
+            </div>
+            <div class="row"><button id="btn-ambience-stop" class="ghost">Stop ambience</button></div>
+            <div id="ambience-list" class="journal-list"></div>
+          </div>
+        </details>
+        <details class="group">
+          <summary>Soundboard</summary>
+          <div class="group-body">
+            <div class="row">
+              <input id="sound-name" placeholder="Sound name" maxlength="80">
+              <input id="sound-url" placeholder="Direct mp3/ogg URL" maxlength="2048">
+              <button id="btn-sound-add" class="ghost">＋ Save</button>
+            </div>
+            <div id="sound-list" class="journal-list"></div>
+          </div>
+        </details>
         <div class="row aoe">
           <button id="btn-aoe" class="ghost" title="Arm, then click the map to place a template">🎯 AoE</button>
           <button id="btn-ping" class="ghost" title="Arm, then click the map to ping">📣 Ping</button>
@@ -337,26 +374,38 @@
           <input id="aoe-color" type="color" value="#e74c3c" title="Colour">
           <button id="btn-stop-move" class="ghost hidden" title="Stop this token's active walk">⏹ Stop</button>
         </div>
-        <div class="wlabel">Bestiary <small style="opacity:.6">(your saved monster templates)</small></div>
-        <div id="best-list" class="best-list"></div>
-        <div class="row"><small class="meta" style="opacity:.6">Open an NPC token and use “Save to Bestiary”,
-          then Spawn to drop it on the map.</small></div>
-        <div class="wlabel">Encounters</div>
-        <div class="row"><select id="enc-list" class="journal-list" style="max-height:90px"></select>
-          <button id="btn-enc-save" class="ghost">Save</button><button id="btn-enc-del" class="ghost">Del</button>
-          <button id="btn-enc-spawn" class="primary">Spawn</button></div>
-        <div class="row"><input id="enc-name" placeholder="Encounter name" maxlength="80">
-          <input id="enc-notes" placeholder="notes" maxlength="1000"></div>
-        <div class="row"><select id="enc-creature-select"></select>
-          <input id="enc-qty" type="number" min="1" max="50" value="1" style="width:54px">
-          <label class="tiny"><input id="enc-hidden" type="checkbox"> hidden flag</label>
-          <button id="btn-enc-add-row" class="ghost">＋ Add</button></div>
-        <div id="enc-rows" class="journal-list"></div>
+        <details class="group" open>
+          <summary>Bestiary <small style="opacity:.7">(saved monster templates)</small></summary>
+          <div class="group-body">
+            <div id="best-list" class="best-list"></div>
+            <div class="row"><small class="meta" style="opacity:.6">Open an NPC token and use “Save to Bestiary”,
+              then Spawn to drop it on the map.</small></div>
+          </div>
+        </details>
+        <details class="group">
+          <summary>Encounters</summary>
+          <div class="group-body">
+            <div class="row"><select id="enc-list" class="journal-list" style="max-height:90px"></select>
+              <button id="btn-enc-save" class="ghost">Save</button><button id="btn-enc-del" class="ghost">Del</button>
+              <button id="btn-enc-spawn" class="primary">Spawn</button></div>
+            <div class="row"><input id="enc-name" placeholder="Encounter name" maxlength="80">
+              <input id="enc-notes" placeholder="notes" maxlength="1000"></div>
+            <div class="row"><select id="enc-creature-select"></select>
+              <input id="enc-qty" type="number" min="1" max="50" value="1" style="width:54px">
+              <label class="tiny"><input id="enc-hidden" type="checkbox"> hidden flag</label>
+              <button id="btn-enc-add-row" class="ghost">＋ Add</button></div>
+            <div id="enc-rows" class="journal-list"></div>
+          </div>
+        </details>
         <div id="editor" class="hidden">
           <div class="row brushes">
             <button class="brush" data-b="wall" title="Wall (blocks path)">🧱</button>
             <button class="brush" data-b="floor" title="Floor">⬜</button>
             <button class="brush" data-b="rough" title="Difficult terrain (2× walk)">🌿</button>
+            <button class="brush" data-b="barrier" title="Barrier (blocks movement, not sight; climbable)">🚧</button>
+            <button class="brush" data-b="low" title="Low obstacle (passable, 2× cost; climbable)">🪨</button>
+            <button class="brush" data-b="raise" title="Raise elevation +1 (step = 1 unit)">⛰️+</button>
+            <button class="brush" data-b="lower" title="Lower elevation −1">⛰️−</button>
             <button class="brush" data-b="trap" title="Hidden trap">⚠️</button>
             <button class="brush" data-b="loot" title="Hidden loot">🎁</button>
             <button class="brush" data-b="door" title="Door: click a cell edge">🚪</button>
@@ -381,6 +430,8 @@
           </div>
           <div class="row trapfields hidden" id="door-fields">
             <label><input id="door-locked" type="checkbox"> start locked</label>
+            <label><input id="door-dmonly" type="checkbox"> DM-only</label>
+            <label><input id="door-secret" type="checkbox"> hidden from players</label>
           </div>
           <div class="row lootfields hidden" id="loot-fields">
             <input id="loot-label" placeholder="Loot (e.g. 25 gp and a silver ring)" maxlength="80">
@@ -399,6 +450,7 @@
           </div>
         </div>
       </div>
+      </div><!-- /side-cat -->
     </aside>
   </main>
 </section>
@@ -414,6 +466,13 @@
       The walk stops at traps, closed doors, and if you drop to 0 HP.</p>
     <p><b>Fog of war.</b> Explored terrain stays explored. The DM's 💡 brush toggles
       room-wide terrain reveal; hidden creatures still need line of sight either way.</p>
+    <p><b>Doors.</b> Click a door next to your token to open or close it. Locked doors
+      need the key — or the DM. Some doors only the DM can move at all (“it won't
+      budge”), and secret passages show up for the DM's map only.</p>
+    <p><b>DM & NPCs.</b> Create a token in 🎲 DM → add a name, click it, and the full
+      statblock editor opens: Identity, Combat, Abilities up top; conditions, defences,
+      spellcasting, attacks, actions and resources in collapsible sections.
+      “＋ Bestiary” saves the block as a template; Encounters spawn saved monsters.</p>
     <p><b>Sidebar tabs.</b> ⚔ Game (initiative, party) · 👤 Chars (your character) ·
       📜 Story (quests, journal) · 🎲 DM tools. Chat and dice stay visible always.</p>
     <p><b>Audio.</b> ▶ starts or resumes the room ambience (self-hosted tracks resume
@@ -426,12 +485,13 @@
   </div>
 </div>
 
-<script src="/static/js/10_core.js"></script>
-<script src="/static/js/20_lobby.js"></script>
-<script src="/static/js/30_room.js"></script>
-<script src="/static/js/40_ws.js"></script>
-<script src="/static/js/50_canvas.js"></script>
-<script src="/static/js/55_diorama.js"></script>
-<script src="/static/js/60_main.js"></script>
+<script src="/static/js/10_core.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/20_lobby.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/30_room.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/40_ws.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/50_canvas.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/55_diorama.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/60_main.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/99_boot.js?v=__BUILDTOKEN__"></script>
 </body>
 </html>

@@ -4,8 +4,9 @@ Living checklist. "Done" = shipped and covered by an in-repo test.
 Verify state with:
 
 ```bash
-./.venv/bin/python -m pytest                       # 219 tests (unit + integration + view guards)
-./.venv/bin/python -m compileall -q app            # byte-compile check
+docker compose run --rm test                     # CANONICAL: 306 tests +7 node-skipped (pinned py3.12 image)
+./.venv/bin/python -m pytest                     # dev-host run (py3.14 venv)
+./.venv/bin/python -m compileall -q app          # byte-compile check
 for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 ```
 
@@ -226,6 +227,98 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       hidden tokens counted-not-named to players (D59). 18 tests in `test_abilities.py`.
 - [x] **Explicit architecture guard** (D58): slot progression must NOT derive from
       `total_character_level()` — documented, not implemented.
+
+## Done — stability & table UX sprint (2026-10-05, Sprint 8, D60)
+- [x] **Test infra:** bcrypt-5/3.14 TestClient deadlock fixed (`_fast_bcrypt` conftest fixture);
+      `recv_until(..., fail_on_error=)` turns silent WS hangs into loud failures;
+      five latent fixture bugs fixed.
+- [x] **Diorama/Tactical parity (D60):** confirmed-path mismatch → `route_invalid` refusal instead of
+      silent reroute; diorama clicks resolve in ONE camera space; double-click and all armed DM tools
+      work view-aware. `test_diorama_parity.py`.
+- [x] **Downed gate:** 0-HP blocks preview/move/teleport AND every walk step (`stop_reason:"downed"`);
+      NPC corpses stay DM-draggable by design. `test_downed_movement.py`.
+- [x] **Trap lifecycle:** `triggered`/`triggered_by` = one-shot re-entry gate beside `discovered`;
+      map edits (stale snapshots AND resizes) preserve runtime flags; fixed a real
+      `handle_map_edit` indentation bug that silently dropped every map save without traps.
+      `test_trap_lifecycle.py`.
+- [x] **Fog-off room flag:** `fog_toggle` persists `fog_off` in the map — terrain+static entities to
+      all members, live foes stay LOS-filtered; editor snapshots cannot reset it. `test_fog_off.py`.
+- [x] **NPC workflow:** renderSheet crash fixed (`ch.class_levels` on NPC tokens); `abilities`/
+      `resources`/`notes` persist through add_token/update_npc/Bestiary/spawn; long rest refills
+      monster slots+resources; fixed duplicate `npc-name` DOM id collision (DM-tools add vs sheet).
+      `test_npc_workflow.py`.
+- [x] **Sidebar tabs:** Game/Chars/Story/DM groups over the panels, chat+context sheets pinned,
+      per-user localStorage.
+- [x] **Audio pause:** distinct `audio_pause` state (source kept); direct sources resume in place per
+      client, embeds restart (labeled). `test_audio_pause.py`.
+- [x] **Help overlay:** `?` button + `<kbd>` overlay (Esc/backdrop close), content-only, no framework.
+- [x] Deferred by decision: guided tutorial tour (until this sprint is field-stable), per-player fog
+      schema, resumable walk queue.
+
+## Done — gameplay & world sprint (2026-10-06, D66–D71)
+- [x] **DM Game Log growth on rolls** — content-based flex basis replaced by
+      zero-basis chain (`flex:1 1 0` + overflow guards + chat-only composers);
+      pins extended in `test_layout_pins` (1A).
+- [x] **Modifier matrix** — `gear.as_sheet()/as_row()` choke points; PC save/skill/
+      spell paths no longer fed raw JSON-string rows (silent +0 bug fixed);
+      PC≡NPC `_stat_mod` parity; `test_modifier_matrix` (8).
+- [x] **Automatic world growth** — chunk-12 map extension for exploring players,
+      fog/entity re-anchoring, `map_expanded` + camera compensation, cap 80×60;
+      `test_map_expand` (8) (D67).
+- [x] **Movement cost SSOT** — `app/movecost.py` 5e diagonals + budget on the
+      preview (`cost/budget/within_budget`), A* weights untouched; `test_movecost` (8) (D68).
+- [x] **Movement modes** — `gear.clean_speeds` (walk/fly/swim/climb), NPC blob +
+      editor fields, walk stays budget currency; `test_speeds` (3).
+- [x] **Terrain registry** — cells 3 barrier / 4 low obstacle end-to-end
+      (registry → path/los/footprint/movecost → editor brushes), `wall.py` facade;
+      `test_terrain` (8) (D69).
+- [x] **Elevation foundation** — integer `elev` layer (-6..6, fog-gated, grown with
+      the world) + `tokens.z`; |Δz|≤1 step rule; token rests on ground;
+      `test_elevation` (5) (D70).
+- [x] **Forced movement foundation** — `room/moveforced.py` DM-only push/pull/
+      shove/knockback/throw/teleport; obstacle stop + z sync; no walk/budget/growth;
+      `test_forced_move` (3) (D71).
+- [x] Host suite 313 / canonical 306+7 skipped; MANUAL_FIX_NOTES checklist (browser).
+- [ ] **FOUNDATION ONLY (next sprints):** fly/swim/climb path rules; elevation-based
+      cover/LOS and multi-floor maps (explicitly OUT); forced-move combat
+      integration (opportunity/impact damage); enforced per-turn budget (now only
+      shown, not rules-enforced); diorama rendering of barrier/low/elevation.
+
+## Done — sidebar layout fix: chat/log/dice overlap (2026-10-06, D65)
+- [x] Root causes: faked `calc(100vh-topbar)` viewport + single-scroll sidebar
+      (chronicle min-220px vs. 4-row dice strip outside its scroll body) +
+      sticky category bar overlaying content. All removed, not re-layered.
+- [x] Flex app-shell; `.side` = tabs/chronicle/`.side-cat` drawer (bounded);
+      feed tabs Chat|Game Log|Dice single-surface; `#dice-out` results;
+      feed persisted; all legacy ids kept; 6 static pins (`test_layout_pins`).
+- [ ] **Human browser verification (checklist in MANUAL_FIX_NOTES.md)** —
+      gates the spatial/movement sprint.
+
+## Done — deployment & UX hardening (2026-10-05, Sprint 9, D61–D64)
+- [x] **Root causes:** (a) starlette-1.7 per-session loops vs. anyio cross-loop wakeups
+      → lost WS events / suite hangs; fixed loop-safely in `net._send` + `attach_ws` (D61).
+      (b) base64 `=` padding in session cookies → parsers dropped the cookie → real
+      intermittent production 401s; fixed padding-free (D62).
+      (c) `_secret()` generate-raw / read-stripped → ~1.6% of installs signed with a key
+      that mutated after first write; secret.key now hex-stored (D62). Suite no longer hangs.
+- [x] **Docker canonical runtime:** multi-stage Dockerfile (runtime + test), compose
+      services `app` (loopback bind, healthcheck, unless-stopped) + `test` (profile),
+      exact dependency pins incl. previously MISSING `websockets` package, `DOCKER_BUILDKIT=0`
+      fallback documented (host lacks buildx).
+- [x] **Persistent VTT_DATA_DIR:** uploads moved out of the app tree, same `/uploads/`
+      URLs, `scripts/move_uploads.py` for legacy installs; verified by `test_deploy_hygiene`.
+- [x] **Backup/restore:** sqlite backup-API (WAL-safe + integrity_check) bundling
+      db+secret.key+uploads; restore keeps previous db, clears stale WAL, verifies.
+- [x] **Hardening:** X-Forwarded-* trust gated by VTT_TRUST_PROXY; WS same-origin gate +
+      VTT_ALLOWED_ORIGINS (4403); README deployment section (Caddy+Nginx), single-process
+      warning prominent; compose smoke: healthy + data survives `--force-recreate`.
+- [x] **DM doors:** `dm_only` + `secret` flags end-to-end (sanitize, per-viewer map,
+      handler auth, editor checkboxes, ghost rendering for DM); `test_doors_dmonly` (10).
+- [x] **UI pass 2:** CSS tokens + merged duplicate `.wlabel` + defined `--muted`;
+      sticky sidebar tab bar (aria-selected); DM tools in collapsible groups; NPC sheet
+      sectioned (all ids preserved); PC sheet details; toast above movehud; help content.
+- [x] **Hygiene:** `.dockerignore`, `.gitignore` additions (archives/Zone.Identifier/
+      compose overrides), `scripts/make_release.sh` with post-archive forbidden-path check.
 
 ## P1 — Repo hygiene
 - [ ] Add a `Makefile`/`scripts/smoke.sh`: start (pidfile) -> live `vtt_smoke*.mjs` -> stop

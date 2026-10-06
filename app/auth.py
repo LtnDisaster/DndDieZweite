@@ -18,22 +18,35 @@ COOKIE = "vtt_session"
 
 
 def cookie_secure(request: "Request") -> bool:
-    """True only under HTTPS (direct or via a proxy setting X-Forwarded-Proto,
-    or when explicitly forced), so plain-HTTP local dev keeps working."""
+    """True under HTTPS. X-Forwarded-Proto is trusted ONLY when VTT_TRUST_PROXY=1
+    declares that a trusted proxy in front normalises it — otherwise an internet
+    client could spoof the header on a direct connection."""
     if os.environ.get("VTT_COOKIE_SECURE") == "1":
         return True
-    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
-    return proto == "https"
+    if os.environ.get("VTT_TRUST_PROXY") == "1":
+        proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+        if proto:
+            return proto == "https"
+    return request.url.scheme == "https"
 
 
 def _secret() -> bytes:
+    # Key is stored HEX-encoded: raw 32 random bytes can contain ASCII whitespace
+    # (0x0a, 0x20, ...), and the read-back below strips it — a freshly generated
+    # raw key would then differ between the generating call and every later
+    # read, silently invalidating the first issued session (~1.6% of installs).
+    # Legacy raw files (pre-hex) keep working via the ValueError fallback.
     if os.path.exists(SECRET_FILE):
         with open(SECRET_FILE, "rb") as f:
-            return f.read().strip()
+            raw = f.read().strip()
+        try:
+            return bytes.fromhex(raw.decode("ascii"))
+        except ValueError:
+            return raw
     s = secrets.token_bytes(32)
     os.makedirs(db.DATA_DIR, exist_ok=True)
     with open(SECRET_FILE, "wb") as f:
-        f.write(s)
+        f.write(s.hex().encode())
     os.chmod(SECRET_FILE, 0o600)
     return s
 
@@ -54,7 +67,13 @@ def _sign(payload_b64: str) -> str:
 
 
 def make_token(user_id: int) -> str:
-    payload = base64.urlsafe_b64encode(json.dumps({"uid": user_id, "exp": time.time() + SESSION_TTL}).encode()).decode()
+    # Padding-free base64url: a "=" inside an unquoted cookie VALUE makes cookie
+    # parsers drop the whole cookie (intermittent 401s — the payload length
+    # decides, so it looked random). Old padded tokens still verify (read_token
+    # re-adds padding before decoding).
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"uid": user_id, "exp": time.time() + SESSION_TTL}).encode()
+    ).decode().rstrip("=")
     return f"{payload}.{_sign(payload)}"
 
 
@@ -65,7 +84,8 @@ def read_token(token: str):
     if not hmac.compare_digest(sig, _sign(payload)):
         return None
     try:
-        data = json.loads(base64.urlsafe_b64decode(payload.encode()))
+        padded = payload + "=" * (-len(payload) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded.encode()))
     except Exception:
         return None
     if data.get("exp", 0) < time.time():

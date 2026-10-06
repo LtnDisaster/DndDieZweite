@@ -5,7 +5,7 @@ STAYS in the authoritative map state, never springs again on walking, survives
 map edits (including stale editor snapshots and resizes) and reconnects.
 """
 from app import db
-from test_movement_fog import (base_room, recv_until, set_grid, state_of,
+from test_movement_fog import (base_room, park, recv_until, set_grid, state_of,
                                ws_connect)
 
 import pytest
@@ -39,6 +39,8 @@ def place_trap(client, dm, code, x, y):
 
 def test_trap_triggers_once_and_persists(client):
     dm, player, code, ch = base_room(client)
+    tok = player_tok(client, code, ch)
+    park(client, dm, code, tok["id"])                    # safe zone: trap-cycle walks must not grow the map
     tok = player_tok(client, code, ch)
     px, py = int(tok["x"] // 50), int(tok["y"] // 50)
     place_trap(client, dm, code, px + 2, py)

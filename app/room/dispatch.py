@@ -5,8 +5,9 @@ from .abilities import handle_ability_cast
 from .audio import (handle_audio_add, handle_audio_pause, handle_audio_play,
                     handle_audio_remove, handle_audio_stop, handle_sound_trigger)
 from .chat import handle_chat, handle_narrative
-from .combat import (handle_hp, handle_init_end, handle_init_end_round,
-                     handle_init_next, handle_init_start)
+from .combat import (handle_dash, handle_end_turn, handle_hp, handle_init_end,
+                     handle_init_end_round, handle_init_next, handle_init_start,
+                     handle_turn_mark)
 from .conditions import handle_cond_add, handle_cond_remove
 from .death import handle_death_clear, handle_death_save
 from .doors import handle_door
@@ -16,6 +17,7 @@ from .dice import (handle_cast, handle_long_rest, handle_npc_attack, handle_reso
 from .items import handle_attune, handle_identify, handle_recharge, handle_use_item
 from .fog import handle_fog_edit, handle_fog_toggle
 from .movement import handle_move, handle_path_preview, handle_stop_move
+from .moveforced import handle_forced_move
 from .net import broadcast, get_map, map_lock, send_to, set_map, sys_msg
 from .pings import handle_ping
 from .progression import handle_class_levels
@@ -85,6 +87,7 @@ HANDLERS = {
     "move": handle_move,
     "stop_move": handle_stop_move,
     "path_preview": handle_path_preview,
+    "forced_move": handle_forced_move,
     "fog_edit": handle_fog_edit,
     "fog_toggle": handle_fog_toggle,
     "map_edit": handle_map_edit,
@@ -101,6 +104,9 @@ HANDLERS = {
     "init_next": handle_init_next,
     "init_end_round": handle_init_end_round,
     "init_end": handle_init_end,
+    "end_turn": handle_end_turn,          # D79: owner of the active token or DM
+    "dash": handle_dash,
+    "turn_mark": handle_turn_mark,
     "hp": handle_hp,
     "use_item": handle_use_item,
     "attune": handle_attune,

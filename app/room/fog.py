@@ -33,9 +33,9 @@ async def handle_fog_edit(ws, room_id, user, is_dm, msg):
         changed = {}
         terrain = {}
         for x, y, explored in updates:
-            if not (0 <= x < mp["w"] and 0 <= y < mp["h"]):
+            idx = mapmodel.flat_idx(mp, x, y)      # wire cells are WORLD (D72)
+            if idx is None:
                 continue
-            idx = y * mp["w"] + x
             if mp["explored"][idx] != explored:
                 mp["explored"][idx] = explored
                 changed[str(idx)] = explored

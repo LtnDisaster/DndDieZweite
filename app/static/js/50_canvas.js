@@ -1,4 +1,5 @@
 /* ---------- canvas: camera, grid, fog, editor ---------- */
+(typeof window !== "undefined") && ((window.__BUILDS = window.__BUILDS || {})["50_canvas.js"] = window.__BUILD__ || "?");
 function renderFogToggle(){
   const b = $("btn-fog-toggle"); if (!b) return;
   const on = !!(state.grid && state.grid.fog_off);
@@ -8,8 +9,13 @@ function renderFogToggle(){
 }
 const cv = $("map"), ctx = cv.getContext("2d");
 function cellSize(){ return state.grid ? state.grid.cell : 50; }
+/* worldW/H = the map ARRAY's pixel size; worldLeft/Top = where that array sits
+   in WORLD pixel space (negative after west/north growth, D72). Entities draw
+   at their world pixels; the array is drawn shifted by the origin. */
 function worldW(){ return state.grid ? state.grid.w * cellSize() : 2000; }
 function worldH(){ return state.grid ? state.grid.h * cellSize() : 1300; }
+function worldLeft(){ return state.grid ? gridOrigin(state.grid)[0] * cellSize() : 0; }
+function worldTop(){ return state.grid ? gridOrigin(state.grid)[1] * cellSize() : 0; }
 function stopTick(){ state.tickOn = false; }
 function startTick(){ if (!state.tickOn){ state.tickOn = true; requestAnimationFrame(tick); } }
 function resize(){
@@ -21,12 +27,143 @@ function resize(){
 function view(){ const dpr = window.devicePixelRatio || 1; return { w: cv.width/dpr, h: cv.height/dpr }; }
 function clampCam(){
   if (state.viewMode === "diorama") return;   // diorama has its own projected extents
-  const { w, h } = view(), W = worldW(), H = worldH();
-  state.cam.ox = W <= w ? (w - W)/2 : Math.min(0, Math.max(w - W, state.cam.ox));
-  state.cam.oy = H <= h ? (h - H)/2 : Math.min(0, Math.max(h - H, state.cam.oy));
+  const { w, h } = view(), W = worldW(), H = worldH(), L = worldLeft(), T = worldTop();
+  state.cam.ox = W <= w ? (w - W)/2 + L : Math.min(L, Math.max(w - W + L, state.cam.ox));
+  state.cam.oy = H <= h ? (h - H)/2 + T : Math.min(T, Math.max(h - H + T, state.cam.oy));
+}
+/* ---------- view framing (D75) ----------
+   A client opening a room must land ON its own action, not on world (0,0).
+   Without this a player whose token lives deep in the world stared at pure
+   black: every cell of the initial viewport was unknown, and unknown cells
+   render as nothing. Cameras are pure client-local presentation — these
+   functions never send anything and never mutate world state. */
+function myToken(){
+  return (state.tokens || []).find(t => state.me && t.owner_user_id === state.me.id) || null;
+}
+/* camInit bookkeeping (browser diagnostics): exactly what ran, what it
+   decided, and when — so a real-browser black screen classifies itself. */
+function camInitMark(step, result, why){
+  const s = state._camInit = state._camInit || { step: "-", result: "-", why: "" };
+  s.step = step; s.result = result; s.why = why || ""; s.at = new Date().toISOString().slice(11, 23);
+  s[step] = result;                       // per-step trace: center/fit/init calls
+}
+function centerOnMyToken(){
+  const t = myToken();
+  if (!t){ camInitMark("center", "no-token", "player owns no token (Bring a character?)"); return; }
+  if (!state.grid){ camInitMark("center", "no-grid", "no map payload yet"); return; }
+  const { w, h } = view();
+  state.cam.ox = w / 2 - t.x; state.cam.oy = h / 2 - t.y;
+  clampCam();
+  camInitMark("center", "ok", `token ${t.id} @${Math.round(t.x)},${Math.round(t.y)}`);
+}
+/* Diorama projection (dioProj) has an unbounded iso bounding box — a 40x26
+   map can span y up to ~800+ px, so an unframed diorama shows almost nothing
+   of the world (manual regression: "Diorama is a one-way door"). fitDiorama
+   centres the camera on the viewer's KNOWN content (visible tiles + tokens). */
+function fitDiorama(){
+  const g = state.grid, c = cellSize();
+  if (!g || !g.cells){ camInitMark("fit", "no-grid", "no map payload yet"); return; }
+  const [ox, oy] = gridOrigin(g);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, n = 0;
+  const iso = (lx, ly) => [ (lx - ly) * c * 0.5, (lx + ly) * c * 0.25 ];  // raw, no cam
+  const add = p => { n++; if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
+                     if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1]; };
+  // sample the KNOWN lattice (same mask as the renderer — reveals nothing)
+  const step = Math.max(1, Math.round(Math.sqrt(g.w * g.h) / 60));
+  for (let gy = 0; gy < g.h; gy += step) for (let gx = 0; gx < g.w; gx += step){
+    if (!visibleHere(gy * g.w + gx)) continue;
+    add(iso(gx + ox, gy + oy));
+  }
+  for (const t of (state.tokens || [])){
+    const [tx, ty] = [Math.floor(t.x / c), Math.floor(t.y / c)];
+    if (!visibleHere(wIdx(g, tx, ty))) continue;
+    add(iso(tx + .5, ty + .5));
+  }
+  if (!n){ centerOnMyTokenD();
+    camInitMark("fit", myToken() ? "fallback-token" : "no-known-content",
+                myToken() ? "own token" : "nothing known and no own token");
+    return; }
+  const { w, h } = view();
+  state.cam.ox = w / 2 - (minX + maxX) / 2;
+  state.cam.oy = h / 2 - (minY + maxY) / 2;
+  state.camD.ox = state.cam.ox; state.camD.oy = state.cam.oy;
+  camInitMark("fit", "ok", `${n} known samples`);
+}
+function centerOnMyTokenD(){       // diorama fallback: point at own token
+  const t = myToken(); if (!t) return;
+  const c = cellSize(), { w, h } = view();
+  const p = [ (t.x / c - t.y / c) * c * 0.5, (t.x / c + t.y / c) * c * 0.25 ];
+  state.cam.ox = w / 2 - p[0]; state.cam.oy = h / 2 - p[1];
+}
+function initViewCam(){
+  state._camInitCalls = (state._camInitCalls || 0) + 1;
+  if (state.viewMode === "diorama" ) { if (typeof fitDiorama === "function") fitDiorama(); }
+  else centerOnMyToken();
+}
+/* Late-token safety net: if framing once ran WITHOUT an own token (player
+   joins before taking a seat, token arrives via WS later), frame the moment
+   the token shows up — once. Never touches an already-framed camera. */
+function maybeInitViewCam(){
+  if (state._camInit && state._camInit.result === "ok") return;
+  if (state.grid && myToken()) initViewCam();
+}
+/* ---------- dev diagnostics (D75, ?debug) ----------
+   Everything shown is data THIS viewer already legitimately has (its own
+   filtered payload) — counts only, never hidden entities or cells. */
+const DEBUG = typeof location !== "undefined" && /[?&]debug/.test(location.search);
+function dbgErr(e, where){
+  state._dbgErr = `${where}: ${e && e.message ? e.message : String(e)} @` +
+                  new Date().toISOString().slice(11, 19);
+  if (DEBUG && typeof console !== "undefined" && console.error) console.error("[dbg]", state._dbgErr, e);
+}
+if (DEBUG && typeof window !== "undefined"){
+  window.addEventListener("error", ev => dbgErr(ev.error || ev.message, "window"));
+  window.addEventListener("unhandledrejection", ev => dbgErr(ev.reason, "promise"));
+}
+function debugHud(){
+  const el = $("dbg"); if (!DEBUG || !el) return;
+  const now = Date.now(); if (now - (state._dbgAt || 0) < 400) return; state._dbgAt = now;
+  const g = state.grid, c = cellSize(), t = myToken();
+  const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
+  const cvSize = `${Math.round(cv.width / dpr)}x${Math.round(cv.height / dpr)}@dpr${dpr}`;
+  const fns = `fns[C=${typeof centerOnMyToken === "function" ? "y" : "!"},` +
+              `F=${typeof fitDiorama === "function" ? "y" : "!"}]`;
+  const cam = `${Math.round(state.cam.ox)},${Math.round(state.cam.oy)}`;
+  const w = typeof window !== "undefined" ? window : {};
+  const integ = w.__INTEGRITY ? (w.__INTEGRITY.ok ? (w.__INTEGRITY.serverMismatch ? "DRIFT" : "ok") : "FAIL") : "-";
+  const bootErr = (w.__BOOTERRORS && w.__BOOTERRORS.length)
+    ? w.__BOOTERRORS[w.__BOOTERRORS.length - 1].msg : "";
+  const head = `build=${w.__BUILD__ || "?"} integrity=${integ} | ` +
+               `view=${state.viewMode} | canvas=${cvSize} | cam(${cam}) ` +
+               `T(${Math.round(state.camT.ox)},${Math.round(state.camT.oy)}) ` +
+               `D(${Math.round(state.camD.ox)},${Math.round(state.camD.oy)}) | ${fns} | ` +
+               `camInit=${JSON.stringify(state._camInit || "-")} x${state._camInitCalls || 0}`;
+  if (!g || !g.cells){
+    el.textContent = `${head} | grid=n | bring=${state._bringLast || "-"} | NO MAP PAYLOAD` +
+                     (bootErr ? ` | BOOTERR: ${bootErr}` : "");
+    el.classList.add("dbg-err"); el.title = el.textContent; return;
+  }
+  const [ox, oy] = gridOrigin(g);
+  let known = 0, expl = 0;
+  for (let i = 0; i < g.cells.length; i++){
+    if (g.cells[i] !== null && g.cells[i] !== undefined) known++;
+    if (g.explored && g.explored[i]) expl++;
+  }
+  const cell = t ? `${t.id}@(${Math.floor(t.x / c)},${Math.floor(t.y / c)}) px${Math.round(t.x)},${Math.round(t.y)}` : "NONE";
+  const scr  = t ? `${Math.round(t.x + state.cam.ox)},${Math.round(t.y + state.cam.oy)}` : "-";
+  let txt = `${head} | grid=y win[${ox},${oy}] ${g.w}x${g.h}@${c} | tok=${cell} scr=${scr} | ` +
+            `known=${known} explored=${expl} painted=${state._dbgPaint || 0} | ` +
+            `bring=${state._bringLast || "-"}`;
+  if (!t) txt += " | ⚠ NO OWN TOKEN (Bring a character)";
+  const lastErr = state._dbgErr || bootErr;
+  if (lastErr) txt += ` | ERR: ${lastErr}`, el.classList.add("dbg-err");
+  else el.classList.remove("dbg-err");
+  el.textContent = txt;
+  el.title = txt;
 }
 function tick(){
   if (!state.tickOn || !state.room) return;
+  debugHud();
   let moved = false;
   for (const t of state.tokens)
     if (t.atx != null && (Math.abs(t.atx - t.x) > .5 || Math.abs(t.aty - t.y) > .5)){
@@ -40,7 +177,8 @@ function tick(){
     if (state.keys.has("ArrowDown")||state.keys.has("s")) state.cam.oy -= k;
     clampCam(); moved = true;
   }
-  draw();
+  try { draw(); }
+  catch (e){ dbgErr(e, "draw"); }              // the loop must not die on a frame error
   requestAnimationFrame(tick);
 }
 function visibleHere(i){
@@ -53,33 +191,50 @@ function visibleHere(i){
    view. Editing always uses the tactical renderer. */
 function draw(){
   if (!ctx || !state.room) return;
-  if (state.viewMode === "diorama" && !state.editing){ drawDiorama(); return; }
-  drawTactical();
+  try {
+    if (state.viewMode === "diorama" && !state.editing){ drawDiorama(); return; }
+    drawTactical();
+  } catch (e){ dbgErr(e, state.viewMode); throw e; }   // visible in ?debug, still fatal (no silent breakage)
 }
 function drawTactical(){
   const { w, h } = view(), c = cellSize(), cam = state.cam;
   const gm = state.editing && state.editMap ? state.editMap : state.grid;
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#0a0b10"; ctx.fillRect(0, 0, w, h);
-  const x0 = Math.max(0, Math.floor(-cam.ox / c)), y0 = Math.max(0, Math.floor(-cam.oy / c));
-  const x1 = Math.min(gm ? gm.w : 0, Math.ceil((w - cam.ox) / c)), y1 = Math.min(gm ? gm.h : 0, Math.ceil((h - cam.oy) / c));
+  const ox = gm ? gridOrigin(gm)[0] : 0, oy = gm ? gridOrigin(gm)[1] : 0;
+  // visible range in STORAGE cells: world px [-cam] minus the origin offset
+  const x0 = Math.max(0, Math.floor(-cam.ox / c) - ox), y0 = Math.max(0, Math.floor(-cam.oy / c) - oy);
+  const x1 = Math.min(gm ? gm.w : 0, Math.ceil((w - cam.ox) / c) - ox),
+        y1 = Math.min(gm ? gm.h : 0, Math.ceil((h - cam.oy) / c) - oy);
   if (gm){
+    let painted = 0;
     for (let gy = y0; gy < y1; gy++) for (let gx = x0; gx < x1; gx++){
-      const i = gy * gm.w + gx, sx = gx*c + cam.ox, sy = gy*c + cam.oy;
+      const i = gy * gm.w + gx, sx = (gx + ox)*c + cam.ox, sy = (gy + oy)*c + cam.oy;
       const known = state.editing || visibleHere(i);
       if (!known){ continue; }
+      painted++;
       const ter = gm.cells[i];
       if (ter === 1) { ctx.fillStyle = "#3a4157"; ctx.fillRect(sx, sy, c, c);
         ctx.fillStyle = "#232838"; ctx.fillRect(sx+2, sy+2, c-4, c-4); }
       else if (ter === 2){ ctx.fillStyle = "#20281d"; ctx.fillRect(sx, sy, c, c);
         ctx.strokeStyle = "#2e3a29"; ctx.beginPath();
         ctx.moveTo(sx+4, sy+c-6); ctx.lineTo(sx+c/2, sy+c/3); ctx.lineTo(sx+c-4, sy+c-6); ctx.stroke(); }
+      else if (ter === 3){ ctx.fillStyle = "#3a2b2b"; ctx.fillRect(sx, sy, c, c);
+        ctx.strokeStyle = "#7d4b4b"; ctx.lineWidth = 2; ctx.strokeRect(sx+4.5, sy+4.5, c-9, c-9);
+        ctx.lineWidth = 1; }
+      else if (ter === 4){ ctx.fillStyle = "#26231b"; ctx.fillRect(sx, sy, c, c);
+        ctx.fillStyle = "#4a4232"; ctx.beginPath();
+        ctx.arc(sx+c*0.35, sy+c*0.6, c*0.13, 0, 7); ctx.arc(sx+c*0.65, sy+c*0.42, c*0.16, 0, 7); ctx.fill(); }
       else { ctx.fillStyle = "#151823"; ctx.fillRect(sx, sy, c, c); }
+      const el = gm.elev && gm.elev[i];
+      if (el){ ctx.fillStyle = el > 0 ? "#8fb3ff" : "#b0785a";
+        ctx.font = `${Math.max(8, c/4)}px sans-serif`;
+        ctx.fillText((el > 0 ? "+" : "") + el, sx+3, sy+c-4); }
       ctx.strokeStyle = "#232735"; ctx.strokeRect(sx+.5, sy+.5, c, c);
     }
     if (state.bg && state.bg.complete && state.bg.naturalWidth){
       ctx.globalAlpha = .9;
-      ctx.drawImage(state.bg, cam.ox, cam.oy, gm.w*c, gm.h*c);
+      ctx.drawImage(state.bg, cam.ox + ox*c, cam.oy + oy*c, gm.w*c, gm.h*c);
       ctx.globalAlpha = 1;
     }
     const marks = gm ? []
@@ -102,7 +257,8 @@ function drawTactical(){
         ctx.beginPath(); ctx.moveTo(sx-c*.2, sy-c*.2); ctx.lineTo(sx+c*.2, sy+c*.2); ctx.stroke(); }
     }
     for (const d of (gm.doors || [])) drawDoor(d, c, cam);
-    for (const pin of (gm.pins || [])) drawPin(pin, c, cam, state.editing || state.room.role === "dm" || visibleHere(pin.y*gm.w + pin.x));
+    for (const pin of (gm.pins || [])) drawPin(pin, c, cam, state.editing || state.room.role === "dm" || visibleHere(wIdx(gm, pin.x, pin.y)));
+    state._dbgPaint = painted;
   }
   if (state.plan && (state.plan.cells || state.plan.path)){
     const preview = state.plan.cells || state.plan.path.map(p => ({x:p.x, y:p.y}));
@@ -116,7 +272,7 @@ function drawTactical(){
   }
   if (state.aoe && Date.now() < state.aoe.exp && gm){
     ctx.fillStyle = hexA(state.aoe.color, .26);
-    for (const i of state.aoe.cells){ const rx = (i % gm.w)*c + cam.ox, ry = Math.floor(i/gm.w)*c + cam.oy;
+    for (const pt of state.aoe.cells){ const rx = pt.x*c + cam.ox, ry = pt.y*c + cam.oy;   // WORLD cells
       ctx.fillRect(rx, ry, c, c); }
   }
   for (const gh of state.ghosts){
@@ -243,10 +399,10 @@ function sendMove(cx, cy, teleport=false){
   if (!t){ toast("Select your token first"); return; }
   wsSend({ type:"move", token_id: t.id, tx: cx, ty: cy, teleport });
 }
-function gridAt(g, cx, cy){
+function gridAt(g, cx, cy){                 // WORLD cell lookup (D72)
   if (!g || !g.cells) return null;
-  if (cx < 0 || cy < 0 || cx >= g.w || cy >= g.h) return null;
-  return g.cells[cy * g.w + cx];
+  const i = wIdx(g, cx, cy);
+  return i < 0 ? null : g.cells[i];
 }
 let _planSeq = 0;
 function tokenCellXY(t){ const c = cellSize(); return { cx: Math.floor(t.x / c), cy: Math.floor(t.y / c) }; }
@@ -263,7 +419,9 @@ function applyPathPreview(p){
   const side = SIZE_FOOTPRINT[p.size] || planSideForToken(state.tokens.find(t => t.id === p.token_id));
   state.planRequest = null;
   state.plan = { token_id:p.token_id, goal:p.goal, path:p.path||[], cells:p.cells||[],
-                 cost:p.cost||0, side:side||1 };
+                 cost:p.cost||0, side:side||1,
+                 budget:(p.budget === undefined ? null : p.budget),
+                 within:(p.within_budget === undefined ? true : !!p.within_budget) };
   updateMoveHud();
   if (confirmAfter) confirmPlan();
 }
@@ -281,30 +439,42 @@ function updateMoveHud(){
   const hud = $("movehud"); if (!hud) return;
   if (!state.plan){ hud.classList.add("hidden"); return; }
   hud.classList.remove("hidden");
-  $("mh-text").textContent = `→ ${state.plan.goal.cx},${state.plan.goal.cy} · ${state.plan.cost} steps`;
+  const pl = state.plan;
+  const cost = pl.budget === null ? `${pl.cost} squares`
+           : `${pl.cost}/${pl.budget} squares${pl.within ? "" : " · beyond speed"}`;
+  $("mh-text").textContent = `→ ${pl.goal.cx},${pl.goal.cy} · ${cost}`;
 }
 
 function flushFogEdit(){
-  const cells = Object.keys(state.fogTouched || {}).map(i => ({
-    x: (+i) % state.editMap.w, y: Math.floor((+i) / state.editMap.w), explored: state.fogTouched[i]
-  }));
+  // fogTouched keys are STORAGE array indexes; the wire speaks WORLD cells (D72)
+  const cells = Object.keys(state.fogTouched || {}).map(i => {
+    const [wx, wy] = s2w(state.editMap, (+i) % state.editMap.w, Math.floor((+i) / state.editMap.w));
+    return { x: wx, y: wy, explored: state.fogTouched[i] };
+  });
   if (!cells.length) return;
   state.fogTouched = {};
   for (let i = 0; i < cells.length; i += 512) wsSend({ type:"fog_edit", cells: cells.slice(i, i + 512) });
 }
 function paint(cx, cy){
   const gm = state.editMap; if (!gm || !gm.cells) return;
-  if (cx < 0 || cy < 0 || cx >= gm.w || cy >= gm.h) return;
-  const i = cy * gm.w + cx, b = state.brush;
+  const i = wIdx(gm, cx, cy);               // click cell is WORLD; array is STORAGE (D72)
+  if (i < 0) return;
+  const b = state.brush;
   if (b === "wall") gm.cells[i] = 1;
   else if (b === "floor") gm.cells[i] = 0;
   else if (b === "rough") gm.cells[i] = 2;
+  else if (b === "barrier") gm.cells[i] = 3;
+  else if (b === "low") gm.cells[i] = 4;
   else if (b === "erase"){ gm.cells[i] = 0;
     gm.traps = gm.traps.filter(t => !(t.x===cx && t.y===cy));
     gm.loot = gm.loot.filter(l => !(l.x===cx && l.y===cy)); }
   else if (b === "reveal" || b === "refog"){
     gm.explored[i] = b === "reveal" ? 1 : 0;
     state.fogTouched[i] = gm.explored[i];
+  }
+  else if (b === "raise" || b === "lower"){
+    gm.elev = gm.elev && gm.elev.length === gm.w * gm.h ? gm.elev : new Array(gm.w * gm.h).fill(0);
+    gm.elev[i] = Math.max(-6, Math.min(6, (gm.elev[i] || 0) + (b === "raise" ? 1 : -1)));
   }
   else if (b === "trap"){
     gm.traps = gm.traps.filter(t => !(t.x===cx && t.y===cy));
@@ -348,16 +518,16 @@ function doorHit(wx, wy){
     if (dd < bd){ bd = dd; best = d; } }
   return best;
 }
-function edgeAnchor(x, y, dir){
+function edgeAnchor(x, y, dir){             // WORLD cells (doors store world coords)
   const g = state.editMap; if (!g) return null;
   const bx = dir === "v" ? x+1 : x, by = dir === "h" ? y+1 : y;
-  if (x < 0 || y < 0 || x >= g.w || y >= g.h || bx >= g.w || by >= g.h) return null;
+  if (!inWorld(g, x, y) || !inWorld(g, bx, by)) return null;
   return { x, y, dir };
 }
 function edgeFromClick(p){
   const g = state.editMap; if (!g) return null;
   const c = cellSize(), cam = state.cam, { cx, cy } = toCell(p.x, p.y);
-  if (cx < 0 || cy < 0 || cx >= g.w || cy >= g.h) return null;
+  if (!inWorld(g, cx, cy)) return null;
   const lx = p.x - (cx*c + cam.ox), ly = p.y - (cy*c + cam.oy);
   const dl = lx, dr = c-lx, du = ly, dd = c-ly, m = Math.min(dl, dr, du, dd);
   if (m === dr) return edgeAnchor(cx,   cy,   "v");
@@ -371,7 +541,10 @@ function doorEdit(p){
   if (state.brush === "doorrm"){ if (idx >= 0) g.doors.splice(idx, 1); return; }
   if (idx >= 0) return;
   const locked = !!($("door-locked") && $("door-locked").checked);
-  g.doors.push({ id: eid(), x: e.x, y: e.y, dir: e.dir, closed: true, locked, label: "Door" });
+  const dmOnly = !!($("door-dmonly") && $("door-dmonly").checked);
+  const secret = !!($("door-secret") && $("door-secret").checked);
+  g.doors.push({ id: eid(), x: e.x, y: e.y, dir: e.dir, closed: true, locked,
+                 dm_only: dmOnly, secret, label: "Door" });
 }
 function pinEdit(p){
   const g = state.editMap; if (!g) return;
@@ -382,7 +555,7 @@ function pinEdit(p){
     if (idx >= 0) g.pins.splice(idx, 1);
     return;
   }
-  if ($("pin-vis") && $("pin-vis").value === "revealed" && !g.explored[cy*g.w + cx]) toast("Pin is hidden until that area is explored");
+  if ($("pin-vis") && $("pin-vis").value === "revealed" && !g.explored[wIdx(g, cx, cy)]) toast("Pin is hidden until that area is explored");
   g.pins.push({ id:eid(), x:cx, y:cy, type:"info", visibility:($("pin-vis")||{}).value || "dm",
                 color:($("pin-color")||{}).value || "#f1c40f", title:($("pin-title")||{}).value || "Pin",
                 description:($("pin-desc")||{}).value || "" });
@@ -400,8 +573,9 @@ function drawPin(pin, c, cam, known){
 function drawDoor(d, c, cam){
   const [A, B] = doorSeg(d, c, cam), len = Math.hypot(B[0]-A[0], B[1]-A[1]);
   ctx.save(); ctx.lineCap = "round";
+  if (d.secret) ctx.globalAlpha = 0.45;   // DM sees secret doors ghosted (players never receive them)
   ctx.strokeStyle = "#0d0f14"; ctx.lineWidth = 6; seg(A, B);
-  if (d.closed){ ctx.strokeStyle = d.locked ? "#7d4f27" : "#b9814a"; ctx.lineWidth = 4; seg(A, B); }
+  if (d.closed){ ctx.strokeStyle = d.dm_only ? "#7a4f9e" : (d.locked ? "#7d4f27" : "#b9814a"); ctx.lineWidth = 4; seg(A, B); }
   else { ctx.strokeStyle = "#6b4d29"; ctx.lineWidth = 3;
     const px = d.dir === "v" ? -1 : 0, py = d.dir === "v" ? 0 : -1;   // leaf swung into its cell
     seg(A, [A[0] + px*len, A[1] + py*len]); }
@@ -421,7 +595,7 @@ function hexA(hex, a){
 let _aoeT = null;
 function showAoe(p){
   const g = state.grid; if (!g) return;
-  const cells = aoeCells(p.shape, p.x, p.y, p.size, g.w, g.h, p.dir);
+  const cells = aoeCells(p.shape, p.x, p.y, p.size, g, p.dir);
   state.aoe = { cells, color: p.color || "#e74c3c", exp: Date.now() + 7000 };
   draw();
   if (_aoeT) clearTimeout(_aoeT);
@@ -531,8 +705,8 @@ function onMove(e){
   const t = state.tokens.find(t => t.id === d.id);
   if (!t) return;
   const wx = p.x - state.cam.ox, wy = p.y - state.cam.oy;
-  t.x = Math.max(0, Math.min(worldW(), wx + d.dx));
-  t.y = Math.max(0, Math.min(worldH(), wy + d.dy));
+  t.x = Math.max(worldLeft(), Math.min(worldLeft() + worldW(), wx + d.dx));
+  t.y = Math.max(worldTop(), Math.min(worldTop() + worldH(), wy + d.dy));
   t.atx = t.x; t.aty = t.y;
   d.moved = true;
 }
@@ -567,7 +741,7 @@ function onDbl(e){
   if (state.editing) return;
   const p = evtPos(e), { cx, cy } = clickCell(p);
   const g = state.grid;
-  if (g && (cx < 0 || cy < 0 || cx >= g.w || cy >= g.h)) return;
+  if (g && !inWorld(g, cx, cy)) return;
   if (clickToken(p)) return;
   if (state.room.role === "dm"){
     const mine = state.tokens.filter(t => t.owner_user_id === state.me.id);
@@ -612,9 +786,11 @@ function edResize(){
   const w = Math.max(8, Math.min(80, +$("ed-w").value || 40));
   const h = Math.max(6, Math.min(60, +$("ed-h").value || 26));
   const old = state.editMap;
-  const gm = { w, h, cell: old.cell, cells: new Array(w*h).fill(0), explored: new Array(w*h).fill(0),
-               traps: old.traps.filter(t => t.x < w && t.y < h), loot: old.loot.filter(l => l.x < w && l.y < h),
-               doors: (old.doors||[]).filter(d => d.x < w && d.y < h && (d.dir === "v" ? d.x+1 < w : d.y+1 < h)) };
+  const [ox, oy] = gridOrigin(old);                       // D72: the resize keeps the world anchor
+  const inW = (x, y) => x >= ox && y >= oy && x < ox + w && y < oy + h;
+  const gm = { w, h, cell: old.cell, origin: [ox, oy], cells: new Array(w*h).fill(0), explored: new Array(w*h).fill(0),
+               traps: old.traps.filter(t => inW(t.x, t.y)), loot: old.loot.filter(l => inW(l.x, l.y)),
+               doors: (old.doors||[]).filter(d => inW(d.x, d.y) && (d.dir === "v" ? inW(d.x+1, d.y) : inW(d.x, d.y+1))) };
   for (let y = 0; y < Math.min(h, old.h); y++) for (let x = 0; x < Math.min(w, old.w); x++)
     gm.cells[y*w+x] = old.cells[y*old.w+x];
   state.editMap = gm;

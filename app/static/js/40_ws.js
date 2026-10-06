@@ -1,4 +1,5 @@
 /* ---------- websocket ---------- */
+(typeof window !== "undefined") && ((window.__BUILDS = window.__BUILDS || {})["40_ws.js"] = window.__BUILD__ || "?");
 function wsSend(o){ if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(o)); }
 function connectWS(code){
   clearTimeout(state.reconnectTimer);
@@ -59,6 +60,15 @@ function connectWS(code){
           if (p.terrain && p.terrain[i] !== undefined) g.cells[i] = p.terrain[i]; }
         break; }
       case "map_changed": refreshRoom(); break;
+      case "map_expanded": {
+        // D72: world coordinates NEVER move — the map window grew. Nothing on
+        // screen shifts, so the camera must NOT be compensated (the old pixel
+        // shift double-moved every token — the reported teleporting). Just
+        // refetch the coherent new state.
+        refreshRoom().then(() => {
+          if (state.viewMode === "diorama" && typeof fitDiorama === "function") fitDiorama();
+        }); break;
+      }
       case "token_add": { upsertToken(p); renderVoiceTargets(); break; }
       case "token_leave": { const g = state.tokens.find(t => t.id === p.token_id);
                             if (g){ state.ghosts = state.ghosts.filter(x => x.id !== g.id);
@@ -68,6 +78,7 @@ function connectWS(code){
                             if (state.sel === p.token_id){ state.sel = null; renderSheet(null); }
                             renderVoiceTargets(); break; }
       case "token_gone": { state.tokens = state.tokens.filter(t => t.id !== p.token_id);
+                           state.ghosts = state.ghosts.filter(x => x.id !== p.token_id);
                            state.moving.delete(p.token_id);
                            if (state.sel === p.token_id){ state.sel = null; renderSheet(null); }
                            renderVoiceTargets(); break; }
@@ -80,12 +91,22 @@ function connectWS(code){
                         if (state.sel === p.token_id) renderSheet(t); } break; }
       case "aoe": showAoe(p); break;
       case "ping": showPing(p); break;
+      case "room_deleted": {
+        // D76: this room is gone — leave immediately and NEVER auto-reconnect
+        // into a deleted room (the old behaviour zombie-looped /ws/<code> 404s).
+        state.roomDeleted = true;
+        clearTimeout(state.reconnectTimer);
+        if (state.ws){ state.ws.onclose = null; state.ws.close(); state.ws = null; }
+        toast("This room was deleted by its DM");
+        state.room = null; editorClose(); loadLobby().catch(() => show("auth"));
+        break;
+      }
       case "error": toast(p.msg || "Error"); break;
     }
   };
   ws.onclose = (e) => {
     if (e.code === 4401){ toast("Session expired"); loadLobby().catch(()=>show("auth")); return; }
-    if (state.room){ toast("Reconnecting…"); state.reconnectTimer = setTimeout(()=>connectWS(code), 1500); }
+    if (state.room && !state.roomDeleted){ toast("Reconnecting…"); state.reconnectTimer = setTimeout(()=>connectWS(code), 1500); }
   };
 }
 function upsertToken(p){

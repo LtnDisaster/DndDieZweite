@@ -3,7 +3,7 @@
 A player receives live token data only when at least one footprint cell is currently
 visible under server-side LOS. Out-of-sight movement is never transmitted; a token
 that leaves sight becomes a faded 'ghost' pinned to its last-seen position."""
-from .. import db, footprint, los
+from .. import db, footprint, los, mapmodel
 from .. import conditions as _conds
 from . import death as _death
 from .net import clients, send_to, broadcast, get_map
@@ -32,11 +32,14 @@ def viewer_visible_cells(room_id, user_id, mp):
 
 def _token_cells(mp, token):
     origin, side = footprint.occupied_origin(mp, token)
-    return footprint.origin_cells(mp["w"], mp["h"], origin, side)
+    return footprint.origin_cells(mp, origin, side)
 
 
 def _token_index_cells(mp, token):
-    return {(y * mp["w"] + x) for (x, y) in _token_cells(mp, token)}
+    # WORLD footprint cells -> flat STORAGE indices (the space los.visible_cells
+    # returns). Cells outside the world have no index and cannot be seen (D72).
+    return {i for (x, y) in _token_cells(mp, token)
+            if (i := mapmodel.flat_idx(mp, x, y)) is not None}
 
 
 def _snapshot(tok, viewer_id=None):

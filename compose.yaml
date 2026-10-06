@@ -1,0 +1,25 @@
+# Canonical run:   docker compose up --build -d
+# Canonical test:  docker compose run --rm test
+# The bind mount keeps db / secret.key / uploads visible under ./data so the
+# container is disposable. ./data must be writable by the run uid (default
+# 1000; `chown 1000 ./data` on a fresh server).
+services:
+  app:
+    build:
+      context: .          # default (last) stage = runtime
+    image: dnd-vtt:latest
+    ports:
+      - "127.0.0.1:8000:8000"   # never expose directly; use a reverse proxy (README)
+    environment:
+      VTT_COOKIE_SECURE: ${VTT_COOKIE_SECURE:-0}
+      VTT_TRUST_PROXY: ${VTT_TRUST_PROXY:-0}
+      VTT_LOG_LEVEL: ${VTT_LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/srv/data
+    restart: unless-stopped
+
+  test:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]

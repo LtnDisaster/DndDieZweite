@@ -6,6 +6,7 @@
    Original generic placeholder shapes only — no copied art. Upright token
    billboards ("paper cards") are an original style, not derived from or
    copying any third-party product's visuals. */
+(typeof window !== "undefined") && ((window.__BUILDS = window.__BUILDS || {})["55_diorama.js"] = window.__BUILD__ || "?");
 const DIO = { wallH: 0.62 };
 
 function dioProj(lx, ly, c){               // lattice (continuous) -> screen
@@ -39,23 +40,24 @@ function drawDiorama(){
     return;
   }
   const tiles = [], cards = [];
+  const [ox, oy] = gridOrigin(g);                         // D72: array window anchor
   for (let gy = 0; gy < g.h; gy++) for (let gx = 0; gx < g.w; gx++){
     const i = gy * g.w + gx;
     if (!visibleHere(i)) continue;                       // same fog/LOS mask as tactical
-    tiles.push({ z: gx + gy, kind: "cell", gx, gy, ter: g.cells[i] });
+    tiles.push({ z: (gx+ox) + (gy+oy), kind: "cell", wx: gx+ox, wy: gy+oy, ter: g.cells[i] });
   }
   for (const d of (g.doors || [])){
-    if (!visibleHere(d.y * g.w + d.x)) continue;
-    tiles.push({ z: d.x + d.y + 1.5, kind: "door", d });   // edge centre in lattice space
+    if (!visibleHere(wIdx(g, d.x, d.y))) continue;
+    tiles.push({ z: d.x + d.y + 1.5, kind: "door", d });   // door cells are WORLD coords
   }
   for (const t of state.tokens){
     const side = SIZE_FOOTPRINT[t.size] || 1;
-    const cx = t.x / c, cy = t.y / c;
+    const cx = t.x / c, cy = t.y / c;                     // token pixels are WORLD px
     let seen = false;                    // parity with the server: ANY footprint cell may reveal
     for (let dy = 0; dy < side && !seen; dy++) for (let dx = 0; dx < side && !seen; dx++){
       const ix = Math.floor(cx) + dx, iy = Math.floor(cy) + dy;
-      if (ix < 0 || iy < 0 || ix >= g.w || iy >= g.h) continue;
-      if (visibleHere(iy * g.w + ix)) seen = true;
+      if (!inWorld(g, ix, iy)) continue;
+      if (visibleHere(wIdx(g, ix, iy))) seen = true;
     }
     if (!seen) continue;
     cards.push({ z: cx + cy + side, kind: "token", t, side });
@@ -65,27 +67,28 @@ function drawDiorama(){
   }
   tiles.sort((a, b) => a.z - b.z);
   cards.sort((a, b) => a.z - b.z);
+  state._dbgPaint = tiles.length + cards.length;
   for (const it of tiles){
     if (it.kind === "cell") dioCell(it, c); else dioDoor(it, c);
   }
   for (const it of cards){
     if (it.kind === "token") dioToken(it, c); else dioGhost(it, c);
   }
-  if (state.plan && state.plan.cells){                   // server path preview
+  if (state.plan && state.plan.cells){                   // server path preview (WORLD cells)
     for (const pt of state.plan.cells){
-      const i = pt.y * g.w + pt.x;
-      if (i < 0 || i >= g.cells.length || g.cells[i] === 1) continue;
+      const i = wIdx(g, pt.x, pt.y);
+      if (i < 0 || g.cells[i] === 1) continue;
       fillPoly(dioCellQuad(pt.x, pt.y, c), "rgba(212,160,23,0.35)");
     }
   }
 }
 function dioCell(it, c){
-  const q = dioCellQuad(it.gx, it.gy, c);
+  const q = dioCellQuad(it.wx, it.wy, c);
   if (it.ter === 1){
     const H = DIO.wallH * c;
     fillPoly([q[3], q[2], [q[2][0], q[2][1]-H], [q[3][0], q[3][1]-H]], "#333a4e");   // SW face
     fillPoly([q[2], q[1], [q[1][0], q[1][1]-H], [q[2][0], q[2][1]-H]], "#3f4761");   // SE face
-    fillPoly(dioCellQuad(it.gx, it.gy, c, H), "#4a5270", "#232838");                 // top
+    fillPoly(dioCellQuad(it.wx, it.wy, c, H), "#4a5270", "#232838");                 // top
     return;
   }
   fillPoly(q, it.ter === 2 ? "#20281d" : "#151823", "#232735");
@@ -171,7 +174,7 @@ function dioTokenClick(wx, wy, c){
 function dioDoorClick(wx, wy, c){
   const g = state.grid; let best = null, bd = c*0.4;
   for (const d of (g.doors || [])){
-    if (!visibleHere(d.y * g.w + d.x)) continue;
+    if (!visibleHere(wIdx(g, d.x, d.y))) continue;
     const A = d.dir === "v" ? dioProj(d.x+1, d.y, c)   : dioProj(d.x, d.y+1, c);
     const B = d.dir === "v" ? dioProj(d.x+1, d.y+1, c) : dioProj(d.x+1, d.y+1, c);
     const dd = segDist(wx, wy, A, B);
@@ -194,7 +197,7 @@ function dioramaDown(p){
   if (g && state.room && ownToken()){
     const { lx, ly } = dioUnproj(p.x, p.y, c);
     const cx = Math.floor(lx), cy = Math.floor(ly);
-    if (cx < 0 || cy < 0 || cx >= g.w || cy >= g.h) return;
+    if (!inWorld(g, cx, cy)) return;                     // world cells (D72)
     if (state.plan && state.plan.goal.cx === cx && state.plan.goal.cy === cy) confirmPlan();
     else planMove(cx, cy);          // requests SERVER path preview, same as tactical
   } else {

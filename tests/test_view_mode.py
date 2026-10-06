@@ -84,8 +84,17 @@ const ctx = new Proxy({}, { get(t,p){ if(p==="fill") return ()=>{rec.fills++;};
                        set(t,p,v){ t[p]=v; return true; } });
 const view = () => ({ w: 800, h: 600 });
 const cellSize = () => 50;
-const SIZE_FOOTPRINT = { Medium:1, Large:2 };
 """
+# 10_core.js is loaded FIRST in these harnesses (like in the browser) so the
+# D72 helpers (gridOrigin/wIdx/inWorld) are the real ones; state/SIZE_FOOTPRINT
+# come from core and must be assigned, never redeclared.
+_CORE_STATE = """
+Object.assign(state, { room:{ role:"player", members:[] }, viewMode:"diorama",
+                       tokens:[], ghosts:[], cam:{ox:0,oy:0},
+                       sel:null, plan:null, init:null });
+"""
+
+
 
 
 @needs_node
@@ -113,13 +122,11 @@ def test_view_mode_fallback_and_persistence():
 def test_diorama_empty_and_hidden_safe():
     """Empty map renders without error; unknown cells are never drawn."""
     out = _node_vm(
-        [str(JS / "55_diorama.js")],
-        _CANVAS_STUB + """
+        [str(JS / "10_core.js"), str(JS / "55_diorama.js")],
+        _CANVAS_STUB + _CORE_STATE + """
         let visibleHere = (i) => i !== 0;      // cell 0 unknown to this viewer
-        const state = { room:{ role:"player", members:[] }, viewMode:"diorama",
-                        grid:null, tokens:[], ghosts:[], cam:{ox:0,oy:0},
-                        sel:null, plan:null, init:null };
         // 1) no map at all -> must not throw and must paint nothing
+        state.grid = null;
         drawDiorama(); const emptyFills = rec.fills;
         // 2) 1x2 map, cell 0 hidden -> exactly one floor quad painted
         state.grid = { w:2, h:1, cell:50, cells:[0,0], explored:[1,1],
@@ -138,21 +145,20 @@ def test_diorama_empty_and_hidden_safe():
 @needs_node
 def test_diorama_token_and_door_paths_execute():
     out = _node_vm(
-        [str(JS / "55_diorama.js")],
-        _CANVAS_STUB + """
+        [str(JS / "10_core.js"), str(JS / "55_diorama.js")],
+        _CANVAS_STUB + _CORE_STATE + """
         let visibleHere = () => true;
         const wsSend = (o) => rec.sends.push(o.type || "msg");
         const renderSheet = () => {};
         const ownToken = () => null;
         let segDist = () => 99;
-        const state = { room:{ role:"player", members:[] }, viewMode:"diorama",
-                        grid:{ w:2, h:1, cell:50, cells:[0,0], explored:[1,1],
-                               doors:[{id:"d1", x:0, y:0, dir:"v", closed:true, locked:false}],
-                               traps:[], loot:[], pins:[] },
-                        tokens:[{ id:1, x:10, y:10, size:"Large", label:"Ogre",
-                                  color:"#e74c3c", npc:true }],
-                        ghosts:[{ id:9, x:60, y:10, color:"#9aa", label:"Old" }],
-                        cam:{ox:0,oy:0}, sel:1, plan:null, init:null };
+        state.grid = { w:2, h:1, cell:50, cells:[0,0], explored:[1,1],
+                       doors:[{id:"d1", x:0, y:0, dir:"v", closed:true, locked:false}],
+                       traps:[], loot:[], pins:[] };
+        state.tokens = [{ id:1, x:10, y:10, size:"Large", label:"Ogre",
+                          color:"#e74c3c", npc:true }];
+        state.ghosts = [{ id:9, x:60, y:10, color:"#9aa", label:"Old" }];
+        state.sel = 1;
         drawDiorama(); const rendered = rec.fills > 0;
         // clicking the door edge reuses the authoritative door toggle only
         state.tokens = [];                       // click location is the door, not the card
@@ -169,15 +175,13 @@ def test_diorama_footprint_reveal_parity():
     """A Large token whose ORIGIN cell is hidden but another footprint cell is
     visible must render — matching the server's any-cell reveal semantics."""
     out = _node_vm(
-        [str(JS / "55_diorama.js")],
-        _CANVAS_STUB + """
+        [str(JS / "10_core.js"), str(JS / "55_diorama.js")],
+        _CANVAS_STUB + _CORE_STATE + """
         let visibleHere = (i) => i !== 0;               // origin cell hidden
-        const state = { room:{ role:"player", members:[] }, viewMode:"diorama",
-                        grid:{ w:2, h:1, cell:50, cells:[0,0], explored:[1,1],
-                               doors:[], traps:[], loot:[], pins:[] },
-                        tokens:[{ id:1, x:10, y:10, size:"Large", label:"Ogre",
-                                  color:"#e74c3c", npc:true }],
-                        ghosts:[], cam:{ox:0,oy:0}, sel:null, plan:null, init:null };
+        state.grid = { w:2, h:1, cell:50, cells:[0,0], explored:[1,1],
+                       doors:[], traps:[], loot:[], pins:[] };
+        state.tokens = [{ id:1, x:10, y:10, size:"Large", label:"Ogre",
+                          color:"#e74c3c", npc:true }];
         drawDiorama();
         // expected paints: 1 visible floor quad + 1 billboard shadow fill
         console.log([rec.fills === 2].join(","));
@@ -192,3 +196,135 @@ def test_diorama_reads_only_filtered_client_state():
     assert "visibleHere(" in dio, "diorama must reuse the tactical visibility mask"
     for forbidden in ("fetch(", "api(", "XMLHttpRequest"):
         assert forbidden not in dio, f"diorama must not request data via {forbidden}"
+
+
+# ---------- view framing regressions (D75, manual black-screen findings) ----------
+# A player who opens a room must LAND on their own token, and the diorama must
+# frame the KNOWN world — otherwise both renderers paint almost nothing and the
+# manual tester sees "everything is black" plus a "stuck" diorama. These tests
+# run the REAL renderers in a Node vm against a player-shaped payload.
+
+_DOM_STUB = """
+(() => {
+  const rec = { rects: [], polys: [] };
+  const ctx = { canvas:{width:800,height:600},
+    fillRect:(x,y)=>{rec.rects.push([x,y]);}, clearRect(){}, strokeRect(){},
+    beginPath(){ ctx._c=[]; }, moveTo(x,y){ ctx._c.push([x,y]); }, lineTo(x,y){ ctx._c.push([x,y]); },
+    closePath(){}, arc(){}, fill(){ if (ctx._c) rec.polys.push(ctx._c); }, ellipse(){},
+    stroke(){}, setLineDash(){}, save(){}, restore(){}, drawImage(){}, fillText(){},
+    measureText:()=>({width:10}) };
+  const mk = () => ({ style:{}, dataset:{}, value:"", textContent:"", innerHTML:"", checked:false,
+    classList:{add(){},remove(){},toggle(){},contains:()=>false}, addEventListener(){},
+    setAttribute(){}, appendChild(){}, onclick:null, width:800, height:600,
+    getBoundingClientRect:()=>({width:800,height:600,left:0,top:0}),
+    getContext:()=>ctx, parentElement:{getBoundingClientRect:()=>({width:800,height:600})},
+    naturalWidth:0, complete:false });
+  const els = {};
+  return { rec, document: { getElementById: id => els[id] || (els[id] = mk()),
+    createElement: () => mk(), querySelectorAll: () => [], addEventListener(){}, body: mk() },
+    window: { devicePixelRatio:1, addEventListener(){} }, navigator:{},
+    localStorage: (() => { const s={}; return { getItem:k=>(k in s?s[k]:null),
+      setItem:(k,v)=>{s[k]=String(v);} }; })(),
+    setTimeout, clearTimeout, requestAnimationFrame:()=>0,
+    Image: function(){ return { naturalWidth:0 }; } };
+})()
+"""
+
+_PLAYER_SCENE = """
+Object.assign(state, {
+  room: { role: "player", members: [] }, me: { id: 2, username: "pl" },
+  grid: (() => { const w=40,h=26,cells=new Array(w*h).fill(null);
+    for(let y=17;y<=23;y++)for(let x=33;x<=39;x++) cells[y*w+x]=0;   // ring deep in the world
+    return { w,h,cell:50,origin:[0,0],cells,elev:[],explored:new Array(w*h).fill(0),
+             traps:[],loot:[],doors:[],pins:[],fog_off:false }; })(),
+  tokens: [{ id:1, owner_user_id:2, x:1825, y:1025, label:"Hero", color:"#4ae",
+             size:"Medium", conds:[], death:{} }],
+  ghosts: [], plan:null, aoe:null, pings:[], ruler:null, editing:false, editMap:null,
+  cam:{ox:0,oy:0}, camT:{ox:0,oy:0}, camD:{ox:0,oy:0},
+  sel:null, init:{combat:false,order:[],active:-1}, viewMode:"tactical",
+  moving:new Set(), keys:new Set(), tickOn:false, online:new Set(["pl"]),
+});
+const snap = () => JSON.stringify(state.grid.cells) + "|" +
+                   JSON.stringify(state.tokens.map(t=>[t.id,t.x,t.y]));
+const inView = () => {
+  const rects = rec.rects.filter(([x,y]) => x>-50 && x<850 && y>-50 && y<650).length;
+  const polys = rec.polys.filter(p => p.some(([x,y]) => x>-50 && x<850 && y>-50 && y<650)).length;
+  return [rects, polys];
+};
+"""
+
+
+def _run_renderers(extra: str) -> str:
+    out = _node_vm([str(JS / "10_core.js"), str(JS / "50_canvas.js"), str(JS / "55_diorama.js")],
+                   extra, sandbox_js=_DOM_STUB)
+    return out
+
+
+@needs_node
+def test_player_lands_on_own_token_not_on_black_space():
+    out = _run_renderers(_PLAYER_SCENE + """
+        const before = snap();
+        rec.rects = []; drawTactical();                 // old entry state: cam (0,0)
+        const blackBefore = inView()[0];                // the manual regression: ~nothing
+        initViewCam();                                  // openRoom now frames my token
+        rec.rects = []; drawTactical();
+        const after = inView()[0];
+        console.log([blackBefore <= 1, after >= 30, snap() === before].join(","));
+        """)
+    assert out == "true,true,true"
+
+
+@needs_node
+def test_diorama_frames_the_known_world_and_switching_back_restores():
+    out = _run_renderers(_PLAYER_SCENE + """
+        const before = snap();
+        initViewCam();                                  // tactical framing (camT)
+        const camT = JSON.stringify(state.cam);
+        setViewMode("diorama");
+        rec.polys = []; drawDiorama();
+        const seen = inView()[1] >= 30;                 // fit put the KNOWN ring on screen
+        setViewMode("tactical");
+        const restored = JSON.stringify(state.cam) === camT;   // own view came back
+        rec.rects = []; drawTactical();
+        const back = inView()[0] >= 30;
+        console.log([seen, restored, back, snap() === before,
+                     state.viewMode === "tactical"].join(","));
+        """)
+    assert out == "true,true,true,true,true"
+
+
+def test_view_switch_controls_live_in_stable_chrome():
+    """D75/P5: the escape hatch must sit OUTSIDE the canvas/mapwrap layer, in
+    the room header — no renderer can ever cover or swallow it."""
+    html = (ROOT / "app" / "static" / "index.html").read_text()
+    header = html[html.index('<section id="view-room"'):html.index('<main class="room-grid"')]
+    for elem in ('id="btn-back"', 'id="view-tactical"', 'id="view-diorama"'):
+        assert elem in header, f"{elem} must live in the room header chrome"
+    assert 'id="viewtoggle"' in header
+
+
+@needs_node
+def test_view_switch_never_touches_combat_state():
+    """D79 §8: combat state is world state. A Tactical→Diorama→Tactical round
+    trip (with renders on both sides) must not move tokens, spend/reset the
+    turn budget, touch A/B/R slots, advance initiative or drop a planned route."""
+    out = _run_renderers(_PLAYER_SCENE + """
+        state.init = { combat:true, round:1, active:0,
+          order:[{token_id:1,label:"Hero",total:15,roll:13,mod:2},
+                 {token_id:2,label:"Goblin",total:11,roll:10,mod:1}],
+          turn:{token_id:1,round:1,move_total:6,move_spent:2,
+                action:"used",bonus:"available",reaction:"available"} };
+        state.plan = { token_id:1, goal:{cx:38,cy:21}, path:[{x:38,y:21}],
+                       cells:[{x:38,y:21}], cost:4, side:1 };
+        const initBefore = JSON.stringify(state.init);
+        const planBefore = JSON.stringify(state.plan);
+        const snapBefore = snap();
+        initViewCam();
+        drawTactical(); setViewMode("diorama"); drawDiorama();
+        setViewMode("tactical"); drawTactical();
+        console.log([JSON.stringify(state.init) === initBefore,
+                     JSON.stringify(state.plan) === planBefore,
+                     snap() === snapBefore,
+                     state.viewMode === "tactical"].join(","));
+        """)
+    assert out == "true,true,true,true"
