@@ -37,7 +37,7 @@ async def _announce_move(room_id, token_id, moving, reason=None):
 
 
 def _room_tokens(room_id, exclude_id=None):
-    return [t for t in db.q("SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens WHERE room_id=?",
+    return [t for t in db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens WHERE room_id=?",
                             (room_id,)) if t["id"] != exclude_id]
 
 
@@ -52,18 +52,78 @@ def _cell_elev(mp, cx, cy):
     return mapmodel.elev_at(mp, cx, cy)
 
 
-def _walk_speed(tok):
-    """Walk speed in feet — always through gear.clean_speeds (SSOT)."""
+def _speeds(tok):
+    """All movement allowances in feet — always through gear.clean_speeds (SSOT)."""
     if tok["character_id"]:
         return gear.clean_speeds(db.q1("SELECT speed FROM characters WHERE id=?",
-                                       (tok["character_id"],)))["walk"]
-    return gear.clean_speeds(db.j(tok["npc"]) if tok["npc"] else {})["walk"]
+                                       (tok["character_id"],)))
+    return gear.clean_speeds(db.j(tok["npc"]) if tok["npc"] else {})
+
+
+def _walk_speed(tok):
+    """Walk speed in feet (legacy single-mode entry point)."""
+    return _speeds(tok)["walk"]
+
+
+MODES = ("walk", "fly", "swim", "climb")
+
+
+def _mode_or_error(tok, msg):
+    """(D83) One active mode per movement operation. Unknown mode words fall
+    back to walk; a mode the creature does not have is refused — no silent
+    substitution, no fake terrain rules for swim/climb yet."""
+    mode = str(msg.get("mode") or "walk").lower()
+    if mode not in MODES:
+        mode = "walk"
+    if mode != "walk" and _speeds(tok).get(mode, 0) <= 0:
+        return None, f"This creature has no {mode} speed"
+    return mode, None
 
 
 MOVE_BLOCKED_CONDS = {"incapacitated", "unconscious", "paralyzed", "stunned",
                       "petrified"}    # the incapacitated family (D80) — the
 # restrained/grappled family deliberately is NOT here: those need their own
 # mechanics (out of scope) and must not be silently turned into a movement ban.
+
+
+async def carry_riders(room_id, token_id):
+    """(D83) Mount carrying: every token riding (transitively) on a token that
+    just MOVED is re-centred inside its mount's oriented footprint through
+    footprint.anchor_for_center and pushed out over the visibility-filtered
+    step channel. Carried riders NEVER spend their own movement budget and are
+    never independently validated — while carried, the mount's legal position
+    is their position (latent footprint, collision-exempt, see footprint).
+    Nested chains (A on B on C) propagate top-down, bounded and cycle-tolerant;
+    the cycle guard at assignment time (tokens.handle_token_mount) stays the
+    real protection."""
+    mp = get_map(room_id)
+    parent = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
+    if parent is None:
+        return
+    frontier, seen = [parent], {token_id}
+    while frontier:
+        nxt = []
+        for p in frontier:
+            p_origin, p_span = footprint.occupied_origin(mp, p)
+            for r in db.q("SELECT * FROM tokens WHERE room_id=? AND mount_token_id=?",
+                          (room_id, p["id"])):
+                if r["id"] in seen or len(seen) > 64:
+                    continue
+                seen.add(r["id"])
+                anchor = footprint.anchor_for_center(p_origin, p_span,
+                                                     footprint.oriented_span(r))
+                x, y = footprint.origin_pixels(anchor, footprint.token_span(r),
+                                               mp["cell"])
+                db.x("UPDATE tokens SET x=?, y=? WHERE id=?", (x, y, r["id"]))
+                r["x"], r["y"] = x, y
+                await broadcast_token_step(room_id, r, x, y, anchor[0], anchor[1])
+                nxt.append(r)
+        frontier = nxt
+
+
+def _carries_riders(token_id):
+    return db.q1("SELECT 1 AS hit FROM tokens WHERE mount_token_id=? LIMIT 1",
+                 (token_id,)) is not None
 
 
 def _movement_block_reason(tok):
@@ -93,6 +153,10 @@ async def handle_move(ws, room_id, user, is_dm, msg):
     if blocked:
         await send_to(ws, "error", {"msg": blocked})
         return
+    mode, why = _mode_or_error(tok, msg)                 # D83: one mode per move
+    if why:
+        await send_to(ws, "error", {"msg": why})
+        return
     # Action economy gate (D74, strict 5e): a token that is in the initiative
     # order may only be moved by its owner on its OWN turn. The DM is exempt
     # (the DM moves everyone, ever); tokens that are not listed (mid-combat
@@ -103,7 +167,7 @@ async def handle_move(ws, room_id, user, is_dm, msg):
         if CB.turn_token(init) != tok["id"]:
             await send_to(ws, "error", {"msg": "It is not your turn"})
             return
-        budget = CB.move_remaining(init, tok["id"])
+        budget = CB.move_remaining(init, tok["id"], mode)
         if budget <= 0:
             await send_to(ws, "error", {"msg": "No movement left this turn — Dash or End Turn"})
             return
@@ -128,6 +192,8 @@ async def handle_move(ws, room_id, user, is_dm, msg):
              (x, y, _cell_elev(mp, tx, ty), tok["id"]))
         tok["x"], tok["y"] = x, y
         await broadcast_token_step(room_id, tok, x, y, tx, ty)
+        if _carries_riders(tok["id"]):
+            await carry_riders(room_id, tok["id"])         # D83: riders come along
         # Only a player-owned token lifts fog; NPC/DM tokens never reveal for players.
         if tok["owner_user_id"] is not None:
             async with map_lock(room_id):
@@ -162,7 +228,8 @@ async def handle_move(ws, room_id, user, is_dm, msg):
                 valid = False
                 break
             if not step_legal(mp, cur, nxt,
-                              blocked_edges=mapmodel.blocked_edges(mp), footprint=side):
+                              blocked_edges=mapmodel.blocked_edges(mp), footprint=side,
+                              mode=mode):
                 valid = False
                 break
             candidate.append(nxt)
@@ -177,7 +244,8 @@ async def handle_move(ws, room_id, user, is_dm, msg):
         # No proposed route at all: DM drags/teleports and direct integrations.
         # (Interactive player moves always come with a confirmed preview path.)
         path = find_path(mp, origin, (tx, ty),
-                         blocked_edges=mapmodel.blocked_edges(mp), footprint=side)
+                         blocked_edges=mapmodel.blocked_edges(mp), footprint=side,
+                         mode=mode)
     if path is None:
         await send_to(ws, "error", {"msg": "No path there"})
         return
@@ -187,13 +255,14 @@ async def handle_move(ws, room_id, user, is_dm, msg):
 
     await _cancel_walk(tok["id"])
     _walks[tok["id"]] = asyncio.create_task(walk(room_id, tok["id"], path, mover_ws=ws,
-                                                 budget=budget))
+                                                 budget=budget, mode=mode))
     await _announce_move(room_id, tok["id"], True)
 
 
-async def walk(room_id, token_id, path, mover_ws=None, budget=None):
+async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk"):
     stop_reason = None
     spent = 0
+    has_riders = _carries_riders(token_id)          # D83: carry check, once per walk
     try:
         for i, (cx, cy) in enumerate(path):
             tok = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
@@ -217,9 +286,10 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None):
                 mp = get_map(room_id)
                 from_origin, side = footprint.occupied_origin(mp, tok)
                 legal = step_legal(mp, from_origin, (cx, cy),
-                                   blocked_edges=mapmodel.blocked_edges(mp), footprint=side)
+                                   blocked_edges=mapmodel.blocked_edges(mp), footprint=side,
+                                   mode=mode)
                 if legal and budget is not None:
-                    step_c = movecost.route_cost(mp, [from_origin, (cx, cy)], side)
+                    step_c = movecost.route_cost(mp, [from_origin, (cx, cy)], side, mode=mode)
                     if spent + step_c > budget:
                         stop_reason = "budget"        # the turn's movement is spent
                         legal = False
@@ -240,6 +310,8 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None):
                     await send_to(mover_ws, "error", {"msg": "Your path was blocked"})
                 break
             await broadcast_token_step(room_id, tok, x, y, cx, cy)
+            if has_riders:
+                await carry_riders(room_id, token_id)   # riders track every step
             reveals = tok["owner_user_id"] is not None
             async with map_lock(room_id):
                 mp = get_map(room_id)
@@ -272,8 +344,8 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None):
             if i < len(path) - 1:
                 await asyncio.sleep(STEP_DELAY)
         await _announce_move(room_id, token_id, False, stop_reason)
-        if spent:                                  # charge the turn's move meter (D74)
-            updated = CB.spend_move(room_id, token_id, spent)
+        if spent:                                  # charge the turn's move meter (D74,
+            updated = CB.spend_move(room_id, token_id, spent, mode=mode)   # D83 per-mode)
             if updated is not None:
                 await broadcast(room_id, "initiative", updated)
         # World growth happens at walk END (not per step): shifting the map
@@ -336,6 +408,10 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
     except (KeyError, ValueError, TypeError):
         await send_to(ws, "error", {"msg": "Invalid path preview"})
         return
+    mode, why = _mode_or_error(tok, msg)                 # D83
+    if why:
+        await send_to(ws, "error", {"msg": why})
+        return
     mp = get_map(room_id)
     origin, side = footprint.occupied_origin(mp, tok)
     tx, ty = footprint.clamp_origin(mp, (tx, ty), side)          # WORLD clamp (D72)
@@ -345,7 +421,7 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
         return
     path = find_path(mp, origin, (tx, ty),
                      blocked_edges=mapmodel.blocked_edges(mp), footprint=side,
-                     allowed_cells=allowed)
+                     allowed_cells=allowed, mode=mode)
     if path is None:
         await send_to(ws, "error", {"msg": "No path there"})
         return
@@ -354,19 +430,20 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
         request_id = int(request_id) if request_id is not None else None
     except (TypeError, ValueError):
         request_id = None
-    speed = _walk_speed(tok)
-    budget = movecost.walk_budget(speed)
-    cost = path_footprint_cost(mp, origin, path, side)
+    speed = _speeds(tok).get(mode, 0) or _walk_speed(tok)
+    budget = movecost.walk_budget(speed)                 # THE SSOT feet->squares
+    cost = path_footprint_cost(mp, origin, path, side, mode=mode)
     # During combat a listed token spends its TURN's remaining movement, not
     # the raw speed (D74). None = economy does not apply (no combat/unlisted/DM).
     init = CB.get_init(room_id)
-    remaining = CB.move_remaining(init, tok["id"]) if not is_dm else None
+    remaining = CB.move_remaining(init, tok["id"], mode) if not is_dm else None
     eff_budget = budget if remaining is None else remaining
     await send_to(ws, "path_preview", {
         "request_id": request_id,
         "token_id": tok["id"],
         "size": tok["size"] or "Medium",
         "w": side[0], "h": side[1],                    # D81: authoritative preview shape
+        "mode": mode,                                  # D83: the mode priced here
         "goal": {"cx": tx, "cy": ty},
         "path": [{"x": x, "y": y} for (x, y) in path],
         "cells": footprint.path_preview_cells(mp, side, [origin] + path),

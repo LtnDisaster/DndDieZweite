@@ -32,16 +32,20 @@ def terrain_mult(mp, x, y):
     return 2 if (t is not None and mapmodel.difficult(t)) else 1
 
 
-def route_cost(mp, route, footprint: int = 1):
+def route_cost(mp, route, footprint: int = 1, mode: str = "walk"):
     """5e cost of moving a footprint-sized token over `route` — WORLD cell
     origins starting WITH the current position, e.g. [origin] + path.
 
     Diagonals are classified by the origin shift and counted from the route
     start (never per segment). For footprints larger than one cell a step is
-    difficult if any newly entered cell is difficult terrain."""
+    difficult if any newly entered cell is difficult terrain. D83 mode:
+    "fly" pays no terrain multiplier (flying is not slowed by undergrowth);
+    the CONVERSION of feet to squares stays walk_budget() for every mode —
+    this is and stays the only cost rule in the stack."""
     from . import mapmodel
     from .footprint import wh
     w, h = wh(footprint)
+    fly = mode == "fly"
     total = 0
     diag = 0
     for prev, cur in zip(route, route[1:]):
@@ -54,7 +58,9 @@ def route_cost(mp, route, footprint: int = 1):
             diag += 1
         else:
             unit = 1
-        if (w, h) == (1, 1):
+        if fly:
+            mult = 1
+        elif (w, h) == (1, 1):
             mult = terrain_mult(mp, cur[0], cur[1])
         else:
             new = {(x, y) for x in range(cur[0], cur[0] + w)

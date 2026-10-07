@@ -1,11 +1,16 @@
-"""D82: token rotation is a VISUAL facing — persisted, broadcast, never the
-mechanical footprint.
+"""D82/D83: token rotation ORIENTS THE ENTITY — its mechanical footprint turns
+with it, re-anchored so the conceptual centre is preserved, and an illegal
+turn is rejected with everything intact.
 
 Pins: 0/90/180/270 normalization server-side; persistence + reconnect; a 2x4
-does NOT silently become 4x2 when the artwork turns; foreign/invalid requests
-rejected with the old facing intact; the Tactical draw applies ctx.rotate to
-the body but keeps text upright (static pin); and the real client tokenAt
-swaps the visual hit rect on 90/270 (node).
+at 90 degrees IS a 4x2 (footprint, not stored fw/fh — those stay the base);
+the re-anchor preserves the doubled centre exactly and is reversible; a turn
+into wall/overlap/bounds is refused and changes NOTHING; visual and mechanical
+dimensions stay independent under rotation; foreign/invalid requests rejected
+with the old facing intact; the Tactical draw rotates the body (BASE visual
+dims inside the transform — no double rotation) but keeps text upright
+(static pin); the real client tokenAt hit-tests the ORIENTED visual rect
+(node).
 """
 import json
 import pathlib
@@ -76,20 +81,93 @@ def test_rotation_normalization_is_server_side(client):
         assert tok_row(npc)["rot"] == 270                            # invalid kept old
 
 
-def test_rotation_never_rotates_the_mechanical_footprint(client):
-    """The explicit promise: a 2x4 collision rect stays 2x4 at the same cells
-    while the artwork is facing 90 degrees."""
+def test_rotation_orients_the_mechanical_footprint(client):
+    """D83: the entity turns — a 2x4 base facing 90 OCCUPIES a 4x2, stored
+    fw/fh stay the base 2x4, and the doubled centre is preserved exactly."""
     dm, player, code, _ = base_room(client)
     with ws_connect(client, dm, code) as ws:
         npc = npc_token(client, dm, code, ws, "Grinder", 10, 10, width=2, height=4)
         mp = state_of(client, dm, code)["grid"]
-        before = footprint.occupied_cells(mp, tok_row(npc))
+        row = tok_row(npc)
+        old_ox, old_oy = footprint.occupied_origin(mp, row)[0]
         ws.send_json({"type": "token_rotate", "token_id": npc, "degrees": 90})
         recv_until(ws, "token_rot")
     row = tok_row(npc)
-    assert (row["fw"], row["fh"]) == (2, 4)                 # NOT swapped to 4x2
-    assert footprint.occupied_cells(mp, row) == before
-    assert footprint.token_span(row) == (2, 4)
+    assert (row["fw"], row["fh"]) == (2, 4)                 # base shape unchanged
+    assert footprint.token_span(row) == (4, 2)              # EFFECTIVE is turned
+    new_ox, new_oy = footprint.occupied_origin(mp, row)[0]
+    assert (new_ox, new_oy) == (9, 11)                      # anchor_for_center
+    assert 2 * new_ox + 4 == 2 * old_ox + 2                 # x-centre preserved
+    assert 2 * new_oy + 2 == 2 * old_oy + 4                 # y-centre preserved
+    assert footprint.occupied_cells(mp, row) == {(x, y) for x in range(9, 13)
+                                                 for y in range(11, 13)}
+    assert (row["x"], row["y"]) == ((9 + .5) * mp["cell"], (11 + .5) * mp["cell"])
+
+
+def test_rotation_roundtrip_returns_to_the_exact_original(client):
+    """90 then 180 back: the deterministic floor re-anchor walks the entity
+    exactly home — no creep."""
+    dm, player, code, _ = base_room(client)
+    with ws_connect(client, dm, code) as ws:
+        npc = npc_token(client, dm, code, ws, "Mangler", 10, 10, width=2, height=4)
+        home = (tok_row(npc)["rot"] or 0, tok_row(npc)["x"], tok_row(npc)["y"])
+        ws.send_json({"type": "token_rotate", "token_id": npc, "degrees": 90})
+        recv_until(ws, "token_rot")
+        mid = (tok_row(npc)["x"], tok_row(npc)["y"])
+        ws.send_json({"type": "token_rotate", "token_id": npc, "degrees": 180})
+        recv_until(ws, "token_rot")
+    row = tok_row(npc)
+    assert mid != (home[1], home[2])                        # it DID move (re-centre)
+    assert (row["x"], row["y"]) == (home[1], home[2])       # and came home exactly
+
+
+def test_anchor_for_center_is_deterministic_and_parity_documented():
+    ac = footprint.anchor_for_center
+    assert ac((10, 10), (2, 4), (4, 2)) == (9, 11)          # both even: centre exact
+    assert ac((10, 10), (3, 7), (7, 3)) == (8, 12)          # both odd: centre exact
+    assert ac((10, 10), (3, 3), (3, 3)) == (10, 10)         # no-op
+    assert ac((10, 10), (1, 1), (3, 3)) == (9, 9)           # grow around centre
+    assert ac((10, 10), (1, 2), (2, 1)) == (9, 10)          # mixed parity: floor
+    assert abs((2 * 9 + 2) - (2 * 10 + 1)) <= 1            # centre shift <= half a cell
+
+
+def test_rotation_into_obstruction_is_rejected_wholly(client):
+    """A 2x4 flat against the world edge cannot turn upright sideways: the
+    oriented box would leave the map — rot, x/y and occupancy untouched."""
+    dm, player, code, _ = base_room(client)
+    st = state_of(client, dm, code)
+    with ws_connect(client, dm, code) as ws:
+        npc = npc_token(client, dm, code, ws, "Wedge", 0, 0, width=4, height=2)
+        mp = state_of(client, dm, code)["grid"]
+        before = tok_row(npc)
+        ws.send_json({"type": "token_rotate", "token_id": npc, "degrees": 90})
+        err = recv_until(ws, "error", fail_on_error=False)
+        assert "No room to turn" in err["payload"]["msg"]
+    after = tok_row(npc)
+    assert (after["rot"] or 0) == (before["rot"] or 0)
+    assert (after["x"], after["y"]) == (before["x"], before["y"])
+    assert footprint.occupied_cells(mp, after) == footprint.occupied_cells(mp, before)
+
+
+def test_rotation_into_another_token_is_rejected(client):
+    dm, player, code, _ = base_room(client)
+    with ws_connect(client, dm, code) as ws:
+        wide = npc_token(client, dm, code, ws, "Wide", 8, 10, width=4, height=2)
+        npc_token(client, dm, code, ws, "Blocker", 10, 12, width=1, height=1)
+        ws.send_json({"type": "token_rotate", "token_id": wide, "degrees": 90})
+        err = recv_until(ws, "error", fail_on_error=False)
+        assert "No room to turn" in err["payload"]["msg"]
+    assert (tok_row(wide)["rot"] or 0) == 0
+
+
+def test_visual_and_mechanical_stay_independent_under_rotation():
+    tok = _tok(4, 6, fw=2, fh=2, rot=90, size="Medium")
+    tok.update({"vw": 3, "vh": 7})
+    assert footprint.token_span(tok) == (2, 2)              # mech: square turns into itself
+    assert footprint.visual_span(tok) == (7, 3)             # visual: 3x7 turned 90
+    big = dict(tok, fw=2, fh=4)
+    assert footprint.token_span(big) == (4, 2)
+    assert footprint.visual_span(big) == (7, 3)             # independence pin
 
 
 def test_foreign_rotation_refused(client):
@@ -126,9 +204,12 @@ def test_tactical_rotates_body_but_not_text():
     label_at = loop.index("ctx.fillText(t.label,")
     assert restore_at < label_at                  # text drawn OUTSIDE the transform
     assert "rotDeg" in loop and "const rotDeg = (((t.rot | 0) % 360) + 360) % 360" in loop
-    assert "const [sw, sh]" not in loop           # rotation swap lives in tokenAt only
+    assert "const [sw, sh]" not in loop           # hit-testing lives in tokenAt only
+    assert "baseVisualSpan(t)" in loop            # D83: transform-space uses BASE dims
+    assert "visualSpan(" not in loop              # (oriented dims there = double rotation)
     at = src[src.index("function tokenAt"):src.index("function ownToken")]
-    assert "rotDeg % 180 === 90 ? [vh, vw] : [vw, vh]" in at
+    assert "const [sw, sh] = visualSpan(t);" in at    # D83: orientation lives in visualSpan
+    assert "rotDeg" not in at
 
 
 @pytest.mark.skipif(NODE is None, reason="node not available")

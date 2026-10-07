@@ -50,7 +50,7 @@ def _elev_passable(mp, old_cells, new_cells):
     return True
 
 
-def _step_valid(mp, old, new, side, be, elev_layer=None):
+def _step_valid(mp, old, new, side, be, elev_layer=None, fly=False):
     if not _valid_origin(mp, new, side):
         return False
     old_cells = {(x, y) for (x, y) in _cells(old, side) if mapmodel.in_world(mp, x, y)}
@@ -60,40 +60,44 @@ def _step_valid(mp, old, new, side, be, elev_layer=None):
             neighbor = (x - dx, y - dy)
             if neighbor in old_cells and frozenset((neighbor, (x, y))) in be:
                 return False
-    return _elev_passable(mp, old_cells, new_cells)
+    return fly or _elev_passable(mp, old_cells, new_cells)
 
 
-def _diagonal_valid(mp, old, new, side, be, elev_layer=None):
+def _diagonal_valid(mp, old, new, side, be, elev_layer=None, fly=False):
     dx = 1 if new[0] > old[0] else -1
     dy = 1 if new[1] > old[1] else -1
     mid_x = (old[0] + dx, old[1])
     mid_y = (old[0], old[1] + dy)
-    return (_step_valid(mp, old, mid_x, side, be, elev_layer) and
-            _step_valid(mp, mid_x, new, side, be, elev_layer) and
-            _step_valid(mp, old, mid_y, side, be, elev_layer) and
-            _step_valid(mp, mid_y, new, side, be, elev_layer))
+    return (_step_valid(mp, old, mid_x, side, be, elev_layer, fly) and
+            _step_valid(mp, mid_x, new, side, be, elev_layer, fly) and
+            _step_valid(mp, old, mid_y, side, be, elev_layer, fly) and
+            _step_valid(mp, mid_y, new, side, be, elev_layer, fly))
 
 
-def step_legal(mp, old, new, blocked_edges=None, footprint=1, elev=None):
+def step_legal(mp, old, new, blocked_edges=None, footprint=1, elev=None,
+               mode="walk"):
     """True if moving the footprint square from WORLD origin ``old`` to WORLD
     ``new`` is legal on the CURRENT grid. Single source of truth shared with
     ``find_path``: bounds, walls, blocked edges (closed doors) for every newly
     entered footprint cell, and the conservative diagonal mid-cell rule. The
     ``elev`` parameter is accepted for call compatibility; the elevation layer
-    is read from the authoritative map (D70/D72).
+    is read from the authoritative map (D70/D72). D83 mode: "fly" ignores the
+    elevation cliff gate (flying crosses the 1-unit drop rule) — walls, closed
+    doors and blocked edges stay in force for EVERY mode.
     """
     be = blocked_edges or set()
     side = wh(footprint)
+    fly = mode == "fly"
     dx, dy = new[0] - old[0], new[1] - old[1]
     if max(abs(dx), abs(dy)) != 1:
         return False
     if dx and dy:
-        return _diagonal_valid(mp, old, new, side, be)
-    return _step_valid(mp, old, new, side, be)
+        return _diagonal_valid(mp, old, new, side, be, fly=fly)
+    return _step_valid(mp, old, new, side, be, fly=fly)
 
 
 def find_path(mp, start, goal, max_steps=400, blocked_edges=None,
-              footprint=1, allowed_cells=None, elev=None):
+              footprint=1, allowed_cells=None, elev=None, mode="walk"):
     """Return list of ``(x, y)`` WORLD origins from start (exclusive) to goal
     (inclusive).
 
@@ -112,13 +116,17 @@ def find_path(mp, start, goal, max_steps=400, blocked_edges=None,
     def valid_origin(origin):
         return _valid_origin(mp, origin, side, allowed_cells)
 
+    fly = mode == "fly"                       # D83: no cliff gate, no rough penalty
+
     def step_valid(old, new):
-        return _step_valid(mp, old, new, side, be)
+        return _step_valid(mp, old, new, side, be, fly=fly)
 
     def diagonal_valid(old, new):
-        return _diagonal_valid(mp, old, new, side, be)
+        return _diagonal_valid(mp, old, new, side, be, fly=fly)
 
     def move_cost(old, new, base):
+        if fly:
+            return base
         if side == (1, 1):
             return base * 2 if mapmodel.difficult(mapmodel.terrain_at(mp, new[0], new[1])) else base
         old_cells = {(x, y) for (x, y) in _cells(old, side) if mapmodel.in_world(mp, x, y)}
@@ -171,7 +179,8 @@ def find_path(mp, start, goal, max_steps=400, blocked_edges=None,
     return path if len(path) <= max_steps else None
 
 
-def path_footprint_cost(mp, start, path, footprint=1):
+def path_footprint_cost(mp, start, path, footprint=1, mode="walk"):
     """Movement-cost units over an executed route — canonical 5e rule, see
-    app/movecost.py (SSOT): orthogonal 1, difficult 2, diagonals 1, 2, 1, 2..."""
-    return movecost.route_cost(mp, [start] + list(path), footprint)
+    app/movecost.py (SSOT): orthogonal 1, difficult 2, diagonals 1, 2, 1, 2...
+    D83 mode="fly" costs no terrain (see movecost.route_cost)."""
+    return movecost.route_cost(mp, [start] + list(path), footprint, mode=mode)

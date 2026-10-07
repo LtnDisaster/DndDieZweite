@@ -9,6 +9,13 @@ rectangular: ``width x height`` cells, derived by ``token_span`` — explicit
 kept for stored data and callers) or a ``(w, h)`` pair, so there is exactly ONE
 rectangle derivation in the whole stack; no caller may compute footprint cells
 from size on its own.
+
+D83: ROTATION ORIENTS THE ENTITY, so ``token_span`` returns the EFFECTIVE
+oriented box — a 3x7 at rot 90/270 IS a 7x3 for every consumer (occupancy,
+collision, A*, LOS, AoE). The stored ``fw``/``fh`` stay the BASE shape; the
+anchor convention plus ``anchor_for_center`` keeps the conceptual centre stable
+when the box turns. Visual bounds are oriented by the same rule, so visual and
+mechanical bounds always share their centre.
 """
 from . import mapmodel
 
@@ -51,9 +58,19 @@ def token_side(token):
     return side_for_size((token or {}).get("size"))
 
 
-def token_span(token):
-    """THE authoritative footprint shape: (width, height) in cells. Explicit
-    fw/fh columns win; None falls back to the square size-category side."""
+def orient(span, rot):
+    """(D83) A span seen through an entity orientation: 90/270 turn the box."""
+    w, h = wh(span)
+    try:
+        r = int(rot or 0)
+    except (TypeError, ValueError):
+        r = 0
+    return (h, w) if r % 180 == 90 else (w, h)
+
+
+def base_span(token):
+    """The UN-rotated stored shape (width, height). Only the rotation op and
+    UIs that show base-vs-effective need this — gameplay never does."""
     t = token or {}
     side = side_for_size(t.get("size"))
     try:
@@ -64,26 +81,55 @@ def token_span(token):
     return min(SPAN_LIMIT, max(1, w)), min(SPAN_LIMIT, max(1, h))
 
 
+def token_span(token):
+    """THE authoritative footprint shape: the EFFECTIVE ORIENTED box (D83).
+    Explicit fw/fh win over the size category, then the token's facing turns
+    the box (rot 90/270 => width and height swapped). Every consumer of
+    occupied_cells/origin automatically obeys rotation — no caller may
+    swap-by-rot anywhere else."""
+    return orient(base_span(token), (token or {}).get("rot"))
+
+
+def oriented_span(token):
+    """Intent-revealing alias of token_span (both THE effective box)."""
+    return token_span(token)
+
+
+def anchor_for_center(origin, outer, inner):
+    """(D83) THE centre-preserving anchor rule, integer-only: the top-left
+    anchor of ``inner`` placed so its centre matches ``outer``'s centre.
+    Floor division is the tie-break: with mixed parities the centre shifts by
+    at most half a cell toward the lower-right — deterministic, documented,
+    and no floating-point world coordinates anywhere. Used for rotation
+    re-anchoring AND carried riders."""
+    ox, oy = origin
+    ow, oh = wh(outer)
+    iw, ih = wh(inner)
+    return (ox + (ow - iw) // 2, oy + (oh - ih) // 2)
+
+
 def visual_span(token):
-    """THE authoritative VISUAL shape (D82): explicit vw/vh win, otherwise the
-    EFFECTIVE collision span — so every legacy token renders unchanged.
-    RENDERING ONLY: occupancy, collision, A*, LOS and AoE never call this;
-    their shape is token_span(). Visual bounds must never silently become
-    collision truth."""
+    """THE authoritative VISUAL shape (D82, oriented by D83): explicit vw/vh
+    win (turned by the same facing rule), otherwise the EFFECTIVE collision
+    span — so every legacy token renders unchanged. RENDERING ONLY: occupancy,
+    collision, A*, LOS and AoE never call this; their shape is token_span().
+    Visual bounds must never silently become collision truth."""
     t = token or {}
-    w, h = token_span(t)
+    w0, h0 = base_span(t)
     try:
-        vw = int(t.get("vw")) if t.get("vw") else w
-        vh = int(t.get("vh")) if t.get("vh") else h
+        vw = int(t.get("vw")) if t.get("vw") else w0
+        vh = int(t.get("vh")) if t.get("vh") else h0
     except (TypeError, ValueError):
-        return w, h
-    return min(SPAN_LIMIT, max(1, vw)), min(SPAN_LIMIT, max(1, vh))
+        vw, vh = w0, h0
+    return orient((min(SPAN_LIMIT, max(1, vw)), min(SPAN_LIMIT, max(1, vh))),
+                  t.get("rot"))
 
 
 def clean_rot(value):
     """Client-supplied facing -> degrees in {0, 90, 180, 270}, or None.
-    D82: discrete grid-friendly orientation, VISUAL ONLY — rotating a token
-    never rotates its mechanical footprint (a 2x4 stays a 2x4)."""
+    D83: the facing orients the WHOLE entity — token_span and visual_span turn
+    with it. A rotation that would drive the oriented box into illegal ground
+    is rejected by the rotation op, never sneakily relocated."""
     if value is None or value == "":
         return None
     try:
@@ -95,9 +141,9 @@ def clean_rot(value):
 
 
 def visual_cells(mp, token):
-    """Presentation cells of the visual rect, CENTERED on the mechanical
-    footprint center (the one visual anchoring rule). RENDER ONLY — callers
-    that need gameplay truth use occupied_cells()."""
+    """Presentation cells of the visual rect, CENTERED on the (oriented)
+    mechanical footprint center (the one visual anchoring rule, D83).
+    RENDER ONLY — callers that need gameplay truth use occupied_cells()."""
     origin, (w, h) = occupied_origin(mp, token)
     vw, vh = visual_span(token)
     cx = origin[0] + (w - vw) / 2
@@ -179,17 +225,39 @@ def owner_key(token):
     return ("token", token.get("id", -1))
 
 
+def mount_chain_ids(token, by_id, cap=16):
+    """(D83) The token itself plus its mount ancestors — the carrying chain.
+    Bounded and cycle-tolerant: tampered data loops stop at ``cap``."""
+    out, cur, depth = set(), token, 0
+    while cur is not None and depth <= cap:
+        cid = cur.get("id")
+        if cid in out:
+            break
+        out.add(cid)
+        cur = by_id.get(cur.get("mount_token_id"))
+        depth += 1
+    return out
+
+
 def collision_cells(mp, tokens, token):
     """Occupied cells that this token may not finish inside.
 
     Same-user tokens may overlap, preserving intentional friendly pass-through.
     Ownerless monster tokens are distinct entities and block one another.
+    D83: a mount and its (transitive) riders are ONE moving entity for
+    collision — a rider may never block its own mount's movement, and a
+    carried rider's latent cells are the mount's validity to answer for.
     """
     target_key = owner_key(token)
+    by_id = {t["id"]: t for t in tokens}
+    by_id.setdefault(token["id"], token)
+    target_chain = mount_chain_ids(token, by_id)
     occupied = set()
     for other in tokens:
         if other["id"] == token["id"] or owner_key(other) == target_key:
             continue
+        if other["id"] in target_chain or target_chain & mount_chain_ids(other, by_id):
+            continue                               # same mount/rider entity
         occupied.update(occupied_cells(mp, other))
     return occupied
 

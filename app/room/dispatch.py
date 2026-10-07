@@ -8,7 +8,8 @@ from .chat import handle_chat, handle_narrative
 from .combat import (handle_dash, handle_end_turn, handle_hp, handle_init_end,
                      handle_init_end_round, handle_init_next, handle_init_start,
                      handle_turn_mark)
-from .conditions import handle_cond_add, handle_cond_remove, handle_stand
+from .conditions import (handle_cond_add, handle_cond_remove,
+                            handle_knock_prone, handle_stand)
 from .death import handle_death_clear, handle_death_save
 from .doors import handle_door
 from .encounters import handle_spawn_encounter
@@ -107,6 +108,7 @@ HANDLERS = {
     "cond_add": handle_cond_add,
     "cond_remove": handle_cond_remove,
     "stand": handle_stand,
+    "knock_prone": handle_knock_prone,
     "token_span": handle_token_span,
     "token_visual": handle_token_visual,      # D82: presentation bounds only
     "token_rotate": handle_token_rotate,      # D82: visual facing only, never the footprint

@@ -96,7 +96,7 @@ async def door_toggled(room_id, actor_id, door):
     if opened:
         async with map_lock(room_id):
             mp = get_map(room_id)
-            for tok in db.q("SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens "
+            for tok in db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens "
                             "WHERE room_id=? AND owner_user_id IS NOT NULL", (room_id,)):
                 visible = los.visible_cells(mp, footprint.player_source_cells(mp, [tok]))
                 newly += mapmodel.reveal_cells(mp, visible)

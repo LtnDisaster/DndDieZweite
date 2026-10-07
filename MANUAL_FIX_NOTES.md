@@ -1,3 +1,42 @@
+# Sprint 17 — Spatial foundation (2026-10-07) — rotation orients footprints, carrying riders, movement modes, forced layer
+
+DECISIONS **D83** (supersedes D82's facing clause; the visual≠mechanical
+separation itself remains). Real browser findings fixed: rotation used to turn
+only the artwork, and the body sat top-left of a growing box.
+
+- **Oriented footprints:** `footprint.token_span()` is now the EFFECTIVE
+  oriented box (rot 90/270 swaps) — every consumer follows because they all
+  already went through `occupied_origin`. `base_span` = stored shape. The
+  renderer uses BASE visual dims inside its rotate transform (oriented dims
+  there would rotate the artwork twice — pinned). PARTIAL SELECT DUTY: room
+  token queries must carry `size, fw, fh, rot, mount_token_id` (8 sites).
+- **Centre rule:** `anchor_for_center` (integer floor rule) — rotation
+  re-anchors around the entity's centre instead of teleporting; 90→180 back
+  lands on the exact original pixel (pinned). Illegal turns are REFUSED whole
+  via the existing `valid_final_position`. The facing broadcast carries no
+  coordinates; the position update rides the filtered step channel (D63).
+- **Carrying:** `movement.carry_riders` re-centres (transitive) riders after
+  walk steps, DM teleports, forced moves and mount rotations; riders never
+  spend budget, `collision_cells` treats mount↔riders as one entity (a rider
+  can never block its mount); dismount re-homes via `find_valid_origin`;
+  nested chains propagate bounded.
+- **Modes:** one active mode per move op (`mode`, default walk); missing speed
+  refused; budgets are per-mode ledgers in `turn["move_by"]` charged in
+  movecost units (legacy top-level fields mirror the ACTIVE mode — pre-D83
+  readers unaffected); Dash doubles every mode once; fly ignores difficult
+  terrain + elevation cliffs (walls/doors/bounds unchanged); swim/climb are
+  data-only — the terrain registry has no water semantics and none was faked.
+- **Forced layer:** `moveforced.apply_forced_move` is now the ONLY position
+  write path (handler validates + delegates; static-pinned) — future
+  traps/interactions call it server-side; riders carried; still no budget
+  spent, and the VOLUNTARY downed gate correctly does not apply.
+  `knock_prone` (DM op + `knock_prone()` internal) applies the EXISTING D80
+  prone condition — one prone system.
+
+Known/deliberate: no mixed-mode step accounting (bounded per-mode ledgers
+instead); no mounted combat/costs/speed bonuses; no fall heights; edResize
+pin-loss stays pre-existing. Manual: MANUAL_BROWSER_CHECKLIST.md § D83.
+
 # Sprint 16 — Gameplay foundation (2026-10-07) — visual vs collision, rotation, objects, companions, mounts
 
 DECISIONS **D82**. Server stays the only authority for what a token occupies;

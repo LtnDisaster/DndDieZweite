@@ -90,7 +90,8 @@ function connectWS(code){
                      if (t){ t.vw = p.vw; t.vh = p.vh;          // D82: presentation bounds only
                        if (state.sel === p.token_id) renderSheet(t); } break; }
       case "token_rot": { const t = state.tokens.find(t => t.id === p.token_id);
-                     if (t){ t.rot = p.rot;                     // D82: visual facing only
+                     if (t){ t.rot = p.rot;                     // D83: the entity turns —
+                       if (p.x !== undefined){ t.x = p.x; t.y = p.y; }   // re-centred anchor rides along
                        if (state.sel === p.token_id) renderSheet(t); } break; }
       case "token_controller": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.controller_user_id = p.controller_user_id ?? null;   // D82 companion

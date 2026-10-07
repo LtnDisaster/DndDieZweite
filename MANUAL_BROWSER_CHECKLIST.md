@@ -121,9 +121,9 @@ BLOCKED until steps B1–B5 pass. Report, don't continue, on any failure.
    the token gets selected (presentation hit area; gameplay unaffected).
 8. Rotation ⟲/⟳: the body rotates in 90° steps — non-square visuals visibly
    swap orientation; square/circle visuals show a small gold facing wedge.
-   Labels, HP bars and condition dots stay upright. Footprint cells never
-   change; F5 keeps the facing. A 2×4 token turned to 90° still fits a
-   2-wide corridor and NOT a 4-wide gap — the footprint did not rotate.
+   Labels, HP bars and condition dots stay upright. D83: the FOOTPRINT turns
+   with the entity (see the D83 section below for the real checks); F5 keeps
+   the facing.
 9. DM map editor 🕹️ brush: place a Lever (op "toggle state"), close the
    editor. Players see the marker on explored ground.
 10. Player clicks the lever from across the map: "Walk up to it first".
@@ -146,7 +146,62 @@ BLOCKED until steps B1–B5 pass. Report, don't continue, on any failure.
     — the surroundings stay black until the DM reveals.
 15. NPC sheet → "Mounted on: rides <token>": assign, F5 — persists. Assign
     the reverse direction (mount rides its own rider): "riding cycle" refused.
-    Ride itself: refused. Tokens from another room: refused.
+    Ride itself: refused. Tokens from another room: refused. Carrying moved to
+    the D83 section below (Sprint 17).
+
+## ROTATION-ORIENTS / CARRYING / MODES / FORCED (D83 — Tactical only)
+
+GEOMETRY
+1. Give a token mechanical Footprint 3×7 (sheet) and an independent Visual
+   Size (e.g. 1×5): the artwork and the collision rect differ — select it and
+   watch the outline. F5: both persist.
+2. Confirm the artwork is CENTERED on the footprint (visual 1×5 on a 3×7:
+   symmetric overhang top/bottom, not hanging off a corner).
+3. Rotate 90° (⟳): the token stays on the same spot — the FOOTPRINT becomes
+   7×3 (select it; the collision outline proves it), the artwork turns with
+   it, and the doubled centre did not visibly jump.
+4. Rotate 180° back: the footprint is 3×7 again at the EXACT original cells.
+5. Walk a rotated 2×4 through a 2-wide corridor: it fits (still 2 wide — the
+   box turned back at 0/180 would not; check with ⟲/⟳ that 90 makes it 4×2
+   and the corridor preview then refuses).
+6. Rotate a wide token tight against a wall/another token: refused with "No
+   room to turn there" — old facing AND old position AND old cells intact.
+7. Visual 3×7 with mechanical 1×1: the artwork reaches over walls, but path
+   previews and finish checks still use only the 1 cell (walk it into a
+   one-cell corridor — it fits).
+
+MOUNT CARRYING
+8. Mount a rider on a mount (sheet "Mounted on"), then move the MOUNT (walk
+   or DM drag): the rider tracks every step, centred inside the mount.
+9. Move the mount through cells the rider sits on: never self-blocked.
+10. Unmount (—""): the rider is re-homed to a legal adjacent cell instead of
+    standing inside its former mount; move the mount again — rider stays put.
+11. Nested chain (A on B on C): moving C carries B and A; refresh keeps all
+    positions and relationships; cycles still refused (D82 pin).
+
+MOVEMENT MODES
+12. NPC with a fly speed: sheet shows Move-mode chips (🚶 walk / 🕊 fly ft).
+    Creature WITHOUT a speed: that mode is refused by the server even if the
+    client asked ("This creature has no fly speed").
+13. In combat on its turn: move while walk selected until the meter is spent;
+    switch to fly — fly has its own budget and still works; switch BACK to
+    walk: the walk meter is NOT refilled. Dash doubles every mode exactly
+    once; nothing else regenerates movement.
+14. Fly over a difficult-terrain strip / elevation cliff: costs 1 per square
+    and crosses the cliff; the same route on foot costs double / stops.
+    Flying still cannot cross walls or closed doors.
+
+FORCED MOVEMENT (DM panel / console)
+15. Push a token: it stops at the first illegal cell (wall/closed door/
+    occupied); pull moves toward the source; teleport may skip the path but
+    never an illegal destination.
+16. Target's move meter is UNCHANGED after any forced move (forced ≠ voluntary);
+    a DOWNED/incapacitated token can still be pushed or teleported by the DM.
+17. DM knocks a token prone ("knock_prone" op / future trap): it shows the
+    normal prone condition and must pay the normal Stand Up cost — the same
+    one prone system, no second one.
+
+No Diorama verification anywhere (out of scope by decision).
 16. Diorama shows none of the new UI/objects (out of scope, by design) and
     old data never shows anything new until the DM assigns it.
 
@@ -172,6 +227,8 @@ BLOCKED until steps B1–B5 pass. Report, don't continue, on any failure.
 
 ## History
 
+- Sprint 17: D83 section (rotation orients the footprint, carrying riders,
+  movement modes, forced layer, knock-prone). D82 rotation step adjusted.
 - Sprint 16: D82 section added (visual size / rotation / world objects /
   controller / mount, Tactical only). Diorama deliberately unchanged.
 - Sprint 12: BUILD CHECK added — `ReferenceError: gridOrigin is not defined`

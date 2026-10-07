@@ -18,7 +18,7 @@ def token_cell(tok, mp):
 
 
 def owned_tokens(room_id, user_id):
-    return db.q("SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens "
+    return db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens "
                 "WHERE room_id=? AND owner_user_id=?", (room_id, user_id))
 
 

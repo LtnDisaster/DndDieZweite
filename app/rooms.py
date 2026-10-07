@@ -641,9 +641,10 @@ def assign_char(code: str, body: AssignIn, request: Request):
         desired = footprint.origin_from_pixel(px, py, mp["cell"], mp)
         candidate = {"id": tok["id"] if tok else -1, "owner_user_id": user["id"],
                      "size": size, "fw": tok.get("fw") if tok else None,
-                     "fh": tok.get("fh") if tok else None, "x": px, "y": py}
+                     "fh": tok.get("fh") if tok else None, "x": px, "y": py,
+                     "rot": tok.get("rot") if tok else None}
         existing = [dict(r) for r in c.execute(
-            "SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens WHERE room_id=?",
+            "SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens WHERE room_id=?",
             (room["id"],)).fetchall()]
         origin = footprint.find_valid_origin(mp, candidate, desired, existing) or desired
         px, py = footprint.origin_pixels(origin, span, mp["cell"])

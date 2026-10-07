@@ -104,3 +104,65 @@ def test_forced_teleport_respects_legality_and_z(client):
         done = recv_until(ws, "forced_moved")["payload"]
         assert done["to"]["z"] == 2
     assert tok_pos(client, dm, code, tok) == (26, 12, 2)
+
+
+# ---------- D83: the operation is a reusable server-side LAYER ----------------
+import inspect as _inspect
+from app.room import combat as CB
+
+tok_row = lambda tid: db.q1("SELECT * FROM tokens WHERE id=?", (tid,))
+
+def test_handler_delegates_to_single_apply_layer():
+    """No parallel ad-hoc forced paths: the WS handler validates and delegates;
+    the ONLY position write lives in apply_forced_move (future traps call it
+    directly — never through a client)."""
+    from app.room import moveforced as MF
+    src = _inspect.getsource(MF)
+    assert hasattr(MF, "apply_forced_move")
+    handler = src[src.index("async def handle_forced_move"):]
+    assert "UPDATE tokens" not in handler            # zero writes in the handler
+    assert src.count("UPDATE tokens SET x=?, y=?, z=?") == 1
+
+
+def test_forced_move_consumes_no_budget(client):
+    """Pushing a token never charges anyone's move ledger."""
+    dm, player, code, _ = base_room(client)
+    with ws_connect(client, dm, code) as ws:
+        victim = add_npc(ws, "Pebble", cx=10, cy=10)
+        ws.send_json({"type": "init_start"})
+        recv_until(ws, "initiative")
+        ws.send_json({"type": "forced_move", "token_id": victim,
+                      "kind": "push", "tx": 13, "ty": 10})
+        recv_until(ws, "forced_moved")
+    room_id = tok_row(victim)["room_id"]
+    init = CB.get_init(room_id)
+    t = init.get("turn") or {}
+    by = (t.get("move_by") or {})
+    assert all(int(e["spent"]) == 0 for e in by.values())        # nobody paid
+    assert int(t.get("move_spent") or 0) == 0
+
+
+def test_knock_prone_uses_the_existing_condition(client):
+    dm, player, code, _ = base_room(client)
+    with ws_connect(client, dm, code) as ws:
+        npc = add_npc(ws, "Thug", cx=10, cy=10)
+        ws.send_json({"type": "knock_prone", "token_id": npc})
+        ev = recv_until(ws, "cond")["payload"]
+        assert any(c["k"].lower() == "prone" for c in ev["conds"])
+        assert "prone" in tok_row(npc)["conds"].lower()
+        # idempotent second knock: no second broadcast storm
+        ws.send_json({"type": "knock_prone", "token_id": npc})
+        ws.send_json({"type": "stand", "token_id": npc})          # DM stands it again
+        ev2 = recv_until(ws, "cond")["payload"]
+        assert not any(c["k"].lower() == "prone" for c in ev2["conds"])
+
+
+def test_knock_prone_is_dm_only(client):
+    dm, player, code, _ = base_room(client)
+    with ws_connect(client, dm, code) as ws:
+        npc = add_npc(ws, "Rogue", cx=10, cy=10)
+    with ws_connect(client, player, code) as ws:
+        ws.send_json({"type": "knock_prone", "token_id": npc})
+        err = recv_until(ws, "error", fail_on_error=False)
+        assert "DM only" in err["payload"]["msg"]
+    assert "prone" not in (tok_row(npc)["conds"] or "").lower()

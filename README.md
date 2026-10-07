@@ -127,12 +127,13 @@ manual movement and the DM map tools remain in the Tactical view.
   footprint to fit in open terrain; a Large token cannot use a one-cell corridor, and spawns or size
   changes find a valid nearby placement. Same-owner tokens may intentionally pass through/overlap each
   other, while different tokens cannot finish overlapping.
-- **Visual size & facing** (D82): a token may carry a separate VISUAL width/height in cells
-  (sheet "Visual Size") and a facing of 0/90/180/270 (sheet Rotation). Both are RENDERING ONLY —
-  they change how big and which way the token is drawn (Tactical), never which cells it occupies.
-  A 2×2 ogre can wear 3×7 artwork and face east while still colliding as 2×2; the visual rect is
-  centered on the footprint, clicking the artwork selects the token, and the collision outline
-  appears when selected/editing/debugging. Rotating the art never turns the mechanical footprint.
+- **Visual size & facing** (D82, oriented by D83): a token may carry a separate VISUAL width/height
+  in cells (sheet "Visual Size") and a facing of 0/90/180/270 (sheet Rotation). The facing
+  ORIENTS THE ENTITY — its mechanical footprint turns with it (a 3×7 facing east occupies 7×3),
+  re-centred on the same spot; a turn that would collide is refused outright. Visual and
+  mechanical sizes stay INDEPENDENT: a 2×2 ogre can wear 3×7 artwork, the visual rect is
+  centred on the (oriented) footprint, clicking the artwork selects the token, and the
+  collision outline appears when selected/editing/debugging.
 - **World objects** (D82): the map editor's 🕹️ brush places generic levers/switches/chests. An
   object's interaction is DATA driving one allowlisted server operation — flip a boolean state, or
   open/close an existing linked door (same door rules: locked resists, secret stays secret). No
@@ -141,7 +142,13 @@ manual movement and the DM map tools remain in the Tactical view.
   player moves it, takes its turn, casts through it and opens doors next to it, while the DM keeps
   full authority and the assignment is revocable. A controller is not an owner and not an account,
   and a controlled token reveals no fog. Separately, a token can be marked as RIDING another
-  token (acyclic, same room); this relationship layer ships without carrying movement for now.
+  token (acyclic, same room); a moving mount CARRIES its riders (D83) — riders spend no own
+  movement and never block their mount, while mounted combat rules stay out of scope.
+- **Movement modes** (D83, foundation): creatures can have walk/fly/swim/climb allowances
+  (NPC stat blocks). One mode is active per move (sheet chips); each mode has its own per-turn
+  budget in the SAME square units (a mode switch never refunds anything). Flying ignores
+  difficult terrain and elevation cliffs — walls and closed doors still apply to everything.
+  Swim/climb are stored and budgeted but the world has no water/climb terrain semantics yet.
   **Sight is per-viewer**: a viewer only receives live token data when at least one footprint cell is
   currently visible under server LOS.
   Anything outside simply never arrives — no `step`, no `token_add`. When a token a viewer

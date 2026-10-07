@@ -64,7 +64,7 @@ async def ws_room(ws: WebSocket, code: str):
     socks.add(ws)
     mpj = get_map(room_id)
     newly = []
-    for tk in db.q("SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens WHERE room_id=? AND owner_user_id=?",
+    for tk in db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens WHERE room_id=? AND owner_user_id=?",
                    (room_id, user["id"])):
         newly += _reveal_token(mpj, tk)
     if newly:

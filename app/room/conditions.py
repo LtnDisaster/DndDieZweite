@@ -87,3 +87,29 @@ async def handle_stand(ws, room_id, user, is_dm, msg):
     await broadcast(room_id, "cond", {"token_id": tok["id"], "conds": new})
     if cost:
         await broadcast(room_id, "initiative", CB.get_init(room_id))
+
+
+async def knock_prone(room_id, tok, actor="DM"):
+    """(D83) THE server-side knock-prone operation — it applies the EXISTING
+    prone condition (D80), never a second prone representation. Traps and
+    allowlisted interactions call this directly; no client can reach it
+    except through the DM-gated handler. No fall damage, no height math:
+    that is the later elevation sprint."""
+    conds = C.add(C.load(tok), "prone", 0, "")
+    db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), tok["id"]))
+    sys_msg(room_id, f"{tok['label']} is knocked prone ({actor}).")
+    await broadcast(room_id, "cond", {"token_id": tok["id"], "conds": conds})
+    return conds
+
+
+async def handle_knock_prone(ws, room_id, user, is_dm, msg):
+    """DM entry point for the generic forced-state operation (D83)."""
+    if not is_dm:
+        return await send_to(ws, "error", {"msg": "DM only"})
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return await send_to(ws, "error", {"msg": "Unknown token"})
+    if any(c["k"].lower() == "prone" for c in C.load(tok)):
+        return                                   # idempotent, no broadcast storm
+    await knock_prone(room_id, tok, actor=user["username"] if user else "DM")

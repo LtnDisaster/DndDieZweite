@@ -20,24 +20,49 @@ const state = { me:null, room:null, roomDeleted:false, ws:null, online:new Set()
                   viewMode:"tactical" };
 const VISION_R = 6;
 const SIZE_FOOTPRINT = { Tiny:1, Small:1, Medium:1, Large:2, Huge:3, Gargantuan:4 };
-/* D81: THE client footprint derivation — server fw/fh win, category is the
-   square fallback. Never derive width/height anywhere else. */
+/* D81/D83: THE client footprint derivation — server fw/fh win, category is
+   the square fallback, and the token's facing ORIENTS the box (rot 90/270
+   swaps w/h: the entity turns, its mechanical footprint turns with it).
+   Mirror of footprint.token_span — never derive width/height elsewhere. */
 function tokenSpan(t){
   const s = SIZE_FOOTPRINT[(t && t.size) || "Medium"] || 1;
   const w = (t && +t.fw > 0) ? Math.min(10, +t.fw) : s;
   const h = (t && +t.fh > 0) ? Math.min(10, +t.fh) : s;
-  return [w, h];
+  return (((t && t.rot | 0) % 360 + 360) % 360) % 180 === 90 ? [h, w] : [w, h];
+}
+/* D83: base_span mirror — the UN-rotated stored box. Needed by the renderer,
+   which applies ctx.rotate() itself (feeding it an oriented span would turn
+   the artwork twice). Hit tests use visualSpan (screen space) instead. */
+function baseSpan(t){
+  const s = SIZE_FOOTPRINT[(t && t.size) || "Medium"] || 1;
+  return [(t && +t.fw > 0) ? Math.min(10, +t.fw) : s,
+          (t && +t.fh > 0) ? Math.min(10, +t.fh) : s];
+}
+function baseVisualSpan(t){
+  const s = baseSpan(t);
+  return [(t && +t.vw > 0) ? Math.min(10, +t.vw) : s[0],
+          (t && +t.vh > 0) ? Math.min(10, +t.vh) : s[1]];
+}
+/* D83 movement modes — client mirror of gear.clean_speeds for UI (walk chips
+   etc). Authoritative budgets are server-side (combat.move_remaining). */
+function tokenSpeeds(t){
+  const n = (t && t.npc) || {};
+  const m = (typeof state !== "undefined" && state.room && t)
+    ? state.room.members.find(x => x.user_id === t.owner_user_id) : null;
+  const walk = +n.speed || (m && m.char && +m.char.speed) || 30;
+  return { walk: walk, fly: +n.fly || 0, swim: +n.swim || 0, climb: +n.climb || 0 };
 }
 /* D82: VISUAL bounds ≠ MECHANICAL OCCUPANCY. tokenSpan() stays the gameplay
    truth (client mirror of footprint.token_span); visualSpan() is THE single
-   presentation derivation — explicit vw/vh win, otherwise the effective
-   mechanical span, so legacy tokens render unchanged. Never use visualSpan
-   for occupied cells, collision or planning — the server owns those. */
+   presentation derivation — explicit vw/vh win per axis, otherwise the base
+   mechanical span, and the facing orients the pair (D83, mirroring
+   footprint.visual_span). Never use visualSpan for occupied cells, collision
+   or planning — the server owns those. */
 function visualSpan(t){
-  const s = tokenSpan(t);
-  const w = (t && +t.vw > 0) ? Math.min(10, +t.vw) : s[0];
-  const h = (t && +t.vh > 0) ? Math.min(10, +t.vh) : s[1];
-  return [w, h];
+  const s = baseSpan(t);
+  const vw = (t && +t.vw > 0) ? Math.min(10, +t.vw) : s[0];
+  const vh = (t && +t.vh > 0) ? Math.min(10, +t.vh) : s[1];
+  return (((t && t.rot | 0) % 360 + 360) % 360) % 180 === 90 ? [vh, vw] : [vw, vh];
 }
 
 /* Client mirrors of app/gear.py for previewing bonuses (server re-computes authoritatively). */

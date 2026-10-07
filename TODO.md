@@ -4,7 +4,7 @@ Living checklist. "Done" = shipped and covered by an in-repo test.
 Verify state with:
 
 ```bash
-docker compose run --rm test                     # CANONICAL: pinned py3.12 image — Sprint 16 close: 417 passed + 14 skipped (run with --build if the image predates the tests!)
+docker compose run --rm test                     # CANONICAL: pinned py3.12 image — Sprint 17 close: 442 passed + 14 skipped (run with --build if the image predates the tests!)
 ./.venv/bin/python -m pytest                     # dev-host run (py3.14 venv) — GREEN at Sprint 16 close (431 collected)
 ./.venv/bin/python -m compileall -q app          # byte-compile check
 for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
@@ -22,7 +22,11 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [x] Visual size & rotation as pure presentation (`vw/vh/rot`, visual ≠ occupancy, D82)
 - [x] World objects: data-driven allowlisted ops incl. linked doors (`interact`, D82)
 - [x] Generic controller relationship (`authz.controls()`, companion foundation, D82)
-- [x] Acyclic mount relationship (relationship layer only, D82; carrying movement = open)
+- [x] Acyclic mount relationship (relationship layer only, D82)
+- [x] Rotation ORIENTS the mechanical footprint, centre-preserved, illegal turns refused (D83, supersedes D82 facing clause)
+- [x] Mount carrying: riders follow walk/teleport/forced/rotation, no own budget, collision-exempt pair, dismount re-home (D83)
+- [x] Movement modes walk/fly/swim/climb: per-mode turn ledgers, fly = no difficult/cliff, swim/climb data-only foundation (D83)
+- [x] Forced movement extracted to one server-side layer + riders carried; knock_prone op on the existing prone condition (D83)
 
 ## Done — maintainability / security / testing refactor (2026-09-29)
 - [x] Backend split `app/room/*` behind a thin `ws.py` + re-export shim (D16); live suites unchanged

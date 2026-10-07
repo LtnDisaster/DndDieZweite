@@ -807,11 +807,33 @@ function wireVisualRow(tok){
 }
 function _rotRowHtml(tok){
   const rot = (((tok.rot | 0) % 360) + 360) % 360;
-  return `<div class="row" title="Visual facing — rotates the ARTWORK only. The Footprint (occupied cells) never changes.">`
+  return `<div class="row" title="Facing (D83): the entity turns — its mechanical footprint and visual bounds turn with it, re-centred on the same spot. An impossible turn is refused.">`
     + `<span class="tiny"><b>Rotation</b></span>`
     + `<button id="rot-left" title="Rotate 90° left">⟲</button><span class="tiny">${rot}°</span>`
     + `<button id="rot-right" title="Rotate 90° right">⟳</button>`
     + `<button id="rot-reset" title="Face north (0°)">0°</button></div>`;
+}
+/* D83: movement-mode chips — only modes the creature actually HAS are shown.
+   One active mode per move; the server prices each mode from its own budget
+   and refuses switching tricks. */
+function _moveModeRowHtml(tok){
+  const sp = tokenSpeeds(tok);
+  const modes = ["walk","fly","swim","climb"].filter(m => m === "walk" || sp[m] > 0);
+  if (modes.length < 2) return "";
+  state.moveMode = state.moveMode || {};
+  const act = state.moveMode[tok.id] || "walk";
+  return `<div class="row" title="Movement mode for your next move/preview (D83). Each mode has its own per-turn budget; switching never refunds spent units.">`
+    + `<span class="tiny"><b>Move mode</b></span>`
+    + modes.map(m => `<button data-mode="${m}" style="${m===act?"outline:2px solid #d4a017":""}">`
+        + `${m==="walk"?"🚶":m==="fly"?"🕊":m==="swim"?"🌊":"🧗"} ${m} ${sp[m]||sp.walk}ft</button>`).join("")
+    + `</div>`;
+}
+function wireMoveModeRow(tok){
+  document.querySelectorAll("[data-mode]").forEach(b => {
+    b.onclick = () => { state.moveMode = state.moveMode || {};
+                        state.moveMode[tok.id] = b.dataset.mode;
+                        renderSheet(tok); };
+  });
 }
 function wireRotRow(tok){
   const l = $("rot-left"); if (!l) return;
@@ -849,7 +871,7 @@ function renderSheet(tok){
   }
   const mod = v => { const m2 = Math.floor(((v||10)-10)/2); return (m2>=0?"+":"")+m2; };
   const isDM = state.room.role === "dm", own = tok.owner_user_id === state.me.id;
-  const spanRow = (isDM || own) ? _spanRowHtml(tok) + _visualRowHtml(tok) + _rotRowHtml(tok) : "";
+  const spanRow = (isDM || own) ? _spanRowHtml(tok) + _visualRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) : "";
   const ac = ch.ac_total != null ? ch.ac_total : ch.ac;
   const inv = (ch.items || []);
   const invRows = inv.map(it => {
@@ -926,7 +948,7 @@ function renderSheet(tok){
   wireDeath(tok);
   wireSpanRow(tok);
   wireVisualRow(tok);
-  wireRotRow(tok);
+  wireRotRow(tok); wireMoveModeRow(tok);
   $("hp-btns").classList.toggle("hidden", state.room.role !== "dm" || !tok.character_id);
   $("hp-adv").classList.toggle("hidden", state.room.role !== "dm");
   function v(s,k){ const x = s && s[k]; return typeof x === "number" ? x : 10; }
@@ -969,7 +991,7 @@ function renderNpcSheet(tok){
     const d = n.spell_slots[String(lv)] || n.spell_slots[lv] || {max:0};
     slotCells.push(`<label class="slotcell">L${lv}<input class="npc-slot" data-lv="${lv}" type="number" min="0" max="9" value="${d.max||0}" style="width:36px"></label>`);
   }
-  body.innerHTML = _spanRowHtml(tok) + _visualRowHtml(tok) + _rotRowHtml(tok) + `
+  body.innerHTML = _spanRowHtml(tok) + _visualRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) + `
     <div class="row"><input id="npc-name" placeholder="NPC name" value="${esc(tok.label)}" maxlength="32">
       <select id="npc-size">${["Tiny","Small","Medium","Large","Huge","Gargantuan"].map(s => `<option value="${s}" ${(tok.size||"Medium")===s?"selected":""}>${s}</option>`).join("")}</select>
       <select id="npc-disp"><option value="">neutral</option>${["friend","neutral","hostile"].map(d => `<option value="${d}" ${(tok.disposition||"")===d?"selected":""}>${d}</option>`).join("")}</select>
@@ -1104,7 +1126,7 @@ function renderNpcSheet(tok){
   $("npc-to-best").onclick = () => saveNpcToBestiary(n, ($("npc-name").value || "NPC").slice(0,32), tok);
   wireSpanRow(tok);
   wireVisualRow(tok);
-  wireRotRow(tok);
+  wireRotRow(tok); wireMoveModeRow(tok);
   renderNpcSpells(tok);
   renderNpcAttacks(tok);
   renderNpcAbilities(tok);

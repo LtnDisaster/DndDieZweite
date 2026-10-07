@@ -3,8 +3,9 @@ import re
 
 from .. import db, footprint, mapmodel, npc
 from . import movement
-from .net import broadcast, get_map, send_to, sys_msg
-from .visibility import broadcast_token_add, forget_token
+from .net import broadcast, get_map, map_lock, send_to, sys_msg
+from .visibility import (broadcast_token_add, broadcast_token_step,
+                         forget_token)
 
 WALL = "#95a5a6"
 
@@ -51,7 +52,7 @@ def _clean_pos(msg):
 def _place_token(mp, token, x, y):
     side = footprint.token_span(token)
     desired = footprint.origin_from_pixel(x, y, mp["cell"], mp)
-    existing = db.q("SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens WHERE room_id=?",
+    existing = db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens WHERE room_id=?",
                     (token.get("room_id"),))
     origin = footprint.find_valid_origin(mp, token, desired, existing)
     if origin is None:
@@ -60,7 +61,7 @@ def _place_token(mp, token, x, y):
 
 
 def _room_token_rows(room_id):
-    return db.q("SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens WHERE room_id=?",
+    return db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens WHERE room_id=?",
                 (room_id,))
 
 
@@ -121,11 +122,14 @@ async def handle_token_visual(ws, room_id, user, is_dm, msg):
 
 
 async def handle_token_rotate(ws, room_id, user, is_dm, msg):
-    """Facing operation (D82): owner (or DM) sets the VISUAL orientation to
-    0/90/180/270 degrees. Presentation only: the mechanical footprint is
-    explicitly NOT rotated — a 2x4 collision rect never silently becomes
-    4x2 because the artwork turned. Mechanical rotation would be a future
-    explicit mechanic, not a side effect of this path."""
+    """Facing operation (D82, REWORKED BY D83): rotation orients the ENTITY,
+    so its MECHANICAL footprint turns with the artwork (3x7 at 90 IS a 7x3).
+    The anchor is re-centred through footprint.anchor_for_center — the entity
+    turns around its conceptual centre instead of teleporting. If the oriented
+    box would not fit there (bounds, blocking terrain, illegal overlap), the
+    rotation is REJECTED: previous rotation, position and footprint untouched.
+    The turn shift is part of the facing op, not movement — it never touches
+    the movement budget."""
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
                 (msg.get("token_id", -1), room_id))
     if tok is None:
@@ -139,8 +143,29 @@ async def handle_token_rotate(ws, room_id, user, is_dm, msg):
         return
     if (tok.get("rot") or 0) == rot:
         return                                   # idempotent, no broadcast storm
-    db.x("UPDATE tokens SET rot=? WHERE id=?", (rot, tok["id"]))
-    await broadcast(room_id, "token_rot", {"token_id": tok["id"], "rot": rot})
+    await movement._cancel_walk(tok["id"])       # never race a walk's step writes
+    async with map_lock(room_id):
+        mp = dict(get_map(room_id))
+        mp["room_id"] = room_id
+        candidate = {**tok, "rot": rot}
+        old_origin, old_span = footprint.occupied_origin(mp, tok)
+        new_origin = footprint.anchor_for_center(old_origin, old_span,
+                                                 footprint.oriented_span(candidate))
+        if not footprint.valid_final_position(mp, candidate, new_origin,
+                                              _room_token_rows(room_id)):
+            return await send_to(ws, "error", {"msg": "No room to turn there — the "
+                                                      "oriented footprint would collide"})
+        x, y = footprint.origin_pixels(new_origin, footprint.token_span(candidate),
+                                       mp["cell"])
+        db.x("UPDATE tokens SET rot=?, x=?, y=? WHERE id=?", (rot, x, y, tok["id"]))
+        # D63 leak-parity: the facing broadcast carries NO coordinates — the
+        # re-centring move rides the visibility-filtered step channel, so a
+        # viewer who cannot see this token learns nothing about where it went.
+        await broadcast(room_id, "token_rot", {"token_id": tok["id"], "rot": rot})
+        tok["rot"], tok["x"], tok["y"] = rot, x, y
+        await broadcast_token_step(room_id, tok, x, y, new_origin[0], new_origin[1])
+        if movement._carries_riders(tok["id"]):
+            await movement.carry_riders(room_id, tok["id"])   # riders track the turn
 
 
 async def handle_token_controller(ws, room_id, user, is_dm, msg):
@@ -180,9 +205,10 @@ async def handle_token_mount(ws, room_id, user, is_dm, msg):
     """DM assigns or clears the MOUNT of a token (D82). A rider rides at most
     one mount; the relationship MUST stay acyclic — assigning is rejected when
     it would close a cycle (A rides B riding A, or longer chains). Same-room
-    only. This is the pure RELATIONSHIP: carrying movement (a mount moving
-    its riders) is a separate mechanic and deliberately not silently half-
-    implemented here."""
+    only. D83 CARRYING: while mounted, the rider's position follows the
+    mount's moves (movement.walk / DM teleport / forced movement / rotation
+    re-centre it inside the mount — riders spend no own budget); clearing the
+    mount re-homes the rider to a legal nearby position deterministically."""
     if not is_dm:
         await send_to(ws, "error", {"msg": "DM only"})
         return
@@ -217,8 +243,27 @@ async def handle_token_mount(ws, room_id, user, is_dm, msg):
             hops += 1
     if tok.get("mount_token_id") == mid:
         return                                   # idempotent, no broadcast storm
+    was_mounted = tok.get("mount_token_id")
     db.x("UPDATE tokens SET mount_token_id=? WHERE id=?", (mid, tok["id"]))
     await broadcast(room_id, "token_mount", {"token_id": tok["id"], "mount_token_id": mid})
+    if was_mounted is not None and mid is None:
+        # D83 carrying: dismounted, the rider is no longer carried — its last
+        # centre-inside-the-mount position can now sit inside the (now foreign)
+        # mount. Deterministically re-home it via the existing placement spiral
+        # instead of leaving it mechanically illegal.
+        async with map_lock(room_id):
+            mp = get_map(room_id)
+            tok = {**tok, "mount_token_id": None}       # validate as UNMOUNTED
+            origin, span = footprint.occupied_origin(mp, tok)
+            if not footprint.valid_final_position(mp, tok, origin,
+                                                  _room_token_rows(room_id)):
+                good = footprint.find_valid_origin(mp, tok, origin,
+                                                   _room_token_rows(room_id))
+                if good is not None:
+                    x, y = footprint.origin_pixels(good, span, mp["cell"])
+                    db.x("UPDATE tokens SET x=?, y=? WHERE id=?", (x, y, tok["id"]))
+                    tok["x"], tok["y"] = x, y
+                    await broadcast_token_step(room_id, tok, x, y, good[0], good[1])
 
 
 async def handle_add_token(ws, room_id, user, is_dm, msg):

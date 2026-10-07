@@ -1135,7 +1135,7 @@ token. The sheet's labelled Footprint W/H + Apply row is the single edit path
 for every controllable token. Render-loop code must not shadow the viewport
 `w`/`h` names (the 15B invisibility incident, pinned in `test_sprint15b.py`).
 
-## D82 — Visual bounds, facing, controllers and mounts are separate from mechanical truth
+## D82 — Visual bounds, facing, controllers and mounts are separate from mechanical truth  (FACING CLAUSE SUPERSEDED BY D83: rotation now ORIENTS the mechanical footprint too, centre-preserved; the visual≠mechanical separation itself remains)
 
 The tactical board has been showing a token's MECHANICAL footprint ever since
 D81/D82-15B made it a first-class value — which forces false trade-offs: a
@@ -1212,6 +1212,89 @@ executable code. Diorama (out of scope in this sprint) ignores the new axes
 and keeps its old behavior; Tactical is the reference renderer that got the
 feature. Hidden NPC tokens leak none of the new fields (vw/vh/rot/controller),
 parity with the D81 geometry-leak guard.
+
+## D83 — Rotation orients the entity (footprint included); centre-preserving anchors; riders are carried; per-mode move ledgers
+
+Supersedes D82's facing clause after a REAL browser result: "rotation rotates
+the visible token but not its mechanical footprint" and "the visual sits at
+the top-left of the footprint" were wrong for entities. D82's VISUAL≠MECHANICAL
+separation stays — the two boxes are still independent sizes; what changed is
+that both are now ORIENTED by the same facing and SHARE a centre.
+
+**Orientation.** `footprint.orient(span, rot)`; `token_span()` now returns the
+EFFECTIVE oriented box (a 3x7 at 90/270 IS a 7x3) — occupancy, collision, A*,
+LOS, traps, AoE, preview and path validation all follow automatically because
+every consumer already goes through `token_span`/`occupied_origin`. `base_span`
+is the un-rotated stored shape for the rotation op and UIs. `visual_span`
+orients vw/vh by the same rule. No caller anywhere may swap width/height by
+rotation itself; the client mirrors the same two functions (and the renderer
+uses BASE visual dimensions inside its `ctx.rotate` transform — feeding it
+oriented dims would rotate the artwork twice).
+
+**Centre convention (integer-only).** World coordinates stay pixel+cell
+integers. THE rule is `anchor_for_center(origin, outer, inner)`:
+`anchor + (outer−inner)//2` per axis (floor is the documented tie-break; a
+mixed-parity turn moves the doubled centre by exactly one half-cell). Reuses:
+rotation re-anchoring (the entity turns around its centre instead of
+teleporting), carried riders (rider centred inside the mount's oriented box),
+and the visual centring that D82 already had. 90-then-180 back lands on the
+EXACT original pixel — pinned.
+
+**Rotation is validated.** The rotation op (owner-or-DM as before) cancels any
+walk, computes the new anchor, and runs the EXISTING `valid_final_position`
+check; an illegal turn (bounds, blocking terrain, overlap) is rejected with
+rotation, position and footprint fully intact — the server never rotates and
+relocates to make it fit. The facing broadcast carries NO coordinates (D63
+leak-parity); the re-centring move rides the visibility-filtered step channel.
+
+**Mechanical partial SELECTs must carry `rot`.** Eight room-wide token SELECTs
+feed collision/LOS/spawn — any geometry column omitted silently un-rotates
+that subsystem. `rot` (and `mount_token_id`) are now part of that required
+column set; new geometry columns must be added to all of them.
+
+**Mount carrying.** A moving mount (authoritative walk, DM teleport, forced
+movement, rotation re-centre) carries its riders: `movement.carry_riders`
+re-centres every transitive rider with `anchor_for_center` and broadcasts
+through the filtered step channel. Riders NEVER spend their own movement (the
+carried footprint is latent: the mount's legal position is their position, and
+`footprint.collision_cells` treats mount↔riders as ONE entity so a rider can
+never block its own mount). Nested chains propagate top-down, bounded and
+cycle-tolerant; the assignment-time cycle guard stays the real protection.
+Dismounting re-homes the rider deterministically via `find_valid_origin`.
+Mounted combat rules, mount/dismount action costs and speed bonuses remain
+out of scope.
+
+**Movement modes are a bounded FOUNDATION.** `gear.clean_speeds`
+(walk/fly/swim/climb) was already the data SSOT; `movecost.walk_budget` stays
+the ONLY feet→squares conversion — per mode. One active mode per movement
+operation (a creature's missing mode is refused, never substituted). The turn
+object gained per-mode ledgers `move_by {mode:{total,spent}}`; the legacy
+top-level `move_total/move_spent` mirror the ACTIVE mode, so every pre-D83
+reader keeps working. Switching modes can only spend each mode's own
+remaining budget — the per-turn ceiling is sum(mode budgets) plus ONE Dash,
+which now doubles every mode exactly once behind the spent Action. No
+step-wise mixed-mode accounting (would need a combat redesign; refused).
+Fly ignores difficult terrain and the elevation cliff gate while still
+respecting walls, closed doors, blocked edges and world bounds. Swim/climb
+ship as DATA ONLY — the terrain registry has no water or climbable semantics
+and inventing fake terrain rules was explicitly declined.
+
+**Forced movement is its own operation layer.** `moveforced.apply_forced_move`
+is the single server-side entry (handler now validates and delegates; zero
+position writes outside it). Traps and future allowlisted interactions call
+it directly, never impersonating a player. It still spends no voluntary
+budget and is not gated by the downed/incapacitated VOLUNTARY movement gate.
+`knock_prone` (D83, DM entry) applies the EXISTING D80 prone condition — one
+prone representation — for future trap/fall hooks; no height math, no damage
+tables (elevation sprint territory).
+
+Invariant summary — VISUAL SIZE ≠ MECHANICAL FOOTPRINT (sizes independent);
+ROTATION ORIENTS THE ENTITY AND THEREFORE ITS MECHANICAL FOOTPRINT; VISUAL
+AND MECHANICAL BOUNDS SHARE A CONCEPTUAL CENTRE; `occupied_cells(token)`
+REMAINS GAMEPLAY TRUTH; FORCED MOVEMENT ≠ VOLUNTARY MOVEMENT; CONTROLLER ≠
+OWNER; MOUNT RELATIONSHIP ≠ CONTROLLER RELATIONSHIP; CARRIED RIDER DOES NOT
+SPEND PERSONAL MOVEMENT. Diorama untouched as ever; Tactical is the
+reference renderer.
 
 ## Cross-cutting assumptions (read before scaling)
 - Single uvicorn process, single event loop; `LOOP` captured in `main.py` for thread-safe broadcasts.

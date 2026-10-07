@@ -77,6 +77,18 @@ def token_speed_ft(tok):
     return _walk_speed(tok)
 
 
+def _mode_budgets(tok):
+    """(D83) Per-mode turn budgets in movecost UNITS, derived ONLY through
+    movecost.walk_budget() — the same SSOT conversion as the walk budget.
+    Modes with 0 speed do not exist for the creature. The top-level
+    move_total/move_spent stay the VIEW of the turn's ACTIVE mode (walk
+    default) — pre-D83 readers keep working unchanged."""
+    from .movement import _speeds
+    speeds = _speeds(tok) if tok else {"walk": 30}
+    return {m: {"total": movecost.walk_budget(v), "spent": 0}
+            for m, v in sorted(speeds.items()) if v}
+
+
 def begin_turn(init):
     """(Re)set the per-turn resource state for the currently active token."""
     order = init.get("order") or []
@@ -86,9 +98,12 @@ def begin_turn(init):
         return init
     tid = order[idx]["token_id"]
     tok = db.q1("SELECT * FROM tokens WHERE id=?", (tid,))
-    speed = token_speed_ft(tok) if tok else 30
+    by = _mode_budgets(tok)
+    active = "walk" if "walk" in by else (next(iter(by)) if by else "walk")
+    view = by.get(active, {"total": 0})
     init["turn"] = {"token_id": tid, "round": int(init.get("round", 1)),
-                    "move_total": movecost.walk_budget(speed), "move_spent": 0,
+                    "move_total": view["total"], "move_spent": 0,
+                    "move_by": by, "move_mode": active,
                     "action": "available", "bonus": "available", "reaction": "available"}
     return init
 
@@ -145,26 +160,46 @@ def turn_token(init):
     return (init.get("turn") or {}).get("token_id")
 
 
-def move_remaining(init, token_id):
+def move_remaining(init, token_id, mode=None):
     """Movement units (squares) this token may still spend under the action
     economy, or None when the economy does not apply (no combat / token not in
-    the order)."""
+    the order). mode=None reads the turn's ACTIVE mode; an unknown/unavailable
+    mode has 0 — switching modes never refunds spent units (D83)."""
     if not is_listed(init, token_id):
         return None
     t = init.get("turn") or {}
     if t.get("token_id") != token_id:
         return 0
-    return max(0, int(t["move_total"]) - int(t["move_spent"]))
+    by = t.get("move_by")
+    if not by:                                     # pre-D83 turn object
+        return max(0, int(t["move_total"]) - int(t["move_spent"]))
+    m = mode or t.get("move_mode") or "walk"
+    entry = by.get(m)
+    if entry is None:
+        return 0
+    return max(0, int(entry["total"]) - int(entry["spent"]))
 
 
-def spend_move(room_id, token_id, units):
+def spend_move(room_id, token_id, units, mode=None):
     """Charge walked movecost UNITS to the active turn (same unit walk()
-    validated with). No-op when the turn has moved on (or DM walk)."""
+    validated with). No-op when the turn has moved on (or DM walk). D83: the
+    unit charge lands on the MODE that moved — per-mode ledgers stay honest,
+    so a mode switch can never launder spent movement."""
     init = get_init(room_id)
     t = init.get("turn") or {}
     if t.get("token_id") != token_id:
         return None                      # turn moved on (or DM walk): nothing to charge
-    t["move_spent"] = int(t["move_spent"]) + int(units)
+    by = t.get("move_by")
+    if not by:                           # pre-D83 turn object: legacy single meter
+        t["move_spent"] = int(t["move_spent"]) + int(units)
+        set_init(room_id, init)
+        return init
+    m = mode or t.get("move_mode") or ("walk" if "walk" in by else next(iter(by)))
+    if m not in by:
+        m = "walk" if "walk" in by else next(iter(by))
+    by[m]["spent"] = int(by[m]["spent"]) + int(units)
+    t["move_mode"] = m                             # the view follows the mode used
+    t["move_total"], t["move_spent"] = int(by[m]["total"]), int(by[m]["spent"])
     set_init(room_id, init)
     return init
 
@@ -296,7 +331,25 @@ async def handle_dash(ws, room_id, user, is_dm, msg):
         await send_to(ws, "error", {"msg": "No action left this turn"})
         return
     turn["action"] = "used"
-    turn["move_total"] = int(turn["move_total"]) + movecost.walk_budget(token_speed_ft(tok))
+    # D83: Dash doubles EVERY movement mode the creature has — exactly once,
+    # behind the spent Action. The ceiling per turn is therefore sum(speeds)/5
+    # plus this one doubling: switching modes can never farm extra movement
+    # beyond that bounded total.
+    bonus = {}
+    try:
+        from .movement import _speeds
+        bonus = {m: movecost.walk_budget(v) for m, v in _speeds(tok).items() if v}
+    except Exception:
+        bonus = {"walk": movecost.walk_budget(token_speed_ft(tok))}
+    by = turn.get("move_by") or {"walk": {"total": int(turn["move_total"]),
+                                          "spent": int(turn["move_spent"])}}
+    for m in set(by) | set(bonus):
+        e = by.setdefault(m, {"total": 0, "spent": 0})
+        e["total"] = int(e["total"]) + int(bonus.get(m, 0))
+    turn["move_by"] = by
+    active = turn.get("move_mode") or "walk"
+    turn["move_total"] = int(by.get(active, by.get("walk", {"total": 0}))["total"])
+    turn["move_spent"] = int(by.get(active, by.get("walk", {"spent": 0}))["spent"])
     init["turn"] = turn
     set_init(room_id, init)
     sys_msg(room_id, f"{tok['label']} dashes.")

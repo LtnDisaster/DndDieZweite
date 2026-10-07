@@ -317,7 +317,7 @@ function drawTactical(){
     // tw/th NEVER w/h: this loop's scope owns the viewport dimensions w/h —
     // shadowing them here made the culling check drop every token offscreen (15B).
     const [tw, th] = tokenSpan(t);
-    const [vw, vh] = visualSpan(t), vside = Math.max(vw, vh);
+    const [vw, vh] = baseVisualSpan(t), vside = Math.max(vw, vh);
     const ox = t.x + ((tw - 1) * c / 2), oy = t.y + ((th - 1) * c / 2);
     const tx = ox + cam.ox, ty = oy + cam.oy;
     // D82: the BODY renders at VISUAL bounds — a rect centered on the
@@ -415,13 +415,11 @@ function tokenAt(x, y){
   return [...state.tokens].reverse().find(t => {
     const [w, h] = tokenSpan(t), side = Math.max(w, h);
     const ox = t.x + ((w - 1) * c / 2), oy = t.y + ((h - 1) * c / 2);
-    // D82: clicking the visible ARTWORK selects the token — the hit area is
-    // the visual rect (centered on the footprint, rotated with the facing).
-    // Presentation only: gameplay collision stays the mechanical footprint,
-    // server-side.
-    const [vw, vh] = visualSpan(t);
-    const rotDeg = (((t.rot | 0) % 360) + 360) % 360;
-    const [sw, sh] = rotDeg % 180 === 90 ? [vh, vw] : [vw, vh];
+    // D82/D83: clicking the visible ARTWORK selects the token — the hit area
+    // is the visual rect (centered on the footprint; visualSpan already
+    // carries the facing orientation). Presentation only: gameplay collision
+    // stays the mechanical footprint, server-side.
+    const [sw, sh] = visualSpan(t);
     if (Math.abs(x - ox) <= sw*c/2 + c*.3 && Math.abs(y - oy) <= sh*c/2 + c*.3) return true;
     if (Math.abs(x - ox) <= (w-1)*c/2 + c*.55 && Math.abs(y - oy) <= (h-1)*c/2 + c*.55) return true;
     const radius = (c / 50) * (side === 1 ? 16 : 20 + (side - 1) * 14);
@@ -443,10 +441,14 @@ function ownToken(){
                                          || t.controller_user_id === state.me.id) && canMove(t));
   return mine.length === 1 ? mine[0] : null;
 }
+function moveModeFor(tid){                 // D83: the sheet's active mode for a token
+  state.moveMode = state.moveMode || {};
+  return state.moveMode[tid] && state.moveMode[tid] !== "walk" ? state.moveMode[tid] : "walk";
+}
 function sendMove(cx, cy, teleport=false){
   const t = ownToken();
   if (!t){ toast("Select your token first"); return; }
-  wsSend({ type:"move", token_id: t.id, tx: cx, ty: cy, teleport });
+  wsSend({ type:"move", token_id: t.id, tx: cx, ty: cy, teleport, mode: moveModeFor(t.id) });
 }
 function gridAt(g, cx, cy){                 // WORLD cell lookup (D72)
   if (!g || !g.cells) return null;
@@ -460,7 +462,7 @@ function requestPathPreview(cx, cy, confirmAfter=false){
   const t = ownToken(); if (!t){ toast("Select your token first"); return; }
   const id = ++_planSeq;
   state.planRequest = { id, token_id: t.id, goal: {cx, cy}, confirmAfter };
-  wsSend({ type:"path_preview", token_id: t.id, tx: cx, ty: cy, request_id: id });
+  wsSend({ type:"path_preview", token_id: t.id, tx: cx, ty: cy, request_id: id, mode: moveModeFor(t.id) });
 }
 function applyPathPreview(p){
   if (!state.planRequest || state.planRequest.id !== p.request_id) return;
@@ -482,7 +484,7 @@ function planMove(cx, cy){
 function confirmPlan(){
   if (!state.plan) return; const p = state.plan; clearPlan();
   wsSend({ type:"move", token_id: p.token_id, tx: p.goal.cx, ty: p.goal.cy, teleport:false,
-           path: p.path || [] });
+           path: p.path || [], mode: moveModeFor(p.token_id) });
 }
 function clearPlan(){ state.plan = null; state.planRequest = null; updateMoveHud(); }
 function updateMoveHud(){

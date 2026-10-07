@@ -189,20 +189,30 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
     from the shared helper (`token_span` → `occupied_cells`/`origin_cells`);
     never compute a footprint rectangle from size anywhere else. Old square
     tokens load unchanged; a size-category change resets the custom span.
-    **Visual invariant (D82):** `tokens.vw`/`vh` (optional; default = the
-    EFFECTIVE collision span via `footprint.visual_span`) and `tokens.rot`
-    (0/90/180/270) are PRESENTATION ONLY — the visual rect is centered on the
-    footprint center, the Tactical renderer draws/selects through it, but
-    occupancy, collision, A*, LOS, trap/AoE mechanics and combat budgets keep
-    asking `token_span()`/`occupied_cells()`. VISUAL BOUNDS ARE NOT MECHANICAL
-    OCCUPANCY; renderer presentation must never become collision truth;
-    rotation never swaps the footprint. `app/room/authz.py::controls()` is the
+    **Visual invariant (D82, oriented by D83):** `tokens.vw`/`vh` (optional;
+    default = the effective collision span) and `tokens.rot` (0/90/180/270).
+    D83: the facing ORIENTS THE ENTITY — `token_span()` returns the EFFECTIVE
+    ORIENTED mechanical box (a 3×7 at 90 IS a 7×3 for occupancy, collision,
+    A*, LOS and AoE alike; `base_span()` is the un-rotated stored shape) and
+    `visual_span()` orients vw/vh by the same rule, so visual and mechanical
+    bounds SHARE A CENTRE. Visual size and mechanical size stay INDEPENDENT
+    sizes — VISUAL BOUNDS ARE NOT MECHANICAL OCCUPANCY; gameplay never asks
+    `visual_span`. The renderer draws the body from BASE visual dims INSIDE
+    its `ctx.rotate` transform (oriented dims there = double rotation).
+    Centre convention: `footprint.anchor_for_center` — integer anchors, floor
+    tie-break; rotation RE-ANCHORS instead of teleporting and an illegal turn
+    is REJECTED whole (rot/pos/footprint untouched, never a move-to-fit).
+    Room-wide partial token SELECTs MUST carry `size, fw, fh, rot,
+    mount_token_id` — a missing geometry column silently un-rotates or
+    un-carries that subsystem. `app/room/authz.py::controls()` is the
     single answer to "may this user act through this token?" (owner OR DM-
     assigned `controller_user_id` OR DM) — movement/turn/conditions/death/
     casting/door-and-object reach all ask it; a controller is not an owner,
     gets no sheet rights, and reveals no fog. `tokens.mount_token_id` is an
-    acyclic rider→mount RELATIONSHIP (relationship layer only — no carrying
-    movement yet) and separate from the controller axis.
+    acyclic rider→mount RELATIONSHIP (D83: moving mounts CARRY riders —
+    `movement.carry_riders` re-centres them via `anchor_for_center`; riders
+    spend no own budget and never block their own mount) and separate from
+    the controller axis.
   - `app/mapmodel.py` — plus `objects` (D82): generic world objects as DATA
     (label + allowlisted op `toggle`/`door`); `room/interact.py` executes the
     op (`door` reuses the one `doors.door_toggled` lifecycle); no eval, ever.
@@ -509,19 +519,20 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `secret_event` | `room.secret_events.handle_secret_event` | DM only | maybe | narrative + optional targeted sound |
 | `roll` | `room.dice.handle_roll` | member | maybe | visibility public/self/dm/blind |
 | `hp` | `room.combat.handle_hp` | DM | maybe | routed through health reducer |
-| `move` | `room.movement.handle_move` | own token or DM teleport | no | with `path`: revalidates and refuses silently-different routes (`route_invalid`, D60); without: recomputes authoritative footprint-aware path |
+| `move` | `room.movement.handle_move` | own token or DM teleport | no | with `path`: revalidates and refuses silently-different routes (`route_invalid`, D60); without: recomputes authoritative footprint-aware path. `mode` (walk/fly/swim/climb, D83): one active mode, missing speed refused; carried riders follow automatically |
 | `stop_move` | `room.movement.handle_stop_move` | DM | no | cancels active `_walks` task |
-| `path_preview` | `room.movement.handle_path_preview` | own token or DM | yes (requester) | server preview; never mutates token; carries `cost`/`budget`/`within_budget` (D68) |
-| `forced_move` | `room.moveforced.handle_forced_move` | DM | yes (DM) | push/pull/shove/knockback/throw/teleport; stops on first illegal cell; no walk/budget/growth (D71) |
+| `path_preview` | `room.movement.handle_path_preview` | own token or DM | yes (requester) | server preview; never mutates token; carries `cost`/`budget`/`within_budget` (D68) and the priced `mode` (D83) |
+| `forced_move` | `room.moveforced.handle_forced_move` | DM | yes (DM) | push/pull/shove/knockback/throw/teleport; stops on first illegal cell; no walk/budget/growth (D71); D83: the logic lives in `apply_forced_move` — the ONLY forced-write, callable server-side by traps/interactions; riders are carried along |
+| `knock_prone` | `room.conditions.handle_knock_prone` | DM | no | D83 generic forced-state op applying the EXISTING prone condition (D80); server entry `knock_prone()` for future trap/fall hooks; no height math |
 | `fog_edit` | `room.fog.handle_fog_edit` | DM | no | batch reveal/hide shared `explored` memory |
 | `fog_toggle` | `room.fog.handle_fog_toggle` | DM | no | room-wide `fog_off` flag: terrain+static visible to all, live NPCs stay LOS-filtered (D60) |
 | `map_edit` | `dispatch.handle_map_edit` | DM | no | map model sanitized; preserves trap/loot/fog runtime state; resize carries `explored` overlap |
 | `door` | `room.doors.handle_door` | DM or adjacent player | no | closed/locked edges block movement and LOS |
 | `token_span` | `room.tokens.handle_token_span` | owner or DM | no | mechanical resize; complete rect must fit at the CURRENT anchor or it is rejected unchanged (D81/15B) |
 | `token_visual` | `room.tokens.handle_token_visual` | owner or DM | no | D82 VISUAL bounds (vw/vh) — presentation; no clearance check, footprint untouched |
-| `token_rotate` | `room.tokens.handle_token_rotate` | owner or DM | no | D82 facing 0/90/180/270 — never rotates the mechanical footprint |
+| `token_rotate` | `room.tokens.handle_token_rotate` | owner or DM | no | D83 facing 0/90/180/270 — ORIENTS the mechanical footprint too; re-centres via `anchor_for_center`; illegal turn rejected whole; broadcast carries NO coordinates (the move rides the filtered step channel) |
 | `token_controller` | `room.tokens.handle_token_controller` | DM only | no | D82 assign/clear generic controller (must be a room member; revocable) |
-| `token_mount` | `room.tokens.handle_token_mount` | DM only | no | D82 acyclic rider→mount relationship, same room; relationship layer only |
+| `token_mount` | `room.tokens.handle_token_mount` | DM only | no | D82 acyclic rider→mount relationship, same room; D83: riding mounts now CARRY riders (walk/teleport/forced/rotation re-centre them; dismount re-homes the rider) |
 | `interact` | `room.interact.handle_interact` | member (reach-gated like doors) | no | D82 allowlisted world-object ops (`toggle` / linked `door`); dm_only/secret refuse without leaks |
 | `spawn_encounter` | `room.encounters.handle_spawn_encounter` | DM | no | validates encounter ownership |
 | `audio_add/remove/play/pause/stop` | `room.audio.*` | DM | no | room ambience; `pause` = `playing:false` with `current_id` kept (D60) |
@@ -577,7 +588,11 @@ These must remain server-side:
 - Spell slots.
 - Movement legality, path previews and stop transitions.
 - Footprint collision and placement.
-- Which cells are occupied — never derived from visual bounds (D82).
+- Which cells are occupied — never derived from visual bounds (D82), always
+  the ORIENTED mechanical box (D83).
+- Turn movement budgets — per-mode ledgers (`move_by`), charged in movecost
+  units only; Dash doubles every mode exactly once (D83).
+- Forced movement — only through `moveforced.apply_forced_move` (D71/D83).
 - Token-control authority (owner/controller/DM via `room/authz.py`, D82).
 - World-object operations: only the allowlisted ops, never code (D82).
 - Line of sight, token visibility and fog exploration.
@@ -696,7 +711,7 @@ Important tables:
 - `creatures` — private per-user bestiary templates.
 - `rooms` — room metadata and join code.
 - `room_members` — membership and role.
-- `tokens` — PC/NPC tokens, NPC block JSON, conditions, death state, size (interpreted as footprint), disposition; `fw`/`fh` mechanical span (D81); `vw`/`vh` visual bounds + `rot` facing — RENDER ONLY (D82); `controller_user_id` generic controller relationship + `mount_token_id` acyclic rider→mount — NOT ownership (D82).
+- `tokens` — PC/NPC tokens, NPC block JSON, conditions, death state, size (interpreted as footprint), disposition; `fw`/`fh` mechanical span (D81); `vw`/`vh` visual bounds + `rot` facing — `rot` ORIENTS the entity incl. its mechanical footprint (D83), vw/vh stay pure presentation sizes; `controller_user_id` generic controller relationship + `mount_token_id` acyclic rider→mount — NOT ownership (D82; D83 carries riders).
 - `messages` — game-log and chat/narrative messages with visibility metadata.
 - `room_state` — initiative JSON, map JSON, audio JSON.
 - `encounters` — private per-user encounter templates.
@@ -738,7 +753,8 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_path.py` | legacy and current A*, walls, doors, difficult terrain |
 | `tests/test_footprint_path.py` | large/Huge footprints, collision, preview terrain restrictions |
 | `tests/test_visual_size.py` | D82 visual bounds ≠ collision: fallback, independence, persistence, node hit test |
-| `tests/test_rotation.py` | D82 facing normalization/persistence; footprint never rotates; upright-text pin |
+| `tests/test_rotation.py` | D83 facing: footprint ORIENTS (3x7→7x3), centre-preserving re-anchor + exact roundtrip, illegal-turn rejection, visual independence under rotation, upright-text pin |
+| `tests/test_movement_modes.py` | D83 modes: SSOT budget conversion, fly ignores difficult+cliffs (not walls), per-mode ledgers cannot be farmed by switching, missing speed refused, legacy turn objects still read |
 | `tests/test_interact.py` | D82 world objects: schema is data (allowlist), reach, dm_only/secret/locked refusals, door-lifecycle reuse, state survives stale map_edit, no-exec pin |
 | `tests/test_controller.py` | D82 controller: assign/revoke, member-only, operational authority, unrelated refused, delivery without fog reveal |
 | `tests/test_mount.py` | D82 mount: assign/revoke, self + multi-hop cycle rejection, same-room, DM-only |
