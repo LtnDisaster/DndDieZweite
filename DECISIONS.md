@@ -1104,7 +1104,7 @@ walking use; rejection leaves prone untouched; the client's turn bar updates
 from the authoritative initiative broadcast. No attack advantage rules, no
 crawling, no spell-specific logic (out of scope, by design).
 
-## D81 — Token footprints are rectangles; one helper derives every occupied cell set
+## D81 — Token footprints are rectangles; one helper derives every occupied cell set  (EXTENDED BY D82: visual size, facing, controller and mount are separate axes)
 
 Footprints were locked to the square size categories (Large=2x2, Huge=3x3),
 which cannot express real creatures like a 3x7 serpent. Decision: token
@@ -1134,6 +1134,84 @@ anchor — an ill-fitting resize is rejected unchanged and never relocates the
 token. The sheet's labelled Footprint W/H + Apply row is the single edit path
 for every controllable token. Render-loop code must not shadow the viewport
 `w`/`h` names (the 15B invisibility incident, pinned in `test_sprint15b.py`).
+
+## D82 — Visual bounds, facing, controllers and mounts are separate from mechanical truth
+
+The tactical board has been showing a token's MECHANICAL footprint ever since
+D81/D82-15B made it a first-class value — which forces false trade-offs: a
+giant-wyrm artwork in a 2×2 body, a token facing east, a wolf the ranger
+plays, a centaur that rides. This decision keeps the mechanical axis
+untouchable and introduces four strictly separate axes beside it. All columns
+are nullable additive migrations (`NULL` = old behavior), so every existing
+room loads and renders exactly as before.
+
+**Visual bounds (`tokens.vw`/`vh`).** Optional VISUAL width/height in grid
+cells for the tactical renderer; when unset they default to the EFFECTIVE
+collision span (`footprint.visual_span`), so legacy tokens render unchanged.
+The visual rect is CENTERED on the mechanical footprint center — the one
+anchoring rule; future artwork masks may refine it, but presentation may
+never change which cells are occupied. Occupancy, collision, A*, vision
+source cells, trap/AoE mechanics and combat budgets keep asking
+`token_span()`/`occupied_cells()`; they never call the visual derivation —
+VISUAL BOUNDS ARE NOT MECHANICAL OCCUPANCY. `token_visual` (owner or DM) is
+the only write path; unlike `token_span` it needs NO clearance check, because
+it can legally displace nothing. The collision outline is drawn when useful
+(selected / map-editing / `?debug`) instead of permanently; the hit test
+follows the visible artwork (clicking art = selecting the token), which is
+presentation — the server still collides with the mechanical rect only.
+
+**Facing (`tokens.rot`).** Visual orientation, normalized server-side to
+0/90/180/270 (`footprint.clean_rot`); `token_rotate` (owner or DM) persists
+and broadcasts it. Tactical rotates the body/ring group around the visual
+center and keeps labels, HP bars and condition dots upright; a gold facing
+wedge makes rotation visible even on plain circle tokens. ROTATION NEVER
+ROTATES THE MECHANICAL FOOTPRINT — a 2×4 collision rect does not silently
+become 4×2 because the artwork turned; mechanical rotation would be its own
+future mechanic.
+
+**World objects (`mp["objects"]`).** Generic levers/switches/chests as
+map-authored DATA, same lifecycle as traps/loot (sanitize → runtime state
+merged across editor saves). An INTERACT definition is a label plus exactly
+one ALLOWLISTED operation — `toggle` (generic boolean `state.on`) or `door`
+(open/close an existing door through `doors.door_toggled`, the one door
+lifecycle shared with the direct door click: same reveal, chronicle, event
+fact). There is no eval, no expression language, no scripting field — DM
+automation may later call these same operations, never generated code.
+Authorization follows the door precedent: adjacent (or overlapping) token
+required, dm_only answers "It won't budge." before any state detail, and a
+linked SECRET door answers "Nothing happens." without confirming it exists.
+Players receive label and operation KIND only — never the linked door
+position; the server resolves by object id.
+
+**Controller (`tokens.controller_user_id`).** A DM-assignable generic
+relationship (companion/familiar/hireling FOUNDATION, not class rules): a
+room member who may act through the token. The single question "may this user
+act through this token?" is answered ONLY in `room/authz.py` (`controls()`);
+movement, path preview, dash/end-turn/turn-mark, conditions and Stand Up,
+death saves, casting and door/object reach were rewired through it — the
+owner idiom is never re-implemented per module. A controller is NOT an owner
+and NOT an account: no character-sheet rights, no fake login, the DM always
+keeps full authority, assignment is revocable at any time (`token_controller`,
+targets must be room members), and a controller token reveals NO fog — fog
+sources stay owner-scoped, the companion is DELIVERED to its controller
+without lifting sight for anyone.
+
+**Mount (`tokens.mount_token_id`).** A rider rides at most one token in the
+same room; assignments are validated acyclic (self and multi-hop chains
+rejected). Deliberately SEPARATE from the controller relationship (who acts ≠
+who carries) and deliberately NOT a parent-coordinate system. This ships the
+RELATIONSHIP layer only (persist/broadcast/reconnect/persistence tests);
+carrying movement is a distinct mechanic and was not silently half-built.
+
+Invariant summary — VISUAL BOUNDS ARE NOT MECHANICAL OCCUPANCY;
+`occupied_cells(token)` is gameplay truth; renderer presentation must never
+become collision truth; a CONTROLLER RELATIONSHIP IS NOT LOGGED-IN USER
+OWNERSHIP; a MOUNT RELATIONSHIP IS NOT THE CONTROLLER RELATIONSHIP; and
+INTERACTION DEFINITIONS ARE DATA driving allowlisted operations, never
+executable code. Diorama (out of scope in this sprint) ignores the new axes
+and keeps its old behavior; Tactical is the reference renderer that got the
+feature. Hidden NPC tokens leak none of the new fields (vw/vh/rot/controller),
+parity with the D81 geometry-leak guard.
 
 ## Cross-cutting assumptions (read before scaling)
 - Single uvicorn process, single event loop; `LOOP` captured in `main.py` for thread-safe broadcasts.

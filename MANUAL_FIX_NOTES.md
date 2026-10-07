@@ -1,3 +1,37 @@
+# Sprint 16 — Gameplay foundation (2026-10-07) — visual vs collision, rotation, objects, companions, mounts
+
+DECISIONS **D82**. Server stays the only authority for what a token occupies;
+the renderer may now draw something else entirely. Four strictly separated
+axes, all nullable additive columns (`NULL` = old behavior everywhere):
+
+- `tokens.vw`/`vh` — VISUAL bounds in cells (sheet "Visual Size" → `token_visual`,
+  owner/DM). Default = effective collision span via `footprint.visual_span()`;
+  drawn as an ellipse/rect centered on the footprint, per-axis scaled from the
+  old square silhouette (legacy render unchanged — pinned against the 15B
+  class of regressions). Never occupancy, never collision, no clearance check
+  needed by design. The collision outline only renders selected/map-edit/`?debug`.
+  `tokenAt` follows the artwork; the server still collides mechanically.
+- `tokens.rot` — facing 0/90/180/270 (`clean_rot`, `token_rotate`). Body/rings
+  rotate, labels/bars stay upright, gold wedge shows facing on plain tokens.
+  Explicitly never rotates the mechanical 2×4→4×2 (test-pinned).
+- `mp["objects"]` + `room/interact.py` — world objects as DATA; allowlisted ops
+  `toggle` / `door` (door goes through the extracted `doors.door_toggled()` —
+  one door lifecycle, map_lock must be released before it: non-reentrant!).
+  Players get label+kind only; dm_only/secret/locked refusals follow D63.
+  Runtime `state` survives stale editor snapshots (merge in `handle_map_edit`).
+- `tokens.controller_user_id` + `room/authz.py::controls()` — the single
+  authority question; movement/path/dash/end-turn/turn-mark/conditions/stand/
+  death-save/casting/door-and-object-reach rewired through it. Delivery to the
+  controller yes, fog revelation no. `token_controller` (DM, room-member targets).
+- `tokens.mount_token_id` — `token_mount` (DM), acyclic by bounded chain walk.
+  Relationship layer ONLY — carrying movement is a separate, not-yet-built
+  mechanic and was not silently half-implemented.
+
+Known, deliberately not fixed here: map-editor resize (`edResize`) drops PINS
+(pre-existing; objects are passed through correctly); Diorama ignores all new
+axes (out of scope); controlled tokens need DM fog reveal to be useful in the
+dark. Manual steps: MANUAL_BROWSER_CHECKLIST.md § D82.
+
 # Gameplay & World sprint (2026-10-06) — DM log, modifiers, auto-map, terrain, elevation, forced moves
 
 Canonical suite now: **306 passed + 7 node-skipped** (host 313). Decision records D66–D71.

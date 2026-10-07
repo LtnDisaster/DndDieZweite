@@ -239,10 +239,15 @@ function drawTactical(){
     }
     const marks = gm ? []
       .concat((gm.traps||[]).map(t=>[t,"⚠","#e74c3c"]),
-              (gm.loot||[]).map(l=>[l,"🎁","#d4a017"])) : [];
-    for (const [e, ic, col] of marks){
+              (gm.loot||[]).map(l=>[l,"🎁","#d4a017"]),
+              // D82: world objects. Players only ever RECEIVE visible objects
+              // (mapmodel.visible_map filters them), so any object in the
+              // payload may be drawn. State on/off is part of the world.
+              (gm.objects||[]).map(o=>[o, o.interact ? "🕹" : "•",
+                                       o.state && o.state.on ? "#2ecc71" : "#7f8c8d", "obj"])) : [];
+    for (const [e, ic, col, kind] of marks){
       const isDM = state.room.role === "dm";
-      const known = state.editing || isDM || e.discovered || e.taken_by === state.me.id;
+      const known = kind === "obj" || state.editing || isDM || e.discovered || e.taken_by === state.me.id;
       if (!known) continue;                       // still a hidden secret for this viewer
       const sx = e.x*c + cam.ox + c/2, sy = e.y*c + cam.oy + c/2;
       ctx.save();
@@ -311,55 +316,77 @@ function drawTactical(){
   for (const t of state.tokens){
     // tw/th NEVER w/h: this loop's scope owns the viewport dimensions w/h —
     // shadowing them here made the culling check drop every token offscreen (15B).
-    const [tw, th] = tokenSpan(t), side = Math.max(tw, th);
+    const [tw, th] = tokenSpan(t);
+    const [vw, vh] = visualSpan(t), vside = Math.max(vw, vh);
     const ox = t.x + ((tw - 1) * c / 2), oy = t.y + ((th - 1) * c / 2);
     const tx = ox + cam.ox, ty = oy + cam.oy;
-    if (tx < -80 || ty < -80 || tx > w+80 || ty > h+80) continue;
+    // D82: the BODY renders at VISUAL bounds — a rect centered on the
+    // mechanical footprint, scaled per axis from the old square silhouette,
+    // so the aspect is honest and a default visual (no vw/vh) draws exactly
+    // like before. This NEVER changes which cells are occupied.
+    const radius = (c / 50) * (vside === 1 ? 16 : 20 + (vside - 1) * 14);
+    const rx = vw === vside ? radius : radius * vw / vside;
+    const ry = vh === vside ? radius : radius * vh / vside;
+    const r = Math.max(rx, ry);
+    if (tx < -(r + 40) || ty < -(r + 40) || tx > w + r + 40 || ty > h + r + 40) continue;
     const activeInit = state.init && state.init.combat && state.init.order[state.init.active];
     const isActive = activeInit && activeInit.token_id === t.id;
     const isMoving = state.moving.has(t.id);
-    const radius = (c / 50) * (side === 1 ? 16 : 20 + (side - 1) * 14);
-    const r = radius;
-    ctx.beginPath(); ctx.arc(tx, ty, r, 0, Math.PI*2);
+    const conds = t.conds || [], dth = t.death;
+    // D82: rot rotates the ARTWORK (and the rings hugging it), never the
+    // mechanical footprint. Text/bars stay upright outside the transform.
+    const rotDeg = (((t.rot | 0) % 360) + 360) % 360;
+    const ex = rotDeg % 180 === 90 ? ry : rx;   // post-rotation half-extents
+    const ey = rotDeg % 180 === 90 ? rx : ry;   // for upright decorations
+    ctx.save(); ctx.translate(tx, ty); ctx.rotate(rotDeg * Math.PI / 180);
+    ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI*2);
     ctx.fillStyle = t.color; ctx.fill();
     ctx.lineWidth = t.id === state.sel ? 3 : 2;
     ctx.strokeStyle = isActive ? "#fff" : (t.id===state.sel ? "#d4a017" : "#0d0f14");
     ctx.stroke();
-    if (isMoving){ ctx.beginPath(); ctx.arc(tx, ty, r + 3, 0, Math.PI*2); ctx.setLineDash([4,3]);
+    if (isMoving){ ctx.beginPath(); ctx.ellipse(0, 0, rx + 3, ry + 3, 0, 0, Math.PI*2); ctx.setLineDash([4,3]);
       ctx.strokeStyle="#7fd1ff"; ctx.lineWidth=2; ctx.stroke(); ctx.setLineDash([]); }
-    if (tw > 1 || th > 1){ ctx.save(); ctx.globalAlpha=.18; ctx.fillStyle=t.color;
-      ctx.fillRect(ox - c/2 + cam.ox, oy - c/2 + cam.oy, tw*c, th*c); ctx.restore(); }
     if (state.room.role === "dm" && t.disposition){
       const dcol = {friend:"#2ecc71", hostile:"#e74c3c", neutral:"#3498db"}[t.disposition] || "#3498db";
-      ctx.beginPath(); ctx.arc(tx, ty, r + 2, 0, Math.PI*2); ctx.strokeStyle=dcol; ctx.lineWidth=2; ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(0, 0, rx + 2, ry + 2, 0, 0, Math.PI*2); ctx.strokeStyle=dcol; ctx.lineWidth=2; ctx.stroke();
     }
-    if (isActive){ ctx.beginPath(); ctx.arc(tx, ty, r + 5, 0, Math.PI*2);
+    if (isActive){ ctx.beginPath(); ctx.ellipse(0, 0, rx + 5, ry + 5, 0, 0, Math.PI*2);
       ctx.strokeStyle = "#d4a017"; ctx.lineWidth = 2; ctx.stroke(); }
-    const conds = t.conds || [], dth = t.death;
     if (conds.some(c => String(c.k).toLowerCase() === "concentrating")){
-      ctx.beginPath(); ctx.arc(tx, ty, r + 4, 0, Math.PI*2); ctx.setLineDash([3,3]);
+      ctx.beginPath(); ctx.ellipse(0, 0, rx + 4, ry + 4, 0, 0, Math.PI*2); ctx.setLineDash([3,3]);
       ctx.strokeStyle = "#d4a017"; ctx.lineWidth = 1.5; ctx.stroke(); ctx.setLineDash([]); }
     if (dth && !dth.dead && !dth.stable){                       // dying → red ring
-      ctx.beginPath(); ctx.arc(tx, ty, r + 4, 0, Math.PI*2);
+      ctx.beginPath(); ctx.ellipse(0, 0, rx + 4, ry + 4, 0, 0, Math.PI*2);
       ctx.strokeStyle = "#c0392b"; ctx.lineWidth = 2; ctx.stroke(); }
+    // D82 facing wedge: a rotated circle/square visual would otherwise be
+    // indistinguishable — the gold nose shows where the creature faces.
+    if (rotDeg){ ctx.beginPath(); ctx.moveTo(0, -ry - 9); ctx.lineTo(-6, -ry - 1); ctx.lineTo(6, -ry - 1);
+      ctx.closePath(); ctx.fillStyle = "#d4a017"; ctx.fill(); }
+    ctx.restore();
+    // D82: the collision footprint outline shows when it is USEFUL (selected,
+    // map editing, ?debug) — not as a permanent translucent block. Gameplay
+    // occupancy is always the mechanical rect; visual bounds never change it.
+    if ((tw > 1 || th > 1) && (t.id === state.sel || state.editing || DEBUG)){
+      ctx.save(); ctx.globalAlpha=.18; ctx.fillStyle=t.color;
+      ctx.fillRect(ox - c/2 + cam.ox, oy - c/2 + cam.oy, tw*c, th*c); ctx.restore(); }
     ctx.fillStyle = dth && dth.dead ? "#ff6b6b" : "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center";
     ctx.fillText(dth && dth.dead ? "☠" : t.label.slice(0, 2).toUpperCase(), tx, ty + 4);
     ctx.font = "11px sans-serif";
-    ctx.fillText(t.label, tx, ty + r + 14);
+    ctx.fillText(t.label, tx, ty + ey + 14);
     const m = state.room.members.find(x => x.user_id === t.owner_user_id);
     if (m && m.char){
       const ch = m.char, pct = Math.max(0, ch.hp/ch.max_hp);
-      ctx.fillStyle = "#111"; ctx.fillRect(tx-16, ty-r-10, 32, 5);
+      ctx.fillStyle = "#111"; ctx.fillRect(tx-16, ty-ey-10, 32, 5);
       ctx.fillStyle = pct <= .25 ? "#c0392b" : "#27ae60";
-      ctx.fillRect(tx-16, ty-r-10, 32*pct, 5);
+      ctx.fillRect(tx-16, ty-ey-10, 32*pct, 5);
     } else if (t.npc){
       const pct = Math.max(0, (t.npc.hp||0)/(t.npc.max_hp||1));
-      ctx.fillStyle = "#111"; ctx.fillRect(tx-16, ty-r-10, 32, 5);
+      ctx.fillStyle = "#111"; ctx.fillRect(tx-16, ty-ey-10, 32, 5);
       ctx.fillStyle = pct <= .25 ? "#c0392b" : "#e07b39";   // orange = monster (DM view only)
-      ctx.fillRect(tx-16, ty-r-10, 32*pct, 5);
+      ctx.fillRect(tx-16, ty-ey-10, 32*pct, 5);
     }
     if (conds.length){
-      const shown = conds.slice(0, 5), y = ty + 42, x0 = tx - (shown.length - 1) * 6;
+      const shown = conds.slice(0, 5), y = ty + Math.max(42, ey + 18), x0 = tx - (shown.length - 1) * 6;
       shown.forEach((c, i) => { ctx.beginPath(); ctx.arc(x0 + i*12, y, 5, 0, Math.PI*2);
         ctx.fillStyle = condColor(c.k); ctx.fill();
         ctx.lineWidth = 1; ctx.strokeStyle = "#0d0f14"; ctx.stroke(); });
@@ -378,24 +405,42 @@ function canMove(t){
   if (!state.room || !t) return false;
   const m = state.room.members && state.room.members.find(x => x.user_id === t.owner_user_id);
   if (m && m.char && (+m.char.hp || 0) <= 0) return false;
-  return state.room.role === "dm" || t.owner_user_id === state.me.id;
+  // D82: an assigned CONTROLLER may operate the token (presentation check —
+  // the server's authz.controls() is the real authority).
+  return state.room.role === "dm" || t.owner_user_id === state.me.id
+      || t.controller_user_id === state.me.id;
 }
 function tokenAt(x, y){
   const c = cellSize();
   return [...state.tokens].reverse().find(t => {
     const [w, h] = tokenSpan(t), side = Math.max(w, h);
     const ox = t.x + ((w - 1) * c / 2), oy = t.y + ((h - 1) * c / 2);
+    // D82: clicking the visible ARTWORK selects the token — the hit area is
+    // the visual rect (centered on the footprint, rotated with the facing).
+    // Presentation only: gameplay collision stays the mechanical footprint,
+    // server-side.
+    const [vw, vh] = visualSpan(t);
+    const rotDeg = (((t.rot | 0) % 360) + 360) % 360;
+    const [sw, sh] = rotDeg % 180 === 90 ? [vh, vw] : [vw, vh];
+    if (Math.abs(x - ox) <= sw*c/2 + c*.3 && Math.abs(y - oy) <= sh*c/2 + c*.3) return true;
     if (Math.abs(x - ox) <= (w-1)*c/2 + c*.55 && Math.abs(y - oy) <= (h-1)*c/2 + c*.55) return true;
     const radius = (c / 50) * (side === 1 ? 16 : 20 + (side - 1) * 14);
     return (t.x-x)**2 + (t.y-y)**2 < (radius + side*c*.2)**2
         || (ox-x)**2 + (oy-y)**2 < (radius + side*c*.18)**2;
   });
 }
+function objectAt(x, y){
+  // WORLD cell lookup in the per-viewer (server-filtered) object list.
+  if (!state.grid) return null;
+  const c = cellSize(), cx = Math.floor(x / c), cy = Math.floor(y / c);
+  return (state.grid.objects || []).find(o => o.x === cx && o.y === cy) || null;
+}
 function ownToken(){
   if (!state.room) return null;
   const sel = state.tokens.find(t => t.id === state.sel);
   if (sel && canMove(sel)) return sel;
-  const mine = state.tokens.filter(t => t.owner_user_id === state.me.id && canMove(t));
+  const mine = state.tokens.filter(t => (t.owner_user_id === state.me.id
+                                         || t.controller_user_id === state.me.id) && canMove(t));
   return mine.length === 1 ? mine[0] : null;
 }
 function sendMove(cx, cy, teleport=false){
@@ -472,7 +517,8 @@ function paint(cx, cy){
   else if (b === "low") gm.cells[i] = 4;
   else if (b === "erase"){ gm.cells[i] = 0;
     gm.traps = gm.traps.filter(t => !(t.x===cx && t.y===cy));
-    gm.loot = gm.loot.filter(l => !(l.x===cx && l.y===cy)); }
+    gm.loot = gm.loot.filter(l => !(l.x===cx && l.y===cy));
+    gm.objects = (gm.objects||[]).filter(o => !(o.x===cx && o.y===cy)); }
   else if (b === "reveal" || b === "refog"){
     gm.explored[i] = b === "reveal" ? 1 : 0;
     state.fogTouched[i] = gm.explored[i];
@@ -493,6 +539,36 @@ function paint(cx, cy){
     const label = ($("loot-label").value || "").trim().slice(0,80) || "Loot";
     gm.loot.push({ id: eid(), x:cx, y:cy, label, taken_by:null });
   }
+  else if (b === "obj"){
+    // D82: authored as pure DATA; the server only ever runs allowlisted ops.
+    gm.objects = (gm.objects||[]).filter(o => !(o.x===cx && o.y===cy));
+    const label = ($("obj-label").value || "").trim().slice(0,80) || "Object";
+    const act = ($("obj-act").value || "").trim().slice(0,40) || "Interact";
+    const o = { id: eid(), x:cx, y:cy, label, dm_only: !!$("obj-dm").checked, state: {} };
+    if ($("obj-op").value === "toggle"){
+      o.interact = { label: act, op: { kind:"toggle" } };
+    } else {
+      const d = nearestDoor(gm, cx, cy);
+      if (!d){ toast("Link a door first — none within 3 cells"); return; }
+      o.interact = { label: act, op: { kind:"door", x:d.x, y:d.y, dir:d.dir } };
+    }
+    gm.objects.push(o);
+  }
+  else if (b === "objrm"){
+    gm.objects = (gm.objects||[]).filter(o => !(o.x===cx && o.y===cy));
+  }
+}
+function nearestDoor(gm, cx, cy){
+  // The nearest door EDGE cell within 3 cells (Chebyshev) — deterministic
+  // linking without a picker UI; the linked door lives server-side anyway.
+  let best = null, bd = 4;
+  for (const d of (gm.doors || [])){
+    const bx = d.dir === "v" ? d.x + 1 : d.x, by = d.dir === "h" ? d.y + 1 : d.y;
+    const dist = Math.min(Math.max(Math.abs(cx - d.x), Math.abs(cy - d.y)),
+                          Math.max(Math.abs(cx - bx), Math.abs(cy - by)));
+    if (dist < bd){ bd = dist; best = d; }
+  }
+  return best;
 }
 
 /* ---------- doors (geometry + editor placement) ---------- */
@@ -682,6 +758,13 @@ function onDown(e){
   if (!t){
     const d = doorHit(wx, wy);
     if (d){ wsSend({ type:"door", x: d.x, y: d.y, dir: d.dir, action:"toggle" }); return; }
+    // D82: clicking an INTERACTABLE world object sends the intent; the server
+    // validates reach/permission and runs the allowlisted operation. Objects
+    // without an interact field are decoration — clicks pass through to move.
+    if (!state.editing){
+      const ob = objectAt(wx, wy);
+      if (ob && ob.interact){ wsSend({ type:"interact", object_id: ob.id }); return; }
+    }
     // Keep the selected movable token while clicking an empty destination.
     // Clearing the sheet here used to clear state.sel before ownToken(), which
     // made DM/NPC click-to-move silently lose its mover.
@@ -784,6 +867,7 @@ function editorOpen(){
   $("editor").classList.remove("hidden");
   $("trap-fields").classList.add("hidden"); $("loot-fields").classList.add("hidden");
   $("door-fields").classList.add("hidden");
+  const of = $("obj-fields"); if (of) of.classList.add("hidden");
   $("ed-w").value = state.editMap.w; $("ed-h").value = state.editMap.h;
 }
 function editorClose(){ flushFogEdit(); state.editing = false; state.editMap = null; $("editor").classList.add("hidden"); }
@@ -795,6 +879,7 @@ function edResize(){
   const inW = (x, y) => x >= ox && y >= oy && x < ox + w && y < oy + h;
   const gm = { w, h, cell: old.cell, origin: [ox, oy], cells: new Array(w*h).fill(0), explored: new Array(w*h).fill(0),
                traps: old.traps.filter(t => inW(t.x, t.y)), loot: old.loot.filter(l => inW(l.x, l.y)),
+               objects: (old.objects||[]).filter(o => inW(o.x, o.y)),
                doors: (old.doors||[]).filter(d => inW(d.x, d.y) && (d.dir === "v" ? inW(d.x+1, d.y) : inW(d.x, d.y+1))) };
   for (let y = 0; y < Math.min(h, old.h); y++) for (let x = 0; x < Math.min(w, old.w); x++)
     gm.cells[y*w+x] = old.cells[y*old.w+x];

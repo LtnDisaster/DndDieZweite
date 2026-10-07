@@ -1,6 +1,7 @@
 """Condition / status-effect WS handlers (DM manages all, players their own token)."""
 from .. import conditions as C
 from .. import db, movecost
+from . import authz
 from .net import broadcast, send_to, sys_msg
 
 
@@ -8,7 +9,7 @@ def _target(room_id, user, is_dm, msg):
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:
         return None
-    if not (is_dm or tok["owner_user_id"] == user["id"]):
+    if not authz.controls(tok, user["id"], is_dm):   # D82: owner or assigned controller
         return False          # visible-but-forbidden (distinct from "missing")
     return tok
 

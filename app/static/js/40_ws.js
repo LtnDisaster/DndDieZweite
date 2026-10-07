@@ -86,12 +86,27 @@ function connectWS(code){
       case "token_span": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.fw = p.fw; t.fh = p.fh;          // authoritative shape (15B)
                        if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "token_visual": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t){ t.vw = p.vw; t.vh = p.vh;          // D82: presentation bounds only
+                       if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "token_rot": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t){ t.rot = p.rot;                     // D82: visual facing only
+                       if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "token_controller": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t){ t.controller_user_id = p.controller_user_id ?? null;   // D82 companion
+                       if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "token_mount": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t){ t.mount_token_id = p.mount_token_id ?? null;           // D82 rider
+                       if (state.sel === p.token_id) renderSheet(t); } break; }
       case "cond": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.conds = p.conds || [];
                        if (state.sel === p.token_id) renderSheet(t); } break; }
       case "death": { const t = state.tokens.find(t => t.id === p.token_id);
                       if (t){ t.death = p.death || null;
                         if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "object_state": { const o = state.grid && (state.grid.objects || []).find(o => o.id === p.object_id);
+                     if (o){ o.state = p.state || {}; draw(); }   // D82: authoritative world state
+                     break; }
       case "aoe": showAoe(p); break;
       case "ping": showPing(p); break;
       case "room_deleted": {

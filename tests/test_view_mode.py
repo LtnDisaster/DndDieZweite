@@ -212,6 +212,7 @@ _DOM_STUB = """
     beginPath(){ ctx._c=[]; }, moveTo(x,y){ ctx._c.push([x,y]); }, lineTo(x,y){ ctx._c.push([x,y]); },
     closePath(){}, arc(){}, fill(){ if (ctx._c) rec.polys.push(ctx._c); }, ellipse(){},
     stroke(){}, setLineDash(){}, save(){}, restore(){}, drawImage(){}, fillText(){},
+    translate(){}, rotate(){},                 // D82: rotated token body transform
     measureText:()=>({width:10}) };
   const mk = () => ({ style:{}, dataset:{}, value:"", textContent:"", innerHTML:"", checked:false,
     classList:{add(){},remove(){},toggle(){},contains:()=>false}, addEventListener(){},

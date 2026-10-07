@@ -64,6 +64,51 @@ def token_span(token):
     return min(SPAN_LIMIT, max(1, w)), min(SPAN_LIMIT, max(1, h))
 
 
+def visual_span(token):
+    """THE authoritative VISUAL shape (D82): explicit vw/vh win, otherwise the
+    EFFECTIVE collision span — so every legacy token renders unchanged.
+    RENDERING ONLY: occupancy, collision, A*, LOS and AoE never call this;
+    their shape is token_span(). Visual bounds must never silently become
+    collision truth."""
+    t = token or {}
+    w, h = token_span(t)
+    try:
+        vw = int(t.get("vw")) if t.get("vw") else w
+        vh = int(t.get("vh")) if t.get("vh") else h
+    except (TypeError, ValueError):
+        return w, h
+    return min(SPAN_LIMIT, max(1, vw)), min(SPAN_LIMIT, max(1, vh))
+
+
+def clean_rot(value):
+    """Client-supplied facing -> degrees in {0, 90, 180, 270}, or None.
+    D82: discrete grid-friendly orientation, VISUAL ONLY — rotating a token
+    never rotates its mechanical footprint (a 2x4 stays a 2x4)."""
+    if value is None or value == "":
+        return None
+    try:
+        v = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    v %= 360
+    return v if v % 90 == 0 else None
+
+
+def visual_cells(mp, token):
+    """Presentation cells of the visual rect, CENTERED on the mechanical
+    footprint center (the one visual anchoring rule). RENDER ONLY — callers
+    that need gameplay truth use occupied_cells()."""
+    origin, (w, h) = occupied_origin(mp, token)
+    vw, vh = visual_span(token)
+    cx = origin[0] + (w - vw) / 2
+    cy = origin[1] + (h - vh) / 2
+    out = []
+    for dy in range(vh):
+        for dx in range(vw):
+            out.append((int(cx + dx), int(cy + dy)))
+    return out
+
+
 def origin_from_pixel(x, y, cell, mp=None):
     """Token WORLD pixel centre -> WORLD cell. Clamped to the world when an
     ``mp`` is given (D72: bounds are the WORLD window, never raw storage)."""

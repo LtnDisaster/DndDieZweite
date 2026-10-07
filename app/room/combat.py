@@ -4,7 +4,7 @@ import random
 
 from .. import db, movecost, npc
 from .. import conditions as C
-from . import death as D, health
+from . import authz, death as D, health
 from .dice import dex_mod
 from .net import broadcast, send_to, sys_msg
 
@@ -221,9 +221,9 @@ async def _end_turn_common(ws, room_id, user, is_dm):
         return
     turn = init.get("turn") or {}
     if not is_dm:
-        tok = db.q1("SELECT owner_user_id FROM tokens WHERE id=? AND room_id=?",
+        tok = db.q1("SELECT owner_user_id, controller_user_id FROM tokens WHERE id=? AND room_id=?",
                     (turn.get("token_id", -1), room_id))
-        if tok is None or tok["owner_user_id"] != user["id"]:
+        if not authz.controls(tok, user["id"], False):      # D82: or its assigned controller
             await send_to(ws, "error", {"msg": "Only the active token's owner (or the DM) can end the turn"})
             return
     init, wrapped, updates = advance_turn(room_id, init)
@@ -281,7 +281,7 @@ async def handle_dash(ws, room_id, user, is_dm, msg):
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:
         return
-    if not (is_dm or tok["owner_user_id"] == user["id"]):
+    if not authz.controls(tok, user["id"], is_dm):          # D82: owner or assigned controller
         await send_to(ws, "error", {"msg": "You can only dash with your own token"})
         return
     init = get_init(room_id)
@@ -320,8 +320,8 @@ async def handle_turn_mark(ws, room_id, user, is_dm, msg):
         await send_to(ws, "error", {"msg": "Slots can only be marked on the active turn"})
         return
     if not is_dm:
-        tok = db.q1("SELECT owner_user_id FROM tokens WHERE id=? AND room_id=?", (tid, room_id))
-        if tok is None or tok["owner_user_id"] != user["id"]:
+        tok = db.q1("SELECT owner_user_id, controller_user_id FROM tokens WHERE id=? AND room_id=?", (tid, room_id))
+        if not authz.controls(tok, user["id"], False):      # D82: or its assigned controller
             await send_to(ws, "error", {"msg": "Not your token"})
             return
     turn[slot] = value

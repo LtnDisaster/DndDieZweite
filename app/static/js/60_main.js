@@ -257,6 +257,7 @@ function wire(){
       document.querySelectorAll(".brush").forEach(x => x.classList.toggle("active", x === b));
       $("trap-fields").classList.toggle("hidden", b.dataset.b !== "trap");
       $("loot-fields").classList.toggle("hidden", b.dataset.b !== "loot");
+      const of = $("obj-fields"); if (of) of.classList.toggle("hidden", b.dataset.b !== "obj");
       $("door-fields").classList.toggle("hidden", b.dataset.b !== "door");
       const pf = $("pin-fields"); if (pf) pf.classList.toggle("hidden", !["pin","pinrm"].includes(b.dataset.b)); };
   }

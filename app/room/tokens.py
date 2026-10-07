@@ -96,6 +96,131 @@ async def handle_token_span(ws, room_id, user, is_dm, msg):
     await broadcast(room_id, "token_span", {"token_id": tok["id"], "fw": fw, "fh": fh})
 
 
+async def handle_token_visual(ws, room_id, user, is_dm, msg):
+    """Visual size operation (D82): owner (or DM) sets the RENDER bounds
+    (vw/vh, grid cells). Visual bounds are presentation only — they never
+    touch occupancy, collision or pathfinding, so no clearance check applies
+    and a visual resize can never displace anything. The mechanical footprint
+    (fw/fh) stays untouched by this path, and vice versa."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    if not (is_dm or tok["owner_user_id"] == user["id"]):
+        await send_to(ws, "error", {"msg": "Not your token"})
+        return
+    vw = footprint.clean_span(msg.get("width"))
+    vh = footprint.clean_span(msg.get("height"))
+    if vw is None or vh is None:
+        await send_to(ws, "error", {"msg": "Width and height (1-10 cells) are required"})
+        return
+    if (tok.get("vw"), tok.get("vh")) == (vw, vh):
+        return                                   # idempotent, no broadcast storm
+    db.x("UPDATE tokens SET vw=?, vh=? WHERE id=?", (vw, vh, tok["id"]))
+    await broadcast(room_id, "token_visual", {"token_id": tok["id"], "vw": vw, "vh": vh})
+
+
+async def handle_token_rotate(ws, room_id, user, is_dm, msg):
+    """Facing operation (D82): owner (or DM) sets the VISUAL orientation to
+    0/90/180/270 degrees. Presentation only: the mechanical footprint is
+    explicitly NOT rotated — a 2x4 collision rect never silently becomes
+    4x2 because the artwork turned. Mechanical rotation would be a future
+    explicit mechanic, not a side effect of this path."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    if not (is_dm or tok["owner_user_id"] == user["id"]):
+        await send_to(ws, "error", {"msg": "Not your token"})
+        return
+    rot = footprint.clean_rot(msg.get("degrees", msg.get("rot")))
+    if rot is None:
+        await send_to(ws, "error", {"msg": "Rotation must be 0, 90, 180 or 270 degrees"})
+        return
+    if (tok.get("rot") or 0) == rot:
+        return                                   # idempotent, no broadcast storm
+    db.x("UPDATE tokens SET rot=? WHERE id=?", (rot, tok["id"]))
+    await broadcast(room_id, "token_rot", {"token_id": tok["id"], "rot": rot})
+
+
+async def handle_token_controller(ws, room_id, user, is_dm, msg):
+    """DM assigns or clears the generic CONTROLLER of a token (D82). The
+    controller may act through the token (movement, its turn, conditions,
+    casting, door/object reach) — a companion/familiar foundation, NOT class
+    rules. The target must be a member of THIS room (no fake accounts, no
+    strangers); the DM can revoke at any time and always outranks a
+    controller. Ownership and character-sheet rights stay with the owner."""
+    if not is_dm:
+        await send_to(ws, "error", {"msg": "DM only"})
+        return
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    raw = msg.get("controller_id", msg.get("user_id"))
+    cid = None
+    if raw not in (None, "", 0):
+        try:
+            cid = int(raw)
+        except (TypeError, ValueError):
+            await send_to(ws, "error", {"msg": "Unknown user"})
+            return
+        if db.q1("SELECT user_id FROM room_members WHERE room_id=? AND user_id=?",
+                 (room_id, cid)) is None:
+            await send_to(ws, "error", {"msg": "That user is not a member of this room"})
+            return
+    if (tok.get("controller_user_id")) == cid:
+        return                                   # idempotent, no broadcast storm
+    db.x("UPDATE tokens SET controller_user_id=? WHERE id=?", (cid, tok["id"]))
+    await broadcast(room_id, "token_controller",
+                    {"token_id": tok["id"], "controller_user_id": cid})
+
+
+async def handle_token_mount(ws, room_id, user, is_dm, msg):
+    """DM assigns or clears the MOUNT of a token (D82). A rider rides at most
+    one mount; the relationship MUST stay acyclic — assigning is rejected when
+    it would close a cycle (A rides B riding A, or longer chains). Same-room
+    only. This is the pure RELATIONSHIP: carrying movement (a mount moving
+    its riders) is a separate mechanic and deliberately not silently half-
+    implemented here."""
+    if not is_dm:
+        await send_to(ws, "error", {"msg": "DM only"})
+        return
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    raw = msg.get("mount_id", msg.get("mount_token_id"))
+    mid = None
+    if raw not in (None, "", 0):
+        try:
+            mid = int(raw)
+        except (TypeError, ValueError):
+            await send_to(ws, "error", {"msg": "Unknown mount"})
+            return
+        if mid == tok["id"]:
+            await send_to(ws, "error", {"msg": "A token cannot ride itself"})
+            return
+        mount = db.q1("SELECT id, mount_token_id FROM tokens WHERE id=? AND room_id=?",
+                      (mid, room_id))
+        if mount is None:
+            await send_to(ws, "error", {"msg": "That mount is not in this room"})
+            return
+        # the mount's own mount chain must never lead back to this token
+        cur, hops = mount["mount_token_id"], 0
+        while cur is not None and hops <= 1000:
+            if cur == tok["id"]:
+                await send_to(ws, "error", {"msg": "That would create a riding cycle"})
+                return
+            nxt = db.q1("SELECT mount_token_id FROM tokens WHERE id=?", (cur,))
+            cur = nxt["mount_token_id"] if nxt else None
+            hops += 1
+    if tok.get("mount_token_id") == mid:
+        return                                   # idempotent, no broadcast storm
+    db.x("UPDATE tokens SET mount_token_id=? WHERE id=?", (mid, tok["id"]))
+    await broadcast(room_id, "token_mount", {"token_id": tok["id"], "mount_token_id": mid})
+
+
 async def handle_add_token(ws, room_id, user, is_dm, msg):
     if not is_dm:
         return

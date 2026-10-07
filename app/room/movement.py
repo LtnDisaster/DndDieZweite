@@ -9,7 +9,7 @@ from .. import conditions as C
 from .. import db, footprint, gear, los, mapmodel, movecost
 from ..path import find_path, path_footprint_cost, step_legal
 from .growth import maybe_grow_map
-from . import combat as CB
+from . import authz, combat as CB
 from .net import broadcast, fog_patch, get_map, map_lock, send_to, set_map
 from .traps import at_cell, hit_trap, take_loot
 from .visibility import broadcast_token_step, viewer_visible_cells
@@ -86,7 +86,7 @@ async def handle_move(ws, room_id, user, is_dm, msg):
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:
         return
-    if not (is_dm or tok["owner_user_id"] == user["id"]):
+    if not authz.controls(tok, user["id"], is_dm):        # D82: owner or assigned controller
         await send_to(ws, "error", {"msg": "You can only move your own token"})
         return
     blocked = _movement_block_reason(tok)
@@ -324,7 +324,7 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
     if tok is None:
         await send_to(ws, "error", {"msg": "Unknown token"})
         return
-    if not (is_dm or tok["owner_user_id"] == user["id"]):
+    if not authz.controls(tok, user["id"], is_dm):        # D82: owner or assigned controller
         await send_to(ws, "error", {"msg": "You can only preview your own token"})
         return
     blocked = _movement_block_reason(tok)

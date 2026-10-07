@@ -181,7 +181,8 @@ def _canon_door(x, y, dir_, w, h, ox=0, oy=0):
 def default_map(w=DEFAULT_W, h=DEFAULT_H):
     return {"w": w, "h": h, "cell": 50, "origin": [0, 0], "cells": [0] * (w * h),
             "elev": [0] * (w * h),
-            "explored": [0] * (w * h), "traps": [], "loot": [], "doors": [], "pins": []}
+            "explored": [0] * (w * h), "traps": [], "loot": [], "doors": [], "pins": [],
+            "objects": []}
 
 
 def load(raw, default=None):
@@ -230,6 +231,48 @@ def _entity(e, w, h, ox=0, oy=0):
     else:
         tb = e.get("taken_by")
         out["taken_by"] = int(tb) if isinstance(tb, (int, float)) else None
+    return out
+
+
+INTERACT_OPS = ("toggle", "door")   # the ONLY operations a world object may drive
+
+
+def _clean_object(o, w, h, ox=0, oy=0):
+    """D82: generic interactable world object (lever, switch, chest, plate).
+
+    The interaction is DATA driving one of the INTERACT_OPS — never executable
+    code. An unknown op kind drops the interact field (the object stays plain
+    decoration); runtime ``state`` is a tiny boolean carrier preserved across
+    map edits by dispatch.handle_map_edit, exactly like trap lifecycle flags."""
+    if not isinstance(o, dict):
+        return None
+    try:
+        x, y = int(o["x"]), int(o["y"])
+    except (KeyError, ValueError, TypeError):
+        return None
+    out = {"id": str(o.get("id", ""))[:16] or re.sub(r"\W", "", _label(o.get("label")))[:12] or "x",
+           "x": max(ox, min(ox + w - 1, x)), "y": max(oy, min(oy + h - 1, y)),
+           "label": _label(o.get("label")),
+           "dm_only": bool(o.get("dm_only")),
+           "state": ({"on": True} if isinstance(o.get("state"), dict) and o["state"].get("on") else {})}
+    it = o.get("interact")
+    if isinstance(it, dict):
+        op = it.get("op")
+        kind = str(op.get("kind", "")).lower() if isinstance(op, dict) else ""
+        label = str(it.get("label", "")).strip()[:40] or "Interact"
+        if kind == "toggle":
+            out["interact"] = {"label": label, "op": {"kind": "toggle"}}
+        elif kind == "door":
+            try:
+                dx, dy = int(op["x"]), int(op["y"])
+            except (KeyError, TypeError, ValueError):
+                return out                       # dangling link -> plain decoration
+            dir_ = str(op.get("dir", "")).lower()
+            if dir_ not in DOOR_DIRS:
+                return out
+            out["interact"] = {"label": label,
+                               "op": {"kind": "door", "x": dx, "y": dy, "dir": dir_}}
+        # any other kind: silently dropped — DATA never carries code
     return out
 
 
@@ -333,13 +376,25 @@ def sanitize(d):
             cid += 1
             cp["id"] = f"{cp['id'][:14]}{cid}"
         pin_ids.add(cp["id"]); pins.append(cp)
+    objects, obj_ids = [], set()
+    for e in (d.get("objects") or [])[:100]:
+        co = _clean_object(e, w, h, ox, oy)
+        if co is None:
+            continue
+        base = co["id"]
+        cid = 0
+        while co["id"] in obj_ids:
+            cid += 1
+            co["id"] = f"{base[:14]}{cid}"
+        obj_ids.add(co["id"]); objects.append(co)
     ids = [t["id"] for t in traps] + [l["id"] for l in loot]
     if len(ids) != len(set(ids)):
         return None
     out = {"w": w, "h": h, "cell": max(20, min(100, int(d.get("cell", 50)))),
            "origin": [ox, oy], "cells": cells, "elev": elev, "explored": explored,
            "traps": traps,
-           "loot": loot, "doors": doors, "pins": pins, "fog_off": bool(d.get("fog_off"))}
+           "loot": loot, "doors": doors, "pins": pins, "objects": objects,
+           "fog_off": bool(d.get("fog_off"))}
     if len(json.dumps(out)) > MAX_JSON:
         return None
     return out
@@ -409,10 +464,25 @@ def visible_map(mp, user_id, is_dm, visible_cells=()):
         pi = flat_idx(mp, p["x"], p["y"])
         if (vis in ("players", "revealed") and pi is not None and seen[pi]) or vis == "players":
             pins.append({k: p[k] for k in ("id", "x", "y", "type", "color", "title") if k in p})
+    objects = []
+    for o in mp.get("objects", []):
+        if o.get("dm_only"):
+            continue                              # DM-only objects are never transmitted
+        oi = flat_idx(mp, o["x"], o["y"])
+        if not (oi is not None and seen[oi]) and not mp.get("fog_off"):
+            continue                              # unseen cell: object not yet revealed
+        it = o.get("interact")
+        # Players learn the object and its action LABEL — never the linked door
+        # position or op payload; the server resolves the operation by object id.
+        copy = {"id": o["id"], "x": o["x"], "y": o["y"], "label": o["label"],
+                "state": o.get("state") or {}}
+        if it:
+            copy["interact"] = {"label": it["label"], "kind": it["op"]["kind"]}
+        objects.append(copy)
     return {"w": w, "h": h, "cell": mp["cell"], "origin": origin_of(mp),
             "cells": cells, "elev": elev,
             "explored": mp["explored"], "traps": traps, "loot": loot, "doors": doors,
-            "pins": pins, "fog_off": bool(mp.get("fog_off"))}
+            "pins": pins, "objects": objects, "fog_off": bool(mp.get("fog_off"))}
 
 
 # ---------- automatic world growth (D67) ----------

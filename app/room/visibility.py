@@ -43,11 +43,13 @@ def _token_index_cells(mp, token):
 
 
 def _snapshot(tok, viewer_id=None):
-    snap = {k: tok.get(k) for k in ("id", "label", "color", "x", "y",
-                                    "owner_user_id", "character_id")}
+    snap = {k: tok.get(k) for k in ("id", "label", "color", "x", "y", "owner_user_id",
+                                    "character_id", "controller_user_id", "mount_token_id")}
     if tok.get("owner_user_id") == viewer_id:
         snap["size"] = tok.get("size", "Medium")
         snap["fw"], snap["fh"] = tok.get("fw"), tok.get("fh")
+        snap["vw"], snap["vh"] = tok.get("vw"), tok.get("vh")
+        snap["rot"] = tok.get("rot")
     snap["conds"] = _conds.load(tok)
     snap["death"] = _death.load(tok)
     return snap
@@ -73,6 +75,10 @@ async def send_token_event(room_id, token, kind="token_add", extra=None):
             add_player.pop("size", None)
             add_player.pop("fw", None)               # D81 parity with the snapshot
             add_player.pop("fh", None)
+            add_player.pop("vw", None)               # D82: no visual silhouette leak either
+            add_player.pop("vh", None)
+            add_player.pop("rot", None)
+            add_player.pop("controller_user_id", None)   # D82: who leads it is not world data
     seen_cache = {}
     for uid, socks in list(clients(room_id).items()):
         is_dm = roles.get(uid) == "dm"
@@ -83,7 +89,11 @@ async def send_token_event(room_id, token, kind="token_add", extra=None):
             if uid not in seen_cache:
                 seen_cache[uid] = viewer_visible_cells(room_id, uid, mp)
             seen = seen_cache[uid]
-            visible = token.get("owner_user_id") == uid or bool(token_cells & seen)
+            # D82: a player always sees a token they control (like their own);
+            # this is DELIVERY, not fog — controller tokens still never REVEAL.
+            visible = (token.get("owner_user_id") == uid
+                       or token.get("controller_user_id") == uid
+                       or bool(token_cells & seen))
         vls = _last_seen.setdefault(room_id, {}).setdefault(uid, {})
         first_time = token["id"] not in vls
         if visible:

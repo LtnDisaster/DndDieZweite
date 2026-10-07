@@ -16,6 +16,7 @@ from .dice import (handle_cast, handle_long_rest, handle_npc_attack, handle_reso
                    handle_roll, handle_short_rest)
 from .items import handle_attune, handle_identify, handle_recharge, handle_use_item
 from .fog import handle_fog_edit, handle_fog_toggle
+from .interact import handle_interact
 from .movement import handle_move, handle_path_preview, handle_stop_move
 from .moveforced import handle_forced_move
 from .net import broadcast, get_map, map_lock, send_to, set_map, sys_msg
@@ -26,7 +27,9 @@ from .quests import (handle_quest_add, handle_quest_complete, handle_quest_delet
                      handle_quest_update)
 from .secret_events import handle_secret_event
 from .status import handle_exhaustion, handle_inspiration, handle_temp_hp
-from .tokens import handle_add_token, handle_del_token, handle_token_span, handle_update_npc
+from .tokens import (handle_add_token, handle_del_token, handle_token_controller,
+                     handle_token_mount, handle_token_rotate, handle_token_span,
+                     handle_token_visual, handle_update_npc)
 
 
 async def handle_map_edit(ws, room_id, user, is_dm, msg):
@@ -73,6 +76,13 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
             prev = old_loot.get(loot.get("id"))
             if prev is not None:
                 loot["taken_by"] = prev.get("taken_by")
+        # D82: object runtime state (the generic boolean carrier) is authoritative
+        # world state — a stale editor snapshot must not reset it (trap precedent).
+        old_objs = {e.get("id"): e for e in old.get("objects", [])}
+        for obj in mp_new.get("objects", []):
+            prev = old_objs.get(obj.get("id"))
+            if prev is not None:
+                obj["state"] = prev.get("state") or {}
         set_map(room_id, mp_new)
     sys_msg(room_id, "DM updated the map.")
     await broadcast(room_id, "map_changed", None)
@@ -98,7 +108,12 @@ HANDLERS = {
     "cond_remove": handle_cond_remove,
     "stand": handle_stand,
     "token_span": handle_token_span,
+    "token_visual": handle_token_visual,      # D82: presentation bounds only
+    "token_rotate": handle_token_rotate,      # D82: visual facing only, never the footprint
+    "token_controller": handle_token_controller,   # D82: DM assigns a generic controller
+    "token_mount": handle_token_mount,             # D82: acyclic rider→mount relationship
     "door": handle_door,
+    "interact": handle_interact,              # D82: data-driven allowlisted world ops
     "aoe": handle_aoe,
     "death_save": handle_death_save,
     "death_clear": handle_death_clear,

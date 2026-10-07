@@ -43,7 +43,8 @@ def test_render_loop_never_shadows_the_viewport_dimensions():
     loop_head = src[start:culled]
     assert "tokenSpan(t)" in loop_head                  # the fix is in place
     assert "const [w, h]" not in loop_head              # viewport w/h must not be shadowed
-    assert "tx > w+80 || ty > h+80" in loop_head        # culling STILL uses viewport w/h
+    # D82: culling grew with the visual radius, but STILL reads the viewport w/h
+    assert "tx > w + r + 40 || ty > h + r + 40" in loop_head
 
 
 def test_tokenAt_and_plan_use_distinct_span_names():

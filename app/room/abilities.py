@@ -7,6 +7,7 @@ The reply is filtered: a player never learns WHICH hidden creature their AoE hit
 only how many (D62); the game-log chronicle applies the same filter inside the core.
 """
 from .. import abilities, db
+from . import authz
 from .net import send_to
 
 
@@ -16,13 +17,11 @@ async def handle_ability_cast(ws, room_id, user, is_dm, msg):
     if tok is None:
         await send_to(ws, "error", {"msg": "No such token in this room"})
         return
-    if not is_dm:
-        member = db.q1("SELECT character_id FROM room_members WHERE room_id=? AND user_id=?",
-                       (room_id, user["id"]))
-        if tok["character_id"] is None or member is None \
-                or tok["character_id"] != member["character_id"]:
-            await send_to(ws, "error", {"msg": "You can only cast through your own character"})
-            return
+    if not is_dm and not authz.controls(tok, user["id"], False):
+        # D82: own character OR a token the DM assigned to this player
+        # (controller casting through a familiar uses the NPC block).
+        await send_to(ws, "error", {"msg": "You can only cast through your own character"})
+        return
     point = None
     if msg.get("x") is not None and msg.get("y") is not None:
         point = (msg.get("x"), msg.get("y"))

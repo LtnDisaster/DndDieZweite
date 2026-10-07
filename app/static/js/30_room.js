@@ -784,6 +784,43 @@ function wireSpanRow(tok){
   $("span-w").onkeydown = e => { if (e.key === "Enter") send(); };
   $("span-h").onkeydown = e => { if (e.key === "Enter") send(); };
 }
+function _visualRowHtml(tok){
+  const s = visualSpan(tok);   // D82: vw/vh win, otherwise the mechanical span — RENDER ONLY
+  return `<div class="row" title="Visual size in grid cells — how big the token is DRAWN. Occupancy and collision stay the Footprint.">`
+    + `<span class="tiny"><b>Visual Size</b></span><span class="tiny">W</span>`
+    + `<input id="vis-w" type="number" min="1" max="10" value="${s[0]}" style="width:46px">`
+    + `<span class="tiny">H</span><input id="vis-h" type="number" min="1" max="10" value="${s[1]}" style="width:46px">`
+    + `<button id="vis-apply">Apply</button></div>`;
+}
+function wireVisualRow(tok){
+  const btn = $("vis-apply"); if (!btn) return;
+  const send = () => {
+    const w = parseInt($("vis-w").value, 10), h = parseInt($("vis-h").value, 10);
+    if (!(Number.isInteger(w) && Number.isInteger(h) && w >= 1 && w <= 10 && h >= 1 && h <= 10)){
+      toast("Visual size: whole numbers from 1 to 10"); return;
+    }
+    wsSend({ type:"token_visual", token_id: tok.id, width: w, height: h });
+  };
+  btn.onclick = send;
+  $("vis-w").onkeydown = e => { if (e.key === "Enter") send(); };
+  $("vis-h").onkeydown = e => { if (e.key === "Enter") send(); };
+}
+function _rotRowHtml(tok){
+  const rot = (((tok.rot | 0) % 360) + 360) % 360;
+  return `<div class="row" title="Visual facing — rotates the ARTWORK only. The Footprint (occupied cells) never changes.">`
+    + `<span class="tiny"><b>Rotation</b></span>`
+    + `<button id="rot-left" title="Rotate 90° left">⟲</button><span class="tiny">${rot}°</span>`
+    + `<button id="rot-right" title="Rotate 90° right">⟳</button>`
+    + `<button id="rot-reset" title="Face north (0°)">0°</button></div>`;
+}
+function wireRotRow(tok){
+  const l = $("rot-left"); if (!l) return;
+  const cur = () => (((tok.rot | 0) % 360) + 360) % 360;
+  const send = d => wsSend({ type:"token_rotate", token_id: tok.id, degrees: ((cur() + d) % 360 + 360) % 360 });
+  l.onclick = () => send(270);
+  $("rot-right").onclick = () => send(90);
+  $("rot-reset").onclick = () => { if (cur() !== 0) send(360 - cur()); };
+}
 function renderSheet(tok){
   state.sel = tok ? tok.id : null;
   updateMoveControls();
@@ -797,7 +834,9 @@ function renderSheet(tok){
   const clsTxt = ch && ch.class_levels && ch.class_levels.length
     ? ch.class_levels.map(e => e.class_id[0].toUpperCase() + e.class_id.slice(1) + " " + e.level).join(" / ")
     : ((ch && ch.char_class) || "");
-  $("sheet-name").textContent = tok.label + (ch ? ` (${[ch.race, clsTxt, "Lv" + (ch.total_level || ch.level || 1)].filter(Boolean).join(" ")})` : " [NPC]");
+  const ctlM = tok.controller_user_id ? state.room.members.find(x => x.user_id === tok.controller_user_id) : null;
+  $("sheet-name").textContent = tok.label + (ch ? ` (${[ch.race, clsTxt, "Lv" + (ch.total_level || ch.level || 1)].filter(Boolean).join(" ")})` : " [NPC]")
+    + (ctlM ? ` · led by ${ctlM.username}` : "");
   const body = $("sheet-body");
   if (!ch){
     if (tok.npc && state.room.role === "dm"){ renderNpcSheet(tok); return; }
@@ -810,7 +849,7 @@ function renderSheet(tok){
   }
   const mod = v => { const m2 = Math.floor(((v||10)-10)/2); return (m2>=0?"+":"")+m2; };
   const isDM = state.room.role === "dm", own = tok.owner_user_id === state.me.id;
-  const spanRow = (isDM || own) ? _spanRowHtml(tok) : "";
+  const spanRow = (isDM || own) ? _spanRowHtml(tok) + _visualRowHtml(tok) + _rotRowHtml(tok) : "";
   const ac = ch.ac_total != null ? ch.ac_total : ch.ac;
   const inv = (ch.items || []);
   const invRows = inv.map(it => {
@@ -886,6 +925,8 @@ function renderSheet(tok){
   wireHpStates(tok);
   wireDeath(tok);
   wireSpanRow(tok);
+  wireVisualRow(tok);
+  wireRotRow(tok);
   $("hp-btns").classList.toggle("hidden", state.room.role !== "dm" || !tok.character_id);
   $("hp-adv").classList.toggle("hidden", state.room.role !== "dm");
   function v(s,k){ const x = s && s[k]; return typeof x === "number" ? x : 10; }
@@ -928,11 +969,19 @@ function renderNpcSheet(tok){
     const d = n.spell_slots[String(lv)] || n.spell_slots[lv] || {max:0};
     slotCells.push(`<label class="slotcell">L${lv}<input class="npc-slot" data-lv="${lv}" type="number" min="0" max="9" value="${d.max||0}" style="width:36px"></label>`);
   }
-  body.innerHTML = _spanRowHtml(tok) + `
+  body.innerHTML = _spanRowHtml(tok) + _visualRowHtml(tok) + _rotRowHtml(tok) + `
     <div class="row"><input id="npc-name" placeholder="NPC name" value="${esc(tok.label)}" maxlength="32">
       <select id="npc-size">${["Tiny","Small","Medium","Large","Huge","Gargantuan"].map(s => `<option value="${s}" ${(tok.size||"Medium")===s?"selected":""}>${s}</option>`).join("")}</select>
       <select id="npc-disp"><option value="">neutral</option>${["friend","neutral","hostile"].map(d => `<option value="${d}" ${(tok.disposition||"")===d?"selected":""}>${d}</option>`).join("")}</select>
     </div>
+    <div class="row"><select id="npc-controller" title="D82: this room member may act through this token (move, its turn, cast). DM always keeps full authority; revocable any time. NOT ownership, NOT an account." style="max-width:100%">
+      <option value="0">Controlled by: —</option>
+      ${state.room.members.map(x => `<option value="${x.user_id}" ${(tok.controller_user_id||0)===x.user_id?"selected":""}>led by ${esc(x.username)}</option>`).join("")}
+    </select></div>
+    <div class="row"><select id="npc-mount" title="D82: this token rides the selected token (rider→mount, acyclic, same room). Carrying movement is not yet automated — see docs." style="max-width:100%">
+      <option value="0">Mounted on: —</option>
+      ${state.tokens.filter(x => x.id !== tok.id).map(x => `<option value="${x.id}" ${(tok.mount_token_id||0)===x.id?"selected":""}>rides ${esc(x.label)}</option>`).join("")}
+    </select></div>
     <div class="hpbar"><div id="npc-hpbar"></div></div>
     <div class="row">
       <span class="tiny">HP</span><input id="npc-hp" type="number" min="0" value="${n.hp||0}" style="width:50px">/
@@ -1046,8 +1095,16 @@ function renderNpcSheet(tok){
     toast("NPC saved");
   };
   $("npc-del").onclick = () => { if (confirm("Remove this NPC token?")) wsSend({ type:"del_token", token_id: tok.id }); };
+  const ctl = $("npc-controller");
+  if (ctl) ctl.onchange = () => wsSend({ type:"token_controller", token_id: tok.id,
+                                         controller_id: (+ctl.value) || null });
+  const mnt = $("npc-mount");
+  if (mnt) mnt.onchange = () => wsSend({ type:"token_mount", token_id: tok.id,
+                                         mount_id: (+mnt.value) || null });
   $("npc-to-best").onclick = () => saveNpcToBestiary(n, ($("npc-name").value || "NPC").slice(0,32), tok);
   wireSpanRow(tok);
+  wireVisualRow(tok);
+  wireRotRow(tok);
   renderNpcSpells(tok);
   renderNpcAttacks(tok);
   renderNpcAbilities(tok);

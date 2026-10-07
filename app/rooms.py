@@ -575,8 +575,8 @@ def room_state(code: str, request: Request):
     else:
         visible = ws.viewer_visible_cells(room["id"], user["id"], mp)
         def _visible_token(t):
-            if t["owner_user_id"] == user["id"]:
-                return True
+            if t["owner_user_id"] == user["id"] or t.get("controller_user_id") == user["id"]:
+                return True                       # D82: controllers always see their token
             origin, side = footprint.occupied_origin(mp, t)
             return any((i := mapmodel.flat_idx(mp, x, y)) is not None and i in visible
                        for (x, y) in footprint.origin_cells(mp, origin, side))   # D72
@@ -588,6 +588,10 @@ def room_state(code: str, request: Request):
                 t.pop("size", None)
                 t.pop("fw", None)                    # D81: hidden tokens leak no footprint
                 t.pop("fh", None)
+                t.pop("vw", None)                    # D82: nor the visual silhouette
+                t.pop("vh", None)
+                t.pop("rot", None)
+                t.pop("controller_user_id", None)    # D82: nor who leads it
         last = ws._last_seen.get(room["id"], {}).get(user["id"], {})
         vis_ids = {t["id"] for t in tokens}
         ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]

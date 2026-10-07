@@ -28,6 +28,17 @@ function tokenSpan(t){
   const h = (t && +t.fh > 0) ? Math.min(10, +t.fh) : s;
   return [w, h];
 }
+/* D82: VISUAL bounds ≠ MECHANICAL OCCUPANCY. tokenSpan() stays the gameplay
+   truth (client mirror of footprint.token_span); visualSpan() is THE single
+   presentation derivation — explicit vw/vh win, otherwise the effective
+   mechanical span, so legacy tokens render unchanged. Never use visualSpan
+   for occupied cells, collision or planning — the server owns those. */
+function visualSpan(t){
+  const s = tokenSpan(t);
+  const w = (t && +t.vw > 0) ? Math.min(10, +t.vw) : s[0];
+  const h = (t && +t.vh > 0) ? Math.min(10, +t.vh) : s[1];
+  return [w, h];
+}
 
 /* Client mirrors of app/gear.py for previewing bonuses (server re-computes authoritatively). */
 const SKILLS = {

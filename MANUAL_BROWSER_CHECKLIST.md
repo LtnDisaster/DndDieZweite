@@ -100,6 +100,56 @@ BLOCKED until steps B1–B5 pass. Report, don't continue, on any failure.
 10. Try a footprint that does not fit (e.g. 10×10 in a corridor): refused,
     error message shown, old size and position preserved.
 
+## VISUAL SIZE, ROTATION, WORLD OBJECTS, COMPANIONS (D82 — Tactical only)
+
+1. Open an EXISTING room: nothing looks changed (visual defaults to the
+   mechanical footprint — legacy tokens render exactly as before).
+2. Select a token: a labelled **Visual Size** row (W, H, Apply) sits below the
+   Footprint row, and a **Rotation** row (⟲ degrees ⟳ 0°) below that.
+3. Keep Footprint 1×1, set Visual Size 3×7, Apply: the artwork grows tall and
+   stays CENTERED on the token's cell; movement preview/collision still use
+   exactly the 1×1 (walk it through a one-cell corridor — it fits).
+4. Footprint 3×7 with Visual Size 1×1: small circle, but the whole 3×7 still
+   collides — select it (or press `?debug` / open the map editor) and the
+   collision outline proves the occupied cells.
+5. A visual resize NEVER needs clearance (no "does not fit" error) and never
+   moves anything; the mechanical resize still refuses an ill-fitting rect
+   exactly as in the D81 checklist — the two operations are independent.
+6. The collision outline is only visible while the token is SELECTED, while
+   map-editing, or with `?debug` — not as a permanent translucent block.
+7. Click on the outer artwork of a big visual token (outside its real cells):
+   the token gets selected (presentation hit area; gameplay unaffected).
+8. Rotation ⟲/⟳: the body rotates in 90° steps — non-square visuals visibly
+   swap orientation; square/circle visuals show a small gold facing wedge.
+   Labels, HP bars and condition dots stay upright. Footprint cells never
+   change; F5 keeps the facing. A 2×4 token turned to 90° still fits a
+   2-wide corridor and NOT a 4-wide gap — the footprint did not rotate.
+9. DM map editor 🕹️ brush: place a Lever (op "toggle state"), close the
+   editor. Players see the marker on explored ground.
+10. Player clicks the lever from across the map: "Walk up to it first".
+    Adjacent: state flips — marker turns green/grey in BOTH windows, F5 keeps
+    it, a 🕹 line appears in the chronicle.
+11. Lever with op "door: open/close nearest" placed next to a door edge:
+    player clicks the lever → the door swings open with the normal door fog
+    reveal; again → closes. A LOCKED door resists ("It won't budge."). A
+    DM-only lever is invisible to players and refuses them without leaking
+    anything; a lever wired to a SECRET door answers "Nothing happens." and
+    the secret door stays invisible.
+12. NPC sheet → "Controlled by: led by <player>": that player can move the
+    token, preview paths, add conditions, use its turn (combat), cast through
+    it and open doors next to it. An unrelated player is refused for all of
+    these; the DM changes nothing. F5 keeps the assignment; the sheet header
+    shows "· led by <player>".
+13. Revoke (—""): the player's move attempts fail immediately; DM still acts.
+14. Fog rule: a controlled companion standing in unexplored dark is VISIBLE
+    to its controller (it's the token they play) but lifts NO fog around it
+    — the surroundings stay black until the DM reveals.
+15. NPC sheet → "Mounted on: rides <token>": assign, F5 — persists. Assign
+    the reverse direction (mount rides its own rider): "riding cycle" refused.
+    Ride itself: refused. Tokens from another room: refused.
+16. Diorama shows none of the new UI/objects (out of scope, by design) and
+    old data never shows anything new until the DM assigns it.
+
 ## Extended manual checks (after smoke passes)
 
 - Two clients: one stays Diorama while the other stays Tactical (views are
@@ -122,6 +172,8 @@ BLOCKED until steps B1–B5 pass. Report, don't continue, on any failure.
 
 ## History
 
+- Sprint 16: D82 section added (visual size / rotation / world objects /
+  controller / mount, Tactical only). Diorama deliberately unchanged.
 - Sprint 12: BUILD CHECK added — `ReferenceError: gridOrigin is not defined`
   in a real browser proved mixed script generations were the black-canvas
   root cause across sprints 10–11 (DECISIONS D78). Bring step added to the

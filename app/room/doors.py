@@ -7,6 +7,7 @@ remove any door. A player may only **toggle an unlocked door they are standing n
 closed (or locked) door blocks movement, which the pathfinder enforces server-side.
 """
 from .. import db, events, footprint, los, mapmodel
+from . import authz
 from .net import broadcast, fog_patch, get_map, map_lock, send_to, set_map, sys_msg
 
 
@@ -21,10 +22,11 @@ def _door_of(msg, mp):
 
 
 def _player_cells(room_id, user_id, mp):
-    """Cells occupied by ANY token this user owns (multi-token players included)."""
+    """Cells occupied by ANY token this user owns OR controls (D82: a
+    companion counts for door reach — operational authority, authz SSOT)."""
     cells = set()
     c = mp["cell"]
-    for tok in db.q("SELECT x, y FROM tokens WHERE room_id=? AND owner_user_id=?", (room_id, user_id)):
+    for tok in authz.controlled_rows(room_id, user_id):
         cx = max(0, min(mp["w"] - 1, int(tok["x"] // c)))
         cy = max(0, min(mp["h"] - 1, int(tok["y"] // c)))
         cells.add((cx, cy))
@@ -81,6 +83,14 @@ async def handle_door(ws, room_id, user, is_dm, msg):
                 return
             door["closed"] = not door["closed"]
         set_map(room_id, mp)
+    await door_toggled(room_id, user["id"], door)
+
+
+async def door_toggled(room_id, actor_id, door):
+    """Shared post-flip lifecycle for an ALREADY-FLIPPED, PERSISTED door: LOS
+    reveal on open, chronicle line, event fact, map_changed broadcast.
+    Used by handle_door and by world-object levers (D82) — one door lifecycle,
+    no second implementation. map_lock must NOT be held by the caller here."""
     opened = not door["closed"]
     newly = []
     if opened:
@@ -99,7 +109,7 @@ async def handle_door(ws, room_id, user, is_dm, msg):
         sys_msg(room_id, f"🚪 The door {verb}.")
     # Fact emitted AFTER the committed change (D52): the door state lives in the map.
     events.emit(events.make("door_opened" if opened else "door_closed", room_id=room_id,
-                            actor_id=user["id"], x=door["x"], y=door["y"], dir=door["dir"],
+                            actor_id=actor_id, x=door["x"], y=door["y"], dir=door["dir"],
                             locked=bool(door["locked"])))
     if newly:
         await broadcast(room_id, "explored", fog_patch(mp, newly))

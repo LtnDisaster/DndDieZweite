@@ -90,6 +90,8 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/room/items.py` | Item use/attune/identify/recharge | `handle_use_item()`, `handle_attune()` |
 | `app/room/traps.py` | Trap and loot resolution | `hit_trap()`, `take_loot()` |
 | `app/room/doors.py` | Door permissions incl. dm_only/secret (D63) | `handle_door()` |
+| `app/room/authz.py` | The single token-control authority question (owner/controller/DM, D82) | `controls()`, `controlled_rows()` |
+| `app/room/interact.py` | World-object interaction over allowlisted ops (D82) | `handle_interact()` |
 | `app/room/visibility.py` | Footprint LOS token delivery and ghosts | `viewer_visible_cells()`, `send_token_event()`, `broadcast_token_add()` |
 | `app/static/js/10_core.js` | Global `state`, API helper, toast | `state`, `api()`, `esc()`, `toast()` |
 | `app/static/js/30_room.js` | Room state, chat, sheet, journal, party rendering | `openRoom()`, `refreshRoom()`, `renderFeed()` |
@@ -187,7 +189,23 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
     from the shared helper (`token_span` → `occupied_cells`/`origin_cells`);
     never compute a footprint rectangle from size anywhere else. Old square
     tokens load unchanged; a size-category change resets the custom span.
-  - `app/mapmodel.py`
+    **Visual invariant (D82):** `tokens.vw`/`vh` (optional; default = the
+    EFFECTIVE collision span via `footprint.visual_span`) and `tokens.rot`
+    (0/90/180/270) are PRESENTATION ONLY — the visual rect is centered on the
+    footprint center, the Tactical renderer draws/selects through it, but
+    occupancy, collision, A*, LOS, trap/AoE mechanics and combat budgets keep
+    asking `token_span()`/`occupied_cells()`. VISUAL BOUNDS ARE NOT MECHANICAL
+    OCCUPANCY; renderer presentation must never become collision truth;
+    rotation never swaps the footprint. `app/room/authz.py::controls()` is the
+    single answer to "may this user act through this token?" (owner OR DM-
+    assigned `controller_user_id` OR DM) — movement/turn/conditions/death/
+    casting/door-and-object reach all ask it; a controller is not an owner,
+    gets no sheet rights, and reveals no fog. `tokens.mount_token_id` is an
+    acyclic rider→mount RELATIONSHIP (relationship layer only — no carrying
+    movement yet) and separate from the controller axis.
+  - `app/mapmodel.py` — plus `objects` (D82): generic world objects as DATA
+    (label + allowlisted op `toggle`/`door`); `room/interact.py` executes the
+    op (`door` reuses the one `doors.door_toggled` lifecycle); no eval, ever.
   - `app/room/doors.py` — open/close/lock plus door-open LOS reveal; `dm_only`
     doors answer players with "It won't budge." (checked before lock state),
     `secret` doors are never transmitted to players (silent refusal like a
@@ -499,6 +517,12 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `fog_toggle` | `room.fog.handle_fog_toggle` | DM | no | room-wide `fog_off` flag: terrain+static visible to all, live NPCs stay LOS-filtered (D60) |
 | `map_edit` | `dispatch.handle_map_edit` | DM | no | map model sanitized; preserves trap/loot/fog runtime state; resize carries `explored` overlap |
 | `door` | `room.doors.handle_door` | DM or adjacent player | no | closed/locked edges block movement and LOS |
+| `token_span` | `room.tokens.handle_token_span` | owner or DM | no | mechanical resize; complete rect must fit at the CURRENT anchor or it is rejected unchanged (D81/15B) |
+| `token_visual` | `room.tokens.handle_token_visual` | owner or DM | no | D82 VISUAL bounds (vw/vh) — presentation; no clearance check, footprint untouched |
+| `token_rotate` | `room.tokens.handle_token_rotate` | owner or DM | no | D82 facing 0/90/180/270 — never rotates the mechanical footprint |
+| `token_controller` | `room.tokens.handle_token_controller` | DM only | no | D82 assign/clear generic controller (must be a room member; revocable) |
+| `token_mount` | `room.tokens.handle_token_mount` | DM only | no | D82 acyclic rider→mount relationship, same room; relationship layer only |
+| `interact` | `room.interact.handle_interact` | member (reach-gated like doors) | no | D82 allowlisted world-object ops (`toggle` / linked `door`); dm_only/secret refuse without leaks |
 | `spawn_encounter` | `room.encounters.handle_spawn_encounter` | DM | no | validates encounter ownership |
 | `audio_add/remove/play/pause/stop` | `room.audio.*` | DM | no | room ambience; `pause` = `playing:false` with `current_id` kept (D60) |
 | `sound_trigger` | `room.audio.handle_sound_trigger` | DM | maybe | targeted private SFX |
@@ -523,6 +547,9 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `fog_changed` | fog | room | no | batch persistent-explored updates |
 | `initiative` | combat | room | no |
 | `cond` / `death` | conditions/death | room or snapshot | usually no |
+| `token_span` / `token_visual` / `token_rot` | room.tokens | room | no | D81/D82 mechanical span, visual bounds and facing (fields also ride snapshots/token_add) |
+| `token_controller` / `token_mount` | room.tokens | room | no | D82 relationship broadcasts; hidden NPC tokens strip controller (D81 leak-parity) |
+| `object_state` | room.interact | room | no | D82 generic object boolean flipped (state also rides `/state` grid) |
 | `ping` | pings | room | no |
 | `map_expanded` | room.growth | room | no | auto world growth (D67, flag-off default D77): new `w,h,origin`; NO pixel shift (D72) — clients refetch; player-owned token walks/teleports only |
 | `forced_moved` | room.moveforced | DM socket | private | final cell + z of a forced move (D71); movement itself rides `step` |
@@ -550,6 +577,9 @@ These must remain server-side:
 - Spell slots.
 - Movement legality, path previews and stop transitions.
 - Footprint collision and placement.
+- Which cells are occupied — never derived from visual bounds (D82).
+- Token-control authority (owner/controller/DM via `room/authz.py`, D82).
+- World-object operations: only the allowlisted ops, never code (D82).
 - Line of sight, token visibility and fog exploration.
 - Traps and loot.
 - Hidden NPC stat blocks.
@@ -666,7 +696,7 @@ Important tables:
 - `creatures` — private per-user bestiary templates.
 - `rooms` — room metadata and join code.
 - `room_members` — membership and role.
-- `tokens` — PC/NPC tokens, NPC block JSON, conditions, death state, size (interpreted as footprint), disposition.
+- `tokens` — PC/NPC tokens, NPC block JSON, conditions, death state, size (interpreted as footprint), disposition; `fw`/`fh` mechanical span (D81); `vw`/`vh` visual bounds + `rot` facing — RENDER ONLY (D82); `controller_user_id` generic controller relationship + `mount_token_id` acyclic rider→mount — NOT ownership (D82).
 - `messages` — game-log and chat/narrative messages with visibility metadata.
 - `room_state` — initiative JSON, map JSON, audio JSON.
 - `encounters` — private per-user encounter templates.
@@ -707,6 +737,11 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_gear.py` | AC, items, skills, saves, defenses, spell math |
 | `tests/test_path.py` | legacy and current A*, walls, doors, difficult terrain |
 | `tests/test_footprint_path.py` | large/Huge footprints, collision, preview terrain restrictions |
+| `tests/test_visual_size.py` | D82 visual bounds ≠ collision: fallback, independence, persistence, node hit test |
+| `tests/test_rotation.py` | D82 facing normalization/persistence; footprint never rotates; upright-text pin |
+| `tests/test_interact.py` | D82 world objects: schema is data (allowlist), reach, dm_only/secret/locked refusals, door-lifecycle reuse, state survives stale map_edit, no-exec pin |
+| `tests/test_controller.py` | D82 controller: assign/revoke, member-only, operational authority, unrelated refused, delivery without fog reveal |
+| `tests/test_mount.py` | D82 mount: assign/revoke, self + multi-hop cycle rejection, same-room, DM-only |
 | `tests/test_los.py` | wall/door LOS, sealed corners, footprint sources/targets |
 | `tests/test_mapmodel.py` | map sanitize, reveal cells, doors, pins |
 | `tests/test_movement_fog.py` | path previews, hidden token payloads, fog edits, movement stop, trap stop |

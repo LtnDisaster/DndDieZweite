@@ -10,6 +10,7 @@ not part of the character library.
 NPC/monster tokens never enter it: they just sit at 0 HP.
 """
 from .. import gear, db
+from . import authz
 from .dice import dice_post, do_roll
 from .net import broadcast, send_to, sys_msg
 
@@ -59,7 +60,7 @@ def _pc(room_id, user, is_dm, msg):
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None or tok["character_id"] is None:
         return None                              # missing, or an NPC (no death saves)
-    if not (is_dm or tok["owner_user_id"] == user["id"]):
+    if not authz.controls(tok, user["id"], is_dm):   # D82: owner or assigned controller
         return False
     return tok
 

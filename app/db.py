@@ -209,6 +209,17 @@ def init_db():
     migrate("tokens", "fw", "fw INTEGER")   # D81: custom footprint width (NULL = square of size)
     migrate("tokens", "fh", "fh INTEGER")   # D81: custom footprint height (NULL = square of size)
     migrate("tokens", "z", "z INTEGER DEFAULT 0")
+    migrate("tokens", "vw", "vw INTEGER")   # D82: visual width (NULL = mechanical span; RENDER ONLY)
+    migrate("tokens", "vh", "vh INTEGER")   # D82: visual height (NULL = mechanical span; RENDER ONLY)
+    migrate("tokens", "rot", "rot INTEGER")  # D82: visual facing 0/90/180/270 (NULL = 0; RENDER ONLY)
+    # D82: generic CONTROLLER relationship (companion foundation) — a room
+    # member may act through the token; NOT ownership, NOT an account.
+    migrate("tokens", "controller_user_id",
+            "controller_user_id INTEGER REFERENCES users(id)")
+    # D82: generic MOUNT relationship — a token MAY ride exactly one other
+    # token in the same room. Acyclic by construction; NOT the controller
+    # relationship; carrying movement is a separate, later mechanic.
+    migrate("tokens", "mount_token_id", "mount_token_id INTEGER REFERENCES tokens(id)")
     migrate("messages", "visibility", "visibility TEXT NOT NULL DEFAULT 'public'")
     migrate("messages", "recipient_user_id", "recipient_user_id INTEGER REFERENCES users(id)")
     migrate("messages", "meta", "meta TEXT DEFAULT '{}'")

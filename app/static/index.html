@@ -408,6 +408,8 @@ window.addEventListener("unhandledrejection", function(ev){
             <button class="brush" data-b="lower" title="Lower elevation −1">⛰️−</button>
             <button class="brush" data-b="trap" title="Hidden trap">⚠️</button>
             <button class="brush" data-b="loot" title="Hidden loot">🎁</button>
+            <button class="brush" data-b="obj" title="World object: lever/switch/chest — data-driven, allowlisted actions">🕹️</button>
+            <button class="brush" data-b="objrm" title="Remove a world object">🕹️✕</button>
             <button class="brush" data-b="door" title="Door: click a cell edge">🚪</button>
             <button class="brush" data-b="doorrm" title="Remove a door">🚫</button>
             <button class="brush" data-b="pin" title="Place map pin">📍</button>
@@ -432,6 +434,16 @@ window.addEventListener("unhandledrejection", function(ev){
             <label><input id="door-locked" type="checkbox"> start locked</label>
             <label><input id="door-dmonly" type="checkbox"> DM-only</label>
             <label><input id="door-secret" type="checkbox"> hidden from players</label>
+          </div>
+          <div class="row trapfields hidden" id="obj-fields">
+            <input id="obj-label" placeholder="Object (e.g. Rusty Lever)" maxlength="80">
+            <input id="obj-act" placeholder="Act label (e.g. Pull Lever)" maxlength="40">
+            <select id="obj-op" title="The ONE allowlisted operation the server runs when someone interacts">
+              <option value="toggle">toggle state</option>
+              <option value="door">door: open/close nearest (≤3)</option>
+            </select>
+            <label class="tiny" style="display:flex;align-items:center;gap:3px" title="Only you may interact with it">
+              <input id="obj-dm" type="checkbox">DM-only</label>
           </div>
           <div class="row lootfields hidden" id="loot-fields">
             <input id="loot-label" placeholder="Loot (e.g. 25 gp and a silver ring)" maxlength="80">
