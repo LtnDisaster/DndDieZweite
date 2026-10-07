@@ -13,10 +13,10 @@ def _color(name):
 
 
 def _spawn_origin(mp, room_id, token, x, y):
-    existing = db.q("SELECT id, x, y, owner_user_id, size FROM tokens WHERE room_id=?", (room_id,))
+    existing = db.q("SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens WHERE room_id=?", (room_id,))
     desired = footprint.origin_from_pixel(x, y, mp["cell"], mp)
     origin = footprint.find_valid_origin(mp, token, desired, existing)
-    return footprint.origin_pixels(origin, footprint.side_for_size(token.get("size")), mp["cell"]) if origin else None
+    return footprint.origin_pixels(origin, footprint.token_span(token), mp["cell"]) if origin else None
 
 
 async def handle_spawn_encounter(ws, room_id, user, is_dm, msg):

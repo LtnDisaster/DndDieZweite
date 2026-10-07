@@ -178,6 +178,15 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
     A* weights in `path.py` stay 10/14 — cost is a route post-processing, not search.
   - `app/path.py` — footprint-aware A*; optional `elev=` gates steps at |Δz| ≤ 1 (D70).
   - `app/footprint.py` — size/anchor/collision SSOT.
+    **Footprint invariant (D43+D81):** token `(x, y)` is the canonical anchor
+    (centre of its top-left occupied cell); `footprint_width`/`footprint_height`
+    (`tokens.fw`/`tokens.fh`, NULL = square of the size category) define the
+    occupied rectangle. EVERY gameplay system — movement, collision, path
+    preview/execution, growth, LOS/vision source cells, snapshot visibility,
+    ability/AoE intersection, client render and hit test — derives its cells
+    from the shared helper (`token_span` → `occupied_cells`/`origin_cells`);
+    never compute a footprint rectangle from size anywhere else. Old square
+    tokens load unchanged; a size-category change resets the custom span.
   - `app/mapmodel.py`
   - `app/room/doors.py` — open/close/lock plus door-open LOS reveal; `dm_only`
     doors answer players with "It won't budge." (checked before lock state),
@@ -1032,6 +1041,25 @@ links only; they never grant redistribution rights.
   and `begin_turn` hands fresh resources to the next combatant. The client's
   turn bar (`renderInit` in 30_room.js) only renders the broadcast initiative
   object; the server re-enforces everything, the preview is a hint.
+- **Footprint editing (D81/15B)**: the `token_span` operation is the ONLY
+  resize path (owner or DM, 1..10, validated as the COMPLETE rectangle at the
+  token's CURRENT anchor — never relocates; a rejection keeps everything).
+  The sheet's Footprint W/H row drives it. Render-loop code must NEVER
+  shadow this loop scope's viewport `w`/`h` names (the 15B all-tokens-invisible
+  incident; pinned in `test_sprint15b.py`).
+- **Condition lifecycle (D80 — one clock per condition)**: a condition is
+  `{k, rounds, until}` on `tokens.conds` (`app/conditions.py` owns catalog and
+  ALL progression). `until` = "" → round clock (`step_rounds`, once per wrap);
+  "start"/"end" → the creature's own turn clock (`step_turn`) — advanced ONLY
+  by `combat.advance_turn`, the single turn lifecycle (end hooks → advance →
+  round clock on wrap → start hooks → fresh resources). Never call
+  `step_conditions`/`step_turn` from anywhere else; a condition must never
+  tick through two hooks. Voluntary movement is gated by
+  `movement._movement_block_reason` (0 HP or the incapacitated family) at the
+  entry AND every walk step — DM moves and `moveforced` stay separate.
+  Standing from prone is the `stand` handler: own turn, charges
+  `ceil(walk_budget/2)` of the BASE via `spend_move` (same accounting as Dash
+  and walk — never a second tracker); outside combat it is free.
 - Diagnostics for future "all black" bugs: open the page with `?debug` —
   the topbar shows build token + `integrity=ok/FAIL/DRIFT` (D78), view mode,
   canvas size/DPR, cam/camT/camD, camInit trace, `grid=y/n` + window

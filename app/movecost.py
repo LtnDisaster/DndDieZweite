@@ -40,7 +40,8 @@ def route_cost(mp, route, footprint: int = 1):
     start (never per segment). For footprints larger than one cell a step is
     difficult if any newly entered cell is difficult terrain."""
     from . import mapmodel
-    side = max(1, int(footprint or 1))
+    from .footprint import wh
+    w, h = wh(footprint)
     total = 0
     diag = 0
     for prev, cur in zip(route, route[1:]):
@@ -53,14 +54,14 @@ def route_cost(mp, route, footprint: int = 1):
             diag += 1
         else:
             unit = 1
-        if side == 1:
+        if (w, h) == (1, 1):
             mult = terrain_mult(mp, cur[0], cur[1])
         else:
-            new = {(x, y) for x in range(cur[0], cur[0] + side)
-                   for y in range(cur[1], cur[1] + side)
+            new = {(x, y) for x in range(cur[0], cur[0] + w)
+                   for y in range(cur[1], cur[1] + h)
                    if mapmodel.in_world(mp, x, y)}
-            old = {(x, y) for x in range(prev[0], prev[0] + side)
-                   for y in range(prev[1], prev[1] + side)
+            old = {(x, y) for x in range(prev[0], prev[0] + w)
+                   for y in range(prev[1], prev[1] + h)
                    if mapmodel.in_world(mp, x, y)}
             mult = max([terrain_mult(mp, x, y) for (x, y) in new - old] or [1])
         total += unit * mult

@@ -433,7 +433,7 @@ app, `GET /api/health`, log in.
 Canonical run (identical environment everywhere):
 
 ```bash
-docker compose run --rm test            # 342 tests (+9 node-skipped), Python 3.12 + pinned deps
+docker compose run --rm test            # 379 tests (+11 node-skipped), Python 3.12 + pinned deps
 ```
 
 Dev shortcut on the host venv:

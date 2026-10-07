@@ -323,3 +323,111 @@ stored speed untouched, no second dash, not-on-own-turn refused); End Turn
 (advances, next gets fresh 6/x + available slots; stranger refused); full
 round resets resources. `test_view_mode.py`: view round-trip never mutates
 initiative/plan/token positions.
+
+---
+
+# Sprint 14 — Conditions connected to the turn lifecycle (D80)
+
+The D74/D79 turn loop worked but conditions only had a round clock, no
+turn-anchored durations existed, "incapacitated" was decorative (movement was
+gated only at 0 HP), and prone had no mechanical ending.
+
+## Fixed / shipped
+- `conditions.py` — every entry is now `{k, rounds, until}`; `until` selects
+  the condition's ONE clock ("": round, "start"/"end": own turn clock via new
+  `step_turn`). Round and turn clocks provably never touch the same entry.
+- `room/combat.py` — the turn lifecycle is ONE function `advance_turn`
+  (end hooks of the leaving token → advance → round clock on wrap → start
+  hooks of the new token → fresh resources); `init_start/next/end_turn/
+  end_round` all consolidated onto it (three duplicated wrap blocks removed).
+- `room/movement.py` — the voluntary-movement gate now covers the
+  incapacitated family (incapacitated/unconscious/paralyzed/stunned/
+  petrified) next to 0 HP; entry-checked AND re-checked on every walk step.
+  DM moves and forced movement (`moveforced`) are separate authority paths.
+- `room/conditions.py` + `dispatch.py` — new `stand` handler: prone only,
+  never moves the token, free outside combat; in own combat turn charges
+  `ceil(walk_budget/2)` of the BASE (Dash-independent) through the ONE
+  `spend_move` accounting; every validation runs before prone is removed.
+- Client (Tactical): condition chips show `(Nr)` / `→turn start|end`,
+  a "Stand Up" button appears exactly when legal to try, and the condition
+  editor got an expiry select. Reconnect replays conditions from the token
+  DB (nothing lives in the DOM).
+
+## Tests added
+`tests/test_conditions_lifecycle.py` (15): exact round-clock expiry; start-
+anchor ticks only at own turn starts (wrap never touches it); end-anchor
+expires exactly at the turn end; both clocks on one token with per-step
+delta checks; exploration never advances durations; downed cannot move but
+forced movement works; unconscious blocks and unblocks movement; stand free
+outside combat (and "Not prone" rejection); combat stand costs 3/6 and the
+rest still walks; rejection without budget keeps prone; Dash keeps the BASE
+cost; not-on-own-turn rejected; downed cannot stand; reconnect replays full
+condition state; End Turn resets resources after hooks ran. Three
+`test_integration` pins updated to the 3-field condition schema.
+
+---
+
+# Sprint 15 — Rectangular token footprints (D81)
+
+Footprints were square-only (size category ⇒ n×n); a 3×7 serpent could not
+exist, and every consumer (A*, collision, fog growth, vision, rendering)
+threaded a single `side` integer.
+
+## Fixed / shipped
+- `db.py` — `tokens.fw`/`tokens.fh` (NULL = square of size category) added via
+  the existing migration helper; every existing token loads unchanged.
+  Width/height clamp 1..10; changing the size category clears the custom span.
+- `footprint.py` — `token_span()` is THE rectangle derivation (fw/fh win,
+  category fallback); `wh()` normalizes the legacy side-int parameters into
+  (w, h); anchor extends right/down. All geometry functions accept either.
+- `path.py`, `movecost.py`, `mapmodel.growth_needed` — same single normalizer;
+  the conservative diagonal mid-footprint rule and the "any newly entered cell
+  is difficult" rule generalize without touching A* semantics or costs.
+- `movement/visibility/doors/encounters/ws/rooms` — the eight SELECT column
+  lists and the bring-back/reveal paths carry fw/fh; hidden NPC tokens leak no
+  shape to players (size, fw, fh all popped).
+- NPC editor — Width/Height number inputs beside the existing size select;
+  add/update accept the span and re-place via the shared find_valid_origin.
+- Client — `tokenSpan()` mirrors the server derivation; render rect, hit
+  testing, path-preview goal marker and the plan payload (w/h) all follow the
+  real footprint. Diorama untouched (renders the category square as before).
+
+## Tests added
+`tests/test_footprint_rect.py` (16): exact 21-cell sets for 3×7 and 7×3 (and
+their inequality), 1×1/2×2 squares, independent-edge clamp; a 3×7 NPC blocked
+by a 2-row corridor while an Imp walks the same corridor; the same Ogre walking
+a 7-row gate with preview cells including the far row; preview and execution
+agree on a refused goal; two 3×7 spawns never overlap and a far-cell teleport
+onto the rectangle is rejected; trap still springs only on the anchor step
+(footprint rows do NOT), the shared occupied_cells intersection fires on a far
+row; vision source cells = full rectangle and strictly more world in view;
+category change clears fw/fh; /state round-trip keeps the shape; legacy square
+tokens untouched; client tokenSpan parity (node).
+
+---
+
+# Sprint 15B — Recovery: invisible Tactical tokens + undiscoverable footprint UI
+
+## Root cause A (ALL tokens invisible)
+Sprint 15's render-loop edit declared `const [w, h] = tokenSpan(t)` INSIDE the
+token loop whose scope owns the VIEWPORT dimensions `w`/`h`; the culling
+`continue` two lines below (`tx > w+80 || ty > h+80`) therefore compared
+against the token's own span — every token more than ~81 px from the canvas
+origin was skipped. No console error (legal JS), map fine, tokens gone.
+Fixed by renaming the loop variables to `tw`/`th`; pinned by a static
+regression-class test plus a node harness that runs the real client
+`tokenSpan` over real snapshot tokens (legacy 1x1/2x2 must be visible,
+3x7/7x3 must be correct).
+
+## Root cause B (no way to edit width/height)
+The inputs were only in the NPC stat-block sheet (DM-owned monster tokens).
+Any other selected token — including one's own — opens the character sheet,
+which had nothing. Now: a labelled **Footprint W/H + Apply** row at the top of
+the normal sheet for every token you may control (DM any token, player own
+token), driving the new server operation `token_span` (D81 amendment):
+owner check, 1..10 integers, COMPLETE rectangle validated at the token's
+CURRENT anchor via the shared footprint helper — an invalid resize is rejected
+with old dimensions and position untouched (no relocation, ever). Successful
+resize broadcasts `token_span`; sheet and canvas update live and a fresh
+snapshot keeps the shape. `update_npc` now follows the same in-place rule when
+the span or size category changes.

@@ -1,14 +1,16 @@
 """Pure A* pathfinding on a terrain grid (D72: all cells are WORLD cells).
 
 The grid representation intentionally remains pure. Footprint geometry is supplied
-by the caller through ``footprint`` (an ``n x n`` side), so this module can validate
-large-token movement without importing token/database models. Terrain lookups and
-bounds go through mapmodel's world<->storage conversion — this module never
-indexes the raw arrays itself.
+by the caller through ``footprint`` — a legacy int (square) or a ``(w, h)`` pair
+(D81) — so this module can validate large-token movement without importing
+token/database models; ``footprint.wh`` is the single normalizer shared with
+``footprint``/``movecost``. Terrain lookups and bounds go through mapmodel's
+world<->storage conversion — this module never indexes the raw arrays itself.
 """
 import heapq
 
 from . import mapmodel, movecost
+from .footprint import wh
 
 DIRS = [(1, 0, 10), (-1, 0, 10), (0, 1, 10), (0, -1, 10),
         (1, 1, 14), (1, -1, 14), (-1, 1, 14), (-1, -1, 14)]
@@ -16,7 +18,8 @@ DIRS = [(1, 0, 10), (-1, 0, 10), (0, 1, 10), (0, -1, 10),
 
 def _cells(origin, side):
     cx, cy = origin
-    return [(cx + dx, cy + dy) for dy in range(side) for dx in range(side)]
+    w, h = wh(side)
+    return [(cx + dx, cy + dy) for dy in range(h) for dx in range(w)]
 
 
 def _valid_origin(mp, origin, side, allowed_cells=None):
@@ -80,7 +83,7 @@ def step_legal(mp, old, new, blocked_edges=None, footprint=1, elev=None):
     is read from the authoritative map (D70/D72).
     """
     be = blocked_edges or set()
-    side = max(1, int(footprint or 1))
+    side = wh(footprint)
     dx, dy = new[0] - old[0], new[1] - old[1]
     if max(abs(dx), abs(dy)) != 1:
         return False
@@ -95,12 +98,13 @@ def find_path(mp, start, goal, max_steps=400, blocked_edges=None,
     (inclusive).
 
     ``blocked_edges`` is a set of frozenset({(x1,y1),(x2,y2)}) interior edges that
-    may not be crossed. ``footprint`` is the creature's square side in cells. Large
-    creatures move as their whole footprint; diagonal movement conservatively requires
-    both orthogonal intermediate footprints to be legal.
+    may not be crossed. ``footprint`` is the creature's side in cells — an int or
+    a ``(w, h)`` pair. Large creatures move as their whole footprint; diagonal
+    movement conservatively requires both orthogonal intermediate footprints to
+    be legal.
     """
     be = blocked_edges or set()
-    side = max(1, int(footprint or 1))
+    side = wh(footprint)
     (sx, sy), (gx, gy) = start, goal
     if not mapmodel.in_world(mp, gx, gy) or not mapmodel.in_world(mp, sx, sy):
         return None
@@ -115,7 +119,7 @@ def find_path(mp, start, goal, max_steps=400, blocked_edges=None,
         return _diagonal_valid(mp, old, new, side, be)
 
     def move_cost(old, new, base):
-        if side == 1:
+        if side == (1, 1):
             return base * 2 if mapmodel.difficult(mapmodel.terrain_at(mp, new[0], new[1])) else base
         old_cells = {(x, y) for (x, y) in _cells(old, side) if mapmodel.in_world(mp, x, y)}
         new_cells = {(x, y) for (x, y) in _cells(new, side) if mapmodel.in_world(mp, x, y)}

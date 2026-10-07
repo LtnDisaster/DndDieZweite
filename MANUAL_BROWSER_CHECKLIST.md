@@ -63,6 +63,43 @@ BLOCKED until steps B1–B5 pass. Report, don't continue, on any failure.
 11. **End combat:** DM clicks End — turn bar disappears, combat ends.
 12. **Exploration again:** walk a long route — no budget applies any more.
 
+## CONDITIONS & TURNS (D80 — Tactical only)
+
+1. **Timed condition:** open your token sheet → Conditions row; add e.g.
+   poisoned with rounds 2, anchor "round end". The chip shows "(2r)".
+2. **Start combat** (DM ⚔️).
+3. **Duration visible:** the chip still counts 2 during round 1.
+4. **End turns** until one full round wraps — chip shows "(1r)"; not before
+   the wrap, not twice at it.
+5. **Exact expiry:** after the next wrap the chip is gone. Repeat with anchor
+   "my turn start" — it must change ONLY when your turn begins, and a "my
+   turn end" condition must clear the moment your turn ends.
+6. **Apply prone** (DM or yourself) — dot on the token, chip "Prone".
+7. **Stand Up:** when it is your turn, the Conditions row shows a "Stand Up"
+   button — click it.
+8. **Budget:** the turn bar goes Move 6/6 → 3/6 immediately; the token did
+   not move.
+9. **Move with the rest:** walk up to 3 squares — works; a 4th is refused.
+10. **Down a creature** (DM sets your HP to 0): any move attempt is refused
+    with "cannot move while downed"; the DM can still push/teleport it.
+11. **Voluntary movement rejected** also with unconscious/stunned applied.
+12. **End combat:** prone outside combat stands for free; long walks stay
+    unlimited and no condition duration ticks while exploring.
+
+## RECTANGULAR FOOTPRINTS (D81/15B — Tactical only)
+
+1. Open an existing room.
+2. Confirm the OLD tokens are visible (the 15B incident: they were gone).
+3. Select an existing token (your own, or any token as DM).
+4. The sheet shows a labelled **Footprint** row (W, H, Apply) — no hidden UI.
+5. Set Width 3, Height 7 and hit Apply.
+6. The token visibly becomes a 3×7 rectangle at the SAME spot instantly.
+7. Press F5 (refresh) — it is still 3×7 and the row shows 3 and 7.
+8. Move it once — walk/preview account for the whole rectangle.
+9. Select an old Large NPC: the row shows 2×2 (its size category) — untouched.
+10. Try a footprint that does not fit (e.g. 10×10 in a corridor): refused,
+    error message shown, old size and position preserved.
+
 ## Extended manual checks (after smoke passes)
 
 - Two clients: one stays Diorama while the other stays Tactical (views are

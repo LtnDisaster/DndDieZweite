@@ -497,7 +497,7 @@ WS smoke suites (still in `/tmp/opencode/`) re-run green after these changes.
   inspection remains mandatory before edits.
 - **Status:** Accepted.
 
-## D43 — Token footprint is an `n×n` square anchored at `x/y`
+## D43 — Token footprint is an `n×n` square anchored at `x/y`  (EXTENDED BY D81: rectangles)
 - **Context:** Large monsters were visually scaled but still occupied only one pathfinding cell, so
   a Huge creature could stand on the map edge or squeeze through a one-cell corridor.
 - **Decision:** `app/footprint.py` is the footprint SSOT: Tiny/Small/Medium 1×1, Large 2×2, Huge 3×3,
@@ -1075,6 +1075,65 @@ fog, doors, traps, footprints unchanged). The compact turn bar in the
 Initiative panel renders the server's initiative object only — Diorama and
 Tactical share it because combat is world state, and a pinned Node test
 proves the view round-trip mutates none of it.
+
+## D80 — Conditions get ONE clock each; downed/incapacitated gates move; Stand Up is an explicit, budgeted operation
+
+The condition store (`tokens.conds`, `app/conditions.py`) only had a round clock
+and no way to express "lasts until the start/end of my turn", while the
+incapacitated conditions carried no movement consequence at all. Decision:
+extend the SAME store, never fork it. Every entry is `{k, rounds, until}` and
+`until` picks the condition's single clock: `""` = round clock (ticks once at
+the round wrap, as before), `"start"`/`"end"` = the affected creature's own
+turn clock, advanced ONLY by the combat turn hooks — `step_rounds` never
+touches anchored conditions and `step_turn` never touches round conditions,
+so double-stepping is structurally impossible. The turn lifecycle itself is
+consolidated into ONE function (`combat.advance_turn`): end-of-turn hooks of
+the leaving token → initiative advance → round clock on wrap → start-of-turn
+hooks of the new token → fresh resources. Outside combat no clock runs;
+walking through the map advances no duration, provably. The voluntary-movement
+gate (`_movement_block_reason`) now blocks 0-HP (downed) AND the incapacitated
+family (`incapacitated, unconscious, paralyzed, stunned, petrified`) for any
+client request, at the entry and again on every walk step; restrained/grappled
+deliberately are NOT in the set (their mechanics are their own future feature).
+DM moves and `moveforced` (push/pull/teleport) are separate authority paths and
+unaffected. Standing from prone is a new server operation (`stand`): explicit,
+never moves the token, free outside combat; in combat only on the creature's
+own turn and charged `ceil(walk_budget/2)` — half the BASE turn movement,
+independent of a Dash boost — through the SAME `spend_move` accounting Dash and
+walking use; rejection leaves prone untouched; the client's turn bar updates
+from the authoritative initiative broadcast. No attack advantage rules, no
+crawling, no spell-specific logic (out of scope, by design).
+
+## D81 — Token footprints are rectangles; one helper derives every occupied cell set
+
+Footprints were locked to the square size categories (Large=2x2, Huge=3x3),
+which cannot express real creatures like a 3x7 serpent. Decision: token
+position `(x, y)` remains the canonical anchor (centre of its top-left
+occupied cell); two optional columns `tokens.fw`/`tokens.fh` give the
+independent WIDTH and HEIGHT in cells (clamped 1..10). `NULL` means "square of
+the size category" — so EVERY existing token keeps loading and behaving
+exactly as before, no migration of data required, and changing the size
+category clears a custom span back to its square. The rectangle itself is
+derived in exactly ONE place: `footprint.token_span` feeding
+`footprint.origin_cells` (extends right and down from the anchor);
+`footprint.wh()` normalizes the legacy `side`-int parameter that already ran
+through path/movecost/mapmodel into a `(w, h)` pair, so movement, collision,
+path preview/execution, world growth, vision source cells, snapshot visibility
+and the ability/hit intersection all became rectangular by going through the
+same code path — no caller may compute footprint cells from size on its own.
+The diagonal mid-footprint rule and the difficulty rule ("any newly entered
+cell") generalize without touching A*. Footprint size does NOT change speed,
+budget or cost. Rotation/facing is explicitly out of scope: 3x7 stays 3x7
+until a later rotation feature exists. Client mirrors via `tokenSpan(t)`
+(fw/fh win, category is the fallback) for rendering, hit testing and the path
+preview goal marker; hidden NPC tokens leak neither size nor fw/fh to players.
+
+AMENDMENT (Sprint 15B): resizing is a first-class operation (`token_span`,
+owner or DM): the COMPLETE new rectangle must fit at the token's CURRENT
+anchor — an ill-fitting resize is rejected unchanged and never relocates the
+token. The sheet's labelled Footprint W/H + Apply row is the single edit path
+for every controllable token. Render-loop code must not shadow the viewport
+`w`/`h` names (the 15B invisibility incident, pinned in `test_sprint15b.py`).
 
 ## Cross-cutting assumptions (read before scaling)
 - Single uvicorn process, single event loop; `LOOP` captured in `main.py` for thread-safe broadcasts.

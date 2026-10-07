@@ -20,6 +20,14 @@ const state = { me:null, room:null, roomDeleted:false, ws:null, online:new Set()
                   viewMode:"tactical" };
 const VISION_R = 6;
 const SIZE_FOOTPRINT = { Tiny:1, Small:1, Medium:1, Large:2, Huge:3, Gargantuan:4 };
+/* D81: THE client footprint derivation — server fw/fh win, category is the
+   square fallback. Never derive width/height anywhere else. */
+function tokenSpan(t){
+  const s = SIZE_FOOTPRINT[(t && t.size) || "Medium"] || 1;
+  const w = (t && +t.fw > 0) ? Math.min(10, +t.fw) : s;
+  const h = (t && +t.fh > 0) ? Math.min(10, +t.fh) : s;
+  return [w, h];
+}
 
 /* Client mirrors of app/gear.py for previewing bonuses (server re-computes authoritatively). */
 const SKILLS = {

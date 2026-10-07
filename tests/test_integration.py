@@ -841,11 +841,11 @@ def test_conditions_module():
     from app import conditions as C
     assert C.clean_conds([{"k": "prone", "rounds": 2}, {"k": "PRONE"}, {"k": ""},
                           {"k": "poisoned", "rounds": -5}]) == \
-        [{"k": "prone", "rounds": 2}, {"k": "poisoned", "rounds": 0}]      # dedupe (case-insensitive), clamp
+        [{"k": "prone", "rounds": 2, "until": ""}, {"k": "poisoned", "rounds": 0, "until": ""}]  # dedupe, clamp
     lst = C.add([], "stunned", 3)
-    assert C.add(lst, "stunned", 1) == [{"k": "stunned", "rounds": 1}]     # refresh, not duplicate
+    assert C.add(lst, "stunned", 1) == [{"k": "stunned", "rounds": 1, "until": ""}]   # refresh, not duplicate
     out, changed = C.step_rounds([{"k": "stunned", "rounds": 1}, {"k": "prone", "rounds": 0}])
-    assert changed and out == [{"k": "prone", "rounds": 0}]                # expired dropped, permanent kept
+    assert changed and out == [{"k": "prone", "rounds": 0, "until": ""}]   # expired dropped, permanent kept
     assert C.step_rounds(out)[1] is False                                   # nothing left to tick
     assert C.is_concentrating([{"k": "Concentrating", "rounds": 0}])        # case-insensitive
     assert C.remove([{"k": "prone", "rounds": 0}], "PRONE") == []
@@ -859,7 +859,7 @@ def test_conditions_dm_add_and_round_expiry(client):
         tok_id = recv_until(ws, "token_add")["payload"]["id"]
         ws.send_json({"type": "cond_add", "token_id": tok_id, "key": "prone", "rounds": 2})
         ev = recv_until(ws, "cond")["payload"]
-        assert {"k": "prone", "rounds": 2} in ev["conds"] and ev["token_id"] == tok_id
+        assert {"k": "prone", "rounds": 2, "until": ""} in ev["conds"] and ev["token_id"] == tok_id
         ws.send_json({"type": "cond_add", "token_id": tok_id, "key": "concentrating"})  # permanent
         recv_until(ws, "cond")
         ws.send_json({"type": "init_start"})
@@ -890,7 +890,7 @@ def test_conditions_player_flags_self_not_others(client):
     foe = next(t for t in state_of(client, player, code)["tokens"] if t["label"] == "Goblin")
     with ws_connect(client, player, code) as ws:
         ws.send_json({"type": "cond_add", "token_id": mine["id"], "key": "poisoned"})
-        assert {"k": "poisoned", "rounds": 0} in recv_until(ws, "cond")["payload"]["conds"]
+        assert {"k": "poisoned", "rounds": 0, "until": ""} in recv_until(ws, "cond")["payload"]["conds"]
         ws.send_json({"type": "cond_add", "token_id": foe["id"], "key": "prone"})  # not the player's token
         assert "Not your token" in recv_until(ws, "error")["payload"]["msg"]
     foe_after = next(t for t in state_of(client, dm, code)["tokens"] if t["label"] == "Goblin")

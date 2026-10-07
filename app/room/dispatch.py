@@ -8,7 +8,7 @@ from .chat import handle_chat, handle_narrative
 from .combat import (handle_dash, handle_end_turn, handle_hp, handle_init_end,
                      handle_init_end_round, handle_init_next, handle_init_start,
                      handle_turn_mark)
-from .conditions import handle_cond_add, handle_cond_remove
+from .conditions import handle_cond_add, handle_cond_remove, handle_stand
 from .death import handle_death_clear, handle_death_save
 from .doors import handle_door
 from .encounters import handle_spawn_encounter
@@ -26,7 +26,7 @@ from .quests import (handle_quest_add, handle_quest_complete, handle_quest_delet
                      handle_quest_update)
 from .secret_events import handle_secret_event
 from .status import handle_exhaustion, handle_inspiration, handle_temp_hp
-from .tokens import handle_add_token, handle_del_token, handle_update_npc
+from .tokens import handle_add_token, handle_del_token, handle_token_span, handle_update_npc
 
 
 async def handle_map_edit(ws, room_id, user, is_dm, msg):
@@ -96,6 +96,8 @@ HANDLERS = {
     "update_npc": handle_update_npc,
     "cond_add": handle_cond_add,
     "cond_remove": handle_cond_remove,
+    "stand": handle_stand,
+    "token_span": handle_token_span,
     "door": handle_door,
     "aoe": handle_aoe,
     "death_save": handle_death_save,

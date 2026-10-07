@@ -5,6 +5,7 @@ by net.map_lock so concurrent walks of different tokens can't clobber each other
 """
 import asyncio
 
+from .. import conditions as C
 from .. import db, footprint, gear, los, mapmodel, movecost
 from ..path import find_path, path_footprint_cost, step_legal
 from .growth import maybe_grow_map
@@ -36,7 +37,7 @@ async def _announce_move(room_id, token_id, moving, reason=None):
 
 
 def _room_tokens(room_id, exclude_id=None):
-    return [t for t in db.q("SELECT id, x, y, owner_user_id, size FROM tokens WHERE room_id=?",
+    return [t for t in db.q("SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens WHERE room_id=?",
                             (room_id,)) if t["id"] != exclude_id]
 
 
@@ -59,13 +60,25 @@ def _walk_speed(tok):
     return gear.clean_speeds(db.j(tok["npc"]) if tok["npc"] else {})["walk"]
 
 
+MOVE_BLOCKED_CONDS = {"incapacitated", "unconscious", "paralyzed", "stunned",
+                      "petrified"}    # the incapacitated family (D80) — the
+# restrained/grappled family deliberately is NOT here: those need their own
+# mechanics (out of scope) and must not be silently turned into a movement ban.
+
+
 def _movement_block_reason(tok):
-    """Authoritative movement gate for incapacitated player characters."""
+    """Authoritative voluntary-movement gate (D80): a creature at 0 HP (downed)
+    or carrying a condition of the incapacitated family cannot move under its
+    own power — no client request can talk its way past this. DM moves and
+    forced movement (moveforced) are separate, authority-based paths."""
     cid = tok.get("character_id")
     if cid is not None:
         ch = db.q1("SELECT hp FROM characters WHERE id=?", (cid,))
         if ch is not None and int(ch.get("hp") or 0) <= 0:
             return "You cannot move while downed"
+    hit = {c["k"].lower() for c in C.load(tok)} & MOVE_BLOCKED_CONDS
+    if hit:
+        return f"You cannot move while {C.label(sorted(hit)[0]).lower()}"
     return None
 
 
@@ -186,9 +199,10 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None):
             tok = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
             if tok is None or tok["room_id"] != room_id:
                 return
-            # A token that dropped to 0 HP mid-walk (trap on the route, readied
-            # attack between steps) must not finish the trip: the same
-            # authoritative gate as move/preview applies to every step.
+            # A token that dropped to 0 HP or became incapacitated mid-walk
+            # (trap on the route, condition applied between steps) must not
+            # finish the trip: the same authoritative gate as move/preview
+            # applies to every step.
             downed = _movement_block_reason(tok)
             if downed:
                 stop_reason = "downed"
@@ -352,6 +366,7 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
         "request_id": request_id,
         "token_id": tok["id"],
         "size": tok["size"] or "Medium",
+        "w": side[0], "h": side[1],                    # D81: authoritative preview shape
         "goal": {"cx": tx, "cy": ty},
         "path": [{"x": x, "y": y} for (x, y) in path],
         "cells": footprint.path_preview_cells(mp, side, [origin] + path),

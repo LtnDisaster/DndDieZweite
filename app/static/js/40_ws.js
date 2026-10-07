@@ -83,6 +83,9 @@ function connectWS(code){
                            if (state.sel === p.token_id){ state.sel = null; renderSheet(null); }
                            renderVoiceTargets(); break; }
       case "snapshot": refreshRoom().then(() => { if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel) || null); }); break;
+      case "token_span": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t){ t.fw = p.fw; t.fh = p.fh;          // authoritative shape (15B)
+                       if (state.sel === p.token_id) renderSheet(t); } break; }
       case "cond": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.conds = p.conds || [];
                        if (state.sel === p.token_id) renderSheet(t); } break; }

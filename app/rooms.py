@@ -586,6 +586,8 @@ def room_state(code: str, request: Request):
             if t.get("character_id") is None and t.get("owner_user_id") is None:
                 t.pop("disposition", None)
                 t.pop("size", None)
+                t.pop("fw", None)                    # D81: hidden tokens leak no footprint
+                t.pop("fh", None)
         last = ws._last_seen.get(room["id"], {}).get(user["id"], {})
         vis_ids = {t["id"] for t in tokens}
         ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]
@@ -631,19 +633,23 @@ def assign_char(code: str, body: AssignIn, request: Request):
         strow = c.execute("SELECT map_json FROM room_state WHERE room_id=?", (room["id"],)).fetchone()
         mp = mapmodel.load(strow["map_json"] if strow else "")
         size = tok["size"] if tok else "Medium"
+        span = footprint.token_span(tok) if tok else footprint.token_span({"size": size})
         desired = footprint.origin_from_pixel(px, py, mp["cell"], mp)
         candidate = {"id": tok["id"] if tok else -1, "owner_user_id": user["id"],
-                     "size": size, "x": px, "y": py}
+                     "size": size, "fw": tok.get("fw") if tok else None,
+                     "fh": tok.get("fh") if tok else None, "x": px, "y": py}
         existing = [dict(r) for r in c.execute(
-            "SELECT id, x, y, owner_user_id, size FROM tokens WHERE room_id=?",
+            "SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens WHERE room_id=?",
             (room["id"],)).fetchall()]
         origin = footprint.find_valid_origin(mp, candidate, desired, existing) or desired
-        px, py = footprint.origin_pixels(origin, footprint.side_for_size(size), mp["cell"])
+        px, py = footprint.origin_pixels(origin, span, mp["cell"])
         if (tok and (px != tok["x"] or py != tok["y"])) or not tok:
             c.execute("UPDATE tokens SET x=?, y=? WHERE room_id=? AND owner_user_id=?",
                       (px, py, room["id"], user["id"]))
         tok_for_reveal = {"id": tok["id"] if tok else -1, "x": px, "y": py,
-                          "owner_user_id": user["id"], "size": size}
+                          "owner_user_id": user["id"], "size": size,
+                          "fw": tok.get("fw") if tok else None,
+                          "fh": tok.get("fh") if tok else None}
         source = footprint.player_source_cells(mp, [tok_for_reveal])
         visible_indices = los.visible_cells(mp, source)
         if mapmodel.reveal_cells(mp, visible_indices):

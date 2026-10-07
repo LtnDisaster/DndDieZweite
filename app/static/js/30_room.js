@@ -763,6 +763,27 @@ function renderInit(){
     ol.appendChild(li);
   });
 }
+function _spanRowHtml(tok){
+  const s = tokenSpan(tok);        // effective span: fw/fh win, category square fallback
+  return `<div class="row" title="Footprint in grid cells — Apply resizes the token in place">`
+    + `<span class="tiny"><b>Footprint</b></span><span class="tiny">W</span>`
+    + `<input id="span-w" type="number" min="1" max="10" value="${s[0]}" style="width:46px">`
+    + `<span class="tiny">H</span><input id="span-h" type="number" min="1" max="10" value="${s[1]}" style="width:46px">`
+    + `<button id="span-apply">Apply</button></div>`;
+}
+function wireSpanRow(tok){
+  const btn = $("span-apply"); if (!btn) return;
+  const send = () => {
+    const w = parseInt($("span-w").value, 10), h = parseInt($("span-h").value, 10);
+    if (!(Number.isInteger(w) && Number.isInteger(h) && w >= 1 && w <= 10 && h >= 1 && h <= 10)){
+      toast("Footprint: whole numbers from 1 to 10"); return;
+    }
+    wsSend({ type:"token_span", token_id: tok.id, width: w, height: h });
+  };
+  btn.onclick = send;
+  $("span-w").onkeydown = e => { if (e.key === "Enter") send(); };
+  $("span-h").onkeydown = e => { if (e.key === "Enter") send(); };
+}
 function renderSheet(tok){
   state.sel = tok ? tok.id : null;
   updateMoveControls();
@@ -789,6 +810,7 @@ function renderSheet(tok){
   }
   const mod = v => { const m2 = Math.floor(((v||10)-10)/2); return (m2>=0?"+":"")+m2; };
   const isDM = state.room.role === "dm", own = tok.owner_user_id === state.me.id;
+  const spanRow = (isDM || own) ? _spanRowHtml(tok) : "";
   const ac = ch.ac_total != null ? ch.ac_total : ch.ac;
   const inv = (ch.items || []);
   const invRows = inv.map(it => {
@@ -837,7 +859,7 @@ function renderSheet(tok){
   } else if (own && spells.length){
     bookBlock = `<details class="sheet-sec"><summary><h3>📖 Spellbook</h3></summary><div class="meta" style="opacity:.7">Add a <b>📖 spellbook</b> item to your character to cast at the table.</div></details>`;
   }
-  body.innerHTML = `
+  body.innerHTML = spanRow + `
     <div class="hpbar"><div style="width:${Math.max(0,ch.hp/ch.max_hp*100)}%;${ch.hp/ch.max_hp<=.25?"background:var(--red)":""}"></div></div>
     <b>HP ${ch.hp}/${ch.max_hp}</b> · AC ${ac} · Speed ${ch.speed} ft
     ${deathHtml(tok)}
@@ -863,6 +885,7 @@ function renderSheet(tok){
   wireConditions(tok);
   wireHpStates(tok);
   wireDeath(tok);
+  wireSpanRow(tok);
   $("hp-btns").classList.toggle("hidden", state.room.role !== "dm" || !tok.character_id);
   $("hp-adv").classList.toggle("hidden", state.room.role !== "dm");
   function v(s,k){ const x = s && s[k]; return typeof x === "number" ? x : 10; }
@@ -905,7 +928,7 @@ function renderNpcSheet(tok){
     const d = n.spell_slots[String(lv)] || n.spell_slots[lv] || {max:0};
     slotCells.push(`<label class="slotcell">L${lv}<input class="npc-slot" data-lv="${lv}" type="number" min="0" max="9" value="${d.max||0}" style="width:36px"></label>`);
   }
-  body.innerHTML = `
+  body.innerHTML = _spanRowHtml(tok) + `
     <div class="row"><input id="npc-name" placeholder="NPC name" value="${esc(tok.label)}" maxlength="32">
       <select id="npc-size">${["Tiny","Small","Medium","Large","Huge","Gargantuan"].map(s => `<option value="${s}" ${(tok.size||"Medium")===s?"selected":""}>${s}</option>`).join("")}</select>
       <select id="npc-disp"><option value="">neutral</option>${["friend","neutral","hostile"].map(d => `<option value="${d}" ${(tok.disposition||"")===d?"selected":""}>${d}</option>`).join("")}</select>
@@ -1024,6 +1047,7 @@ function renderNpcSheet(tok){
   };
   $("npc-del").onclick = () => { if (confirm("Remove this NPC token?")) wsSend({ type:"del_token", token_id: tok.id }); };
   $("npc-to-best").onclick = () => saveNpcToBestiary(n, ($("npc-name").value || "NPC").slice(0,32), tok);
+  wireSpanRow(tok);
   renderNpcSpells(tok);
   renderNpcAttacks(tok);
   renderNpcAbilities(tok);
@@ -1151,7 +1175,8 @@ function conditionsHtml(tok){
   const editable = isDM || own;
   const conds = tok.conds || [];
   const chips = conds.map(c => {
-    const dur = c.rounds ? ` <small>(${c.rounds})</small>` : "";
+    const anchor = c.until === "start" ? "→turn start" : c.until === "end" ? "→turn end" : "";
+    const dur = c.rounds ? ` <small>(${c.rounds}${anchor || "r"})</small>` : "";
     const rm = editable ? `<button class="cond-rm" data-k="${esc(c.k)}" title="Remove">✕</button>` : "";
     return `<span class="cond-chip"><i style="background:${condColor(c.k)}"></i>${esc(condLabel(c.k))}${dur}${rm}</span>`;
   }).join("");
@@ -1159,21 +1184,30 @@ function conditionsHtml(tok){
   const editor = editable ? `<div class="row cond-add"><input id="cond-name" list="cond-list" placeholder="condition…" style="flex:1">` +
     `<datalist id="cond-list">${list}</datalist>` +
     `<input id="cond-rounds" type="number" min="0" max="999" placeholder="∞" title="rounds (blank = until removed)" style="width:52px">` +
+    `<select id="cond-until" title="timed conditions count down once per round, or per your own turn (D80)" style="width:92px">` +
+    `<option value="">round end</option><option value="start">my turn start</option><option value="end">my turn end</option></select>` +
     `<button id="cond-add" class="primary">＋</button></div>` : "";
+  const prone = conds.some(c => String(c.k).toLowerCase() === "prone");
+  const stand = (own || isDM) && prone
+    ? `<div class="row"><button id="cond-stand" class="primary">Stand Up</button>` +
+      `<span class="meta" style="opacity:.6">costs half your movement in combat</span></div>` : "";
   return `<div class="conds"><div class="wlabel">Conditions</div>` +
     (conds.length ? `<div class="cond-chips">${chips}</div>` : `<div class="meta" style="opacity:.6">None</div>`) +
-    editor + `</div>`;
+    stand + editor + `</div>`;
 }
 
 function wireConditions(tok){
   const body = $("sheet-body"); if (!body) return;
   for (const b of body.querySelectorAll(".cond-rm"))
     b.onclick = () => wsSend({ type:"cond_remove", token_id: tok.id, key: b.dataset.k });
+  const st = $("cond-stand");
+  if (st) st.onclick = () => wsSend({ type:"stand", token_id: tok.id });
   const add = $("cond-add");
   if (add) add.onclick = () => {
     const k = ($("cond-name").value || "").trim(); if (!k) return;
     const r = parseInt($("cond-rounds").value, 10);
-    wsSend({ type:"cond_add", token_id: tok.id, key:k, rounds: isNaN(r) ? 0 : Math.max(0, Math.min(999, r)) });
+    wsSend({ type:"cond_add", token_id: tok.id, key:k, rounds: isNaN(r) ? 0 : Math.max(0, Math.min(999, r)),
+             until: ($("cond-until") || {}).value || "" });
     $("cond-name").value = ""; $("cond-rounds").value = "";
   };
 }

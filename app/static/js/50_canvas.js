@@ -265,10 +265,11 @@ function drawTactical(){
     for (const pt of preview){
       const rx = pt.x*c + cam.ox, ry = pt.y*c + cam.oy;
       ctx.fillStyle = "rgba(212,160,23,0.22)"; ctx.fillRect(rx, ry, c, c); }
-    const gp = state.plan.goal, gx = (gp.cx + ((state.plan.side || 1)-1)/2)*c + c/2 + cam.ox,
-          gy = (gp.cy + ((state.plan.side || 1)-1)/2)*c + c/2 + cam.oy;
+    const gp = state.plan.goal, pw = state.plan.w || state.plan.side || 1,
+          ph = state.plan.h || pw;
+    const gx = (gp.cx + (pw-1)/2)*c + c/2 + cam.ox, gy = (gp.cy + (ph-1)/2)*c + c/2 + cam.oy;
     ctx.strokeStyle = "#d4a017"; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(gx, gy, c*.38*(state.plan.side || 1), 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(gx, gy, c*.38*Math.max(pw, ph), 0, Math.PI*2); ctx.stroke();
   }
   if (state.aoe && Date.now() < state.aoe.exp && gm){
     ctx.fillStyle = hexA(state.aoe.color, .26);
@@ -308,8 +309,10 @@ function drawTactical(){
     ctx.restore();
   }
   for (const t of state.tokens){
-    const side = SIZE_FOOTPRINT[t.size] || 1;
-    const ox = t.x + ((side - 1) * c / 2), oy = t.y + ((side - 1) * c / 2);
+    // tw/th NEVER w/h: this loop's scope owns the viewport dimensions w/h —
+    // shadowing them here made the culling check drop every token offscreen (15B).
+    const [tw, th] = tokenSpan(t), side = Math.max(tw, th);
+    const ox = t.x + ((tw - 1) * c / 2), oy = t.y + ((th - 1) * c / 2);
     const tx = ox + cam.ox, ty = oy + cam.oy;
     if (tx < -80 || ty < -80 || tx > w+80 || ty > h+80) continue;
     const activeInit = state.init && state.init.combat && state.init.order[state.init.active];
@@ -324,8 +327,8 @@ function drawTactical(){
     ctx.stroke();
     if (isMoving){ ctx.beginPath(); ctx.arc(tx, ty, r + 3, 0, Math.PI*2); ctx.setLineDash([4,3]);
       ctx.strokeStyle="#7fd1ff"; ctx.lineWidth=2; ctx.stroke(); ctx.setLineDash([]); }
-    if (side > 1){ ctx.save(); ctx.globalAlpha=.18; ctx.fillStyle=t.color;
-      ctx.fillRect(ox - c/2 + cam.ox, oy - c/2 + cam.oy, side*c, side*c); ctx.restore(); }
+    if (tw > 1 || th > 1){ ctx.save(); ctx.globalAlpha=.18; ctx.fillStyle=t.color;
+      ctx.fillRect(ox - c/2 + cam.ox, oy - c/2 + cam.oy, tw*c, th*c); ctx.restore(); }
     if (state.room.role === "dm" && t.disposition){
       const dcol = {friend:"#2ecc71", hostile:"#e74c3c", neutral:"#3498db"}[t.disposition] || "#3498db";
       ctx.beginPath(); ctx.arc(tx, ty, r + 2, 0, Math.PI*2); ctx.strokeStyle=dcol; ctx.lineWidth=2; ctx.stroke();
@@ -380,8 +383,9 @@ function canMove(t){
 function tokenAt(x, y){
   const c = cellSize();
   return [...state.tokens].reverse().find(t => {
-    const side = SIZE_FOOTPRINT[t.size] || 1;
-    const ox = t.x + ((side - 1) * c / 2), oy = t.y + ((side - 1) * c / 2);
+    const [w, h] = tokenSpan(t), side = Math.max(w, h);
+    const ox = t.x + ((w - 1) * c / 2), oy = t.y + ((h - 1) * c / 2);
+    if (Math.abs(x - ox) <= (w-1)*c/2 + c*.55 && Math.abs(y - oy) <= (h-1)*c/2 + c*.55) return true;
     const radius = (c / 50) * (side === 1 ? 16 : 20 + (side - 1) * 14);
     return (t.x-x)**2 + (t.y-y)**2 < (radius + side*c*.2)**2
         || (ox-x)**2 + (oy-y)**2 < (radius + side*c*.18)**2;
@@ -406,7 +410,7 @@ function gridAt(g, cx, cy){                 // WORLD cell lookup (D72)
 }
 let _planSeq = 0;
 function tokenCellXY(t){ const c = cellSize(); return { cx: Math.floor(t.x / c), cy: Math.floor(t.y / c) }; }
-function planSideForToken(t){ return SIZE_FOOTPRINT[(t && t.size) || "Medium"] || 1; }
+function planSpanForToken(t){ return tokenSpan(t || {}); }
 function requestPathPreview(cx, cy, confirmAfter=false){
   const t = ownToken(); if (!t){ toast("Select your token first"); return; }
   const id = ++_planSeq;
@@ -416,10 +420,11 @@ function requestPathPreview(cx, cy, confirmAfter=false){
 function applyPathPreview(p){
   if (!state.planRequest || state.planRequest.id !== p.request_id) return;
   const confirmAfter = state.planRequest.confirmAfter;
-  const side = SIZE_FOOTPRINT[p.size] || planSideForToken(state.tokens.find(t => t.id === p.token_id));
+  const dspan = planSpanForToken(state.tokens.find(t => t.id === p.token_id));
+  const w = +p.w > 0 ? +p.w : dspan[0], h = +p.h > 0 ? +p.h : dspan[1];
   state.planRequest = null;
   state.plan = { token_id:p.token_id, goal:p.goal, path:p.path||[], cells:p.cells||[],
-                 cost:p.cost||0, side:side||1,
+                 cost:p.cost||0, side:Math.max(w,h), w:w, h:h,
                  budget:(p.budget === undefined ? null : p.budget),
                  within:(p.within_budget === undefined ? true : !!p.within_budget) };
   updateMoveHud();

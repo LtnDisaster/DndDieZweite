@@ -18,7 +18,7 @@ def token_cell(tok, mp):
 
 
 def owned_tokens(room_id, user_id):
-    return db.q("SELECT id, x, y, owner_user_id, size FROM tokens "
+    return db.q("SELECT id, x, y, owner_user_id, size, fw, fh FROM tokens "
                 "WHERE room_id=? AND owner_user_id=?", (room_id, user_id))
 
 
@@ -47,6 +47,7 @@ def _snapshot(tok, viewer_id=None):
                                     "owner_user_id", "character_id")}
     if tok.get("owner_user_id") == viewer_id:
         snap["size"] = tok.get("size", "Medium")
+        snap["fw"], snap["fh"] = tok.get("fw"), tok.get("fh")
     snap["conds"] = _conds.load(tok)
     snap["death"] = _death.load(tok)
     return snap
@@ -70,6 +71,8 @@ async def send_token_event(room_id, token, kind="token_add", extra=None):
         if token.get("character_id") is None and token.get("owner_user_id") is None:
             add_player.pop("disposition", None)
             add_player.pop("size", None)
+            add_player.pop("fw", None)               # D81 parity with the snapshot
+            add_player.pop("fh", None)
     seen_cache = {}
     for uid, socks in list(clients(room_id).items()):
         is_dm = roles.get(uid) == "dm"

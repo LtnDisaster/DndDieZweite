@@ -430,9 +430,13 @@ def growth_needed(mp, origin, side=1, vision=FOG_R):
         dirs.append("west")
     if y <= m:
         dirs.append("north")
-    if mp["w"] - (x + side) <= m:
+    if isinstance(side, (tuple, list)):
+        w, h = max(1, int(side[0])), max(1, int(side[1]))
+    else:
+        w = h = max(1, int(side))
+    if mp["w"] - (x + w) <= m:
         dirs.append("east")
-    if mp["h"] - (y + side) <= m:
+    if mp["h"] - (y + h) <= m:
         dirs.append("south")
     return dirs
 

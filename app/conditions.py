@@ -2,11 +2,15 @@
 
 A combat condition (blinded, prone, concentrating, …) is stored as a compact JSON
 list on the **token** (play-time entity, not the character library): ``tokens.conds``.
-Each entry is ``{"k": key, "rounds": n}`` where ``rounds`` is 0 for "until removed"
-or a positive countdown decremented once per round. This module owns the catalog,
-validation and round-progression logic; the *mechanical* consequences are NOT applied
-here by design (D3 keeps gameplay rules explicit and additive) — the architecture
-just needs to carry the flag reliably so effects can be layered on later.
+Each entry is ``{"k": key, "rounds": n, "until": anchor}`` where ``rounds`` is 0 for
+"until removed" or a positive countdown, and ``until`` picks the condition's ONE
+clock (D80): "" = the round clock (decremented once per round at the round wrap),
+"start"/"end" = the affected creature's own turn clock (advanced only by the combat
+turn hooks in room/combat.py — never by the round clock, so a condition can never
+tick twice). This module owns the catalog, validation and progression logic; the
+*mechanical* consequences are NOT applied here by design (D3 keeps gameplay rules
+explicit and additive) — the architecture just needs to carry the flag reliably so
+effects can be layered on later.
 """
 import re
 
@@ -32,6 +36,14 @@ CONDITIONS = {
 }
 MAX_CONDS = 24
 _KEY_RE = re.compile(r"^[\x20-\x7e]{1,24}$")
+# The ONE clock per condition (D80): "" = round clock, "start"/"end" = the
+# affected creature's turn clock (driven by room/combat.py turn hooks only).
+UNTIL = ("", "start", "end")
+
+
+def _clean_until(value):
+    v = str(value or "").strip().lower()
+    return v if v in ("start", "end") else ""
 
 
 def label(key):
@@ -45,15 +57,16 @@ def info(key):
 
 
 def clean_conds(raw):
-    """Normalise an arbitrary list into ``[{k, rounds}]``, deduped and bounded."""
+    """Normalise an arbitrary list into ``[{k, rounds, until}]``, deduped, bounded."""
     out, seen = [], set()
     if not isinstance(raw, list):
         return out
     for e in raw[:MAX_CONDS]:
         if isinstance(e, dict):
             k, rounds = e.get("k", e.get("key")), e.get("rounds", 0)
+            until = _clean_until(e.get("until"))
         else:
-            k, rounds = e, 0
+            k, rounds, until = e, 0, ""
         k = str(k).strip()
         if not k or not _KEY_RE.match(k) or k.lower() in seen:
             continue
@@ -62,7 +75,7 @@ def clean_conds(raw):
         except (TypeError, ValueError):
             rounds = 0
         seen.add(k.lower())
-        out.append({"k": k, "rounds": rounds})
+        out.append({"k": k, "rounds": rounds, "until": until})
     return out
 
 
@@ -70,18 +83,23 @@ def load(tok):
     return clean_conds(db.j(tok.get("conds"), [])) if tok else []
 
 
-def add(conds, key, rounds=0):
+def add(conds, key, rounds=0, until=""):
     """Add or refresh a condition; returns a new list."""
     key = str(key).strip()
+    until = _clean_until(until)
     out = clean_conds(conds)
     if not key or not _KEY_RE.match(key):
         return out
+    try:
+        rounds = max(0, min(999, int(rounds or 0)))
+    except (TypeError, ValueError):
+        rounds = 0
     for c in out:
         if c["k"].lower() == key.lower():
-            c["rounds"] = max(0, min(999, int(rounds or 0)))
+            c["rounds"], c["until"] = rounds, until
             return out
     if len(out) < MAX_CONDS:
-        out.append({"k": key, "rounds": max(0, min(999, int(rounds or 0)))})
+        out.append({"k": key, "rounds": rounds, "until": until})
     return out
 
 
@@ -91,18 +109,40 @@ def remove(conds, key):
 
 
 def step_rounds(conds):
-    """Advance one round: decrement timed conditions and drop the ones that expire.
+    """Advance the ROUND clock once: decrement untimed-anchor conditions and drop
+    the ones that expire. Returns ``(new_list, changed_bool)``.
 
-    Returns ``(new_list, changed_bool)``. Conditions with ``rounds == 0`` are
-    permanent ("until removed") and are left untouched.
+    One clock per condition (D80): entries anchored to a turn (``until`` =
+    "start"/"end") are NEVER touched here — only ``step_turn`` advances them, so
+    a condition can never tick through both a round and a turn hook.
+    Conditions with ``rounds == 0`` and no anchor are permanent ("until removed").
     """
     out, changed = [], False
     for c in clean_conds(conds):
+        if c["until"]:
+            out.append(c)
+            continue
         if c["rounds"] > 0:
             c["rounds"] -= 1
             changed = True
             if c["rounds"] == 0:
                 continue                      # expired this round → drop
+        out.append(c)
+    return out, changed
+
+
+def step_turn(conds, phase):
+    """Advance the TURN clock of one creature: decrement conditions anchored to
+    ``phase`` ("start" or "end" of this creature's turn) and drop the expiring
+    ones. Returns ``(new_list, changed_bool)``. Round-clock conditions
+    (``until`` == "") are never touched here (D80 — one clock per condition)."""
+    out, changed = [], False
+    for c in clean_conds(conds):
+        if c["until"] == phase and c["rounds"] > 0:
+            c["rounds"] -= 1
+            changed = True
+            if c["rounds"] == 0:
+                continue                      # expired at this turn hook → drop
         out.append(c)
     return out, changed
 

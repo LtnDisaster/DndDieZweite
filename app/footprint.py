@@ -2,9 +2,13 @@
 terrain placement, collision and preview cell projections.
 
 A token's stored ``(x, y)`` remains the centre of its top-left occupied cell;
-multi-cell footprints extend right and down from that anchor. This representation
-keeps legacy 1x1 tokens unchanged while giving pathfinding and LOS a deterministic
-footprint.
+the footprint extends right and down from that anchor. Footprints are
+rectangular: ``width x height`` cells, derived by ``token_span`` — explicit
+``fw``/``fh`` columns when set, otherwise the square side of the size category
+(Large => 2x2). Every geometry function here takes either a legacy int (square,
+kept for stored data and callers) or a ``(w, h)`` pair, so there is exactly ONE
+rectangle derivation in the whole stack; no caller may compute footprint cells
+from size on its own.
 """
 from . import mapmodel
 
@@ -16,14 +20,48 @@ FOOTPRINT = {
     "Huge": 3,
     "Gargantuan": 4,
 }
+SPAN_LIMIT = 10          # generous ceiling for custom width/height (D81)
 
 
 def side_for_size(size):
     return FOOTPRINT.get(str(size or "Medium").title(), 1)
 
 
+def clean_span(value):
+    """Client-supplied footprint dimension -> int in 1..SPAN_LIMIT, or None."""
+    if value is None or value == "":
+        return None
+    try:
+        v = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return min(SPAN_LIMIT, max(1, v))
+
+
+def wh(side):
+    """Accept a legacy int (square) or a (w, h) pair; always return (w, h)."""
+    if isinstance(side, (tuple, list)):
+        w, h = int(side[0]), int(side[1])
+    else:
+        w = h = int(side or 1)
+    return max(1, w), max(1, h)
+
+
 def token_side(token):
     return side_for_size((token or {}).get("size"))
+
+
+def token_span(token):
+    """THE authoritative footprint shape: (width, height) in cells. Explicit
+    fw/fh columns win; None falls back to the square size-category side."""
+    t = token or {}
+    side = side_for_size(t.get("size"))
+    try:
+        w = int(t.get("fw")) if t.get("fw") else side
+        h = int(t.get("fh")) if t.get("fh") else side
+    except (TypeError, ValueError):
+        return side, side
+    return min(SPAN_LIMIT, max(1, w)), min(SPAN_LIMIT, max(1, h))
 
 
 def origin_from_pixel(x, y, cell, mp=None):
@@ -42,30 +80,34 @@ def origin_pixels(origin, side, cell):
 
 
 def origin_cells(mp, origin, side):
-    """WORLD cells covered by a WORLD anchor, even when it intentionally overflows."""
+    """WORLD cells covered by a WORLD anchor, even when it intentionally
+    overflows. THE one rectangle derivation: ``side`` is an int or (w, h)."""
     cx, cy = origin
-    return [(cx + dx, cy + dy) for dy in range(side) for dx in range(side)]
+    w, h = wh(side)
+    return [(cx + dx, cy + dy) for dy in range(h) for dx in range(w)]
 
 
 def origin_in_bounds(mp, origin, side):
     """WORLD-space bounds check against the world window (D72)."""
     x0, y0, x1, y1 = mapmodel.world_bounds(mp)
     cx, cy = origin
-    return x0 <= cx and y0 <= cy and cx + side <= x1 and cy + side <= y1
+    w, h = wh(side)
+    return x0 <= cx and y0 <= cy and cx + w <= x1 and cy + h <= y1
 
 
 def clamp_origin(mp, origin, side):
     x0, y0, x1, y1 = mapmodel.world_bounds(mp)
     cx, cy = origin
-    side = max(1, int(side))
-    return (max(x0, min(max(x0, x1 - side), cx)),
-            max(y0, min(max(y0, y1 - side), cy)))
+    w, h = wh(side)
+    return (max(x0, min(max(x0, x1 - w), cx)),
+            max(y0, min(max(y0, y1 - h), cy)))
 
 
 def occupied_origin(mp, token):
-    side = token_side(token)
+    """(WORLD anchor, (w, h)) — the shared footprint for every consumer."""
+    span = token_span(token)
     origin = origin_from_pixel(token["x"], token["y"], mp["cell"])
-    return clamp_origin(mp, origin, side), side
+    return clamp_origin(mp, origin, span), span
 
 
 def occupied_cells(mp, token):
@@ -108,7 +150,7 @@ def collision_cells(mp, tokens, token):
 
 
 def valid_final_position(mp, token, origin, tokens=None, allowed_cells=None):
-    side = token_side(token)
+    side = token_span(token)
     if not valid_terrain_position(mp, origin, side, allowed_cells):
         return False
     cells = set(origin_cells(mp, origin, side))
@@ -129,7 +171,7 @@ def candidate_origins(mp, desired, side, max_distance=None):
 
 
 def find_valid_origin(mp, token, desired, tokens=None, allowed_cells=None):
-    side = token_side(token)
+    side = token_span(token)
     clamped = clamp_origin(mp, desired, side)
     if valid_final_position(mp, token, clamped, tokens, allowed_cells):
         return clamped
