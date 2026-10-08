@@ -70,7 +70,8 @@ def _resolve(mp, tok, kind, dest):
     return origin, final, reached
 
 
-async def apply_forced_move(room_id, tok, kind, dest, notify_ws=None):
+async def apply_forced_move(room_id, tok, kind, dest, notify_ws=None, floor=None,
+                            chronicle=None):
     """(D83) THE server-side forced-movement operation: validates through the
     same authoritative footprint/terrain checks, writes the position, carries
     riders, reveals for player-owned tokens and chronicles the event. NOT a
@@ -80,8 +81,13 @@ async def apply_forced_move(room_id, tok, kind, dest, notify_ws=None):
     function server-side; it never trusts a client. Returns the final cell or
     None when nothing could legally change."""
     await _cancel_walk(tok["id"])
+    # D88: an explicit floor makes this a PLANE-CHANGING move (validated stair
+    # destinations ride this exact seam). Terrain and occupants are checked on
+    # the TARGET plane's map; riders move to the plane with their mount.
+    fl = (tok.get("floor") or "") if floor is None else str(floor)
+    tok = {**tok, "floor": fl}
     async with map_lock(room_id):
-        mp = get_map(room_id)
+        mp = get_map(room_id, fl)
         mp = dict(mp)
         mp["room_id"] = room_id
         origin, final, reached = _resolve(mp, tok, kind, dest)
@@ -90,8 +96,22 @@ async def apply_forced_move(room_id, tok, kind, dest, notify_ws=None):
         cell = mp["cell"]
         x, y = (final[0] + .5) * cell, (final[1] + .5) * cell
         z = _cell_elev(mp, final[0], final[1])
-        db.x("UPDATE tokens SET x=?, y=?, z=? WHERE id=?", (x, y, z, tok["id"]))
-        tok["x"], tok["y"], tok["z"] = x, y, z
+        db.x("UPDATE tokens SET x=?, y=?, z=?, floor=? WHERE id=?", (x, y, z, fl, tok["id"]))
+        tok["x"], tok["y"], tok["z"], tok["floor"] = x, y, z, fl
+        if floor is not None:
+            # transitive riders ride to the new plane with their mount (D83/D88)
+            frontier, seen = [tok["id"]], {tok["id"]}
+            while frontier:
+                nxt = []
+                for mid in frontier:
+                    for r in db.q("SELECT id FROM tokens WHERE room_id=? AND mount_token_id=?",
+                                  (room_id, mid)):
+                        if r["id"] in seen or len(seen) > 64:
+                            continue
+                        seen.add(r["id"])
+                        db.x("UPDATE tokens SET floor=? WHERE id=?", (fl, r["id"]))
+                        nxt.append(r["id"])
+                frontier = nxt
         await broadcast_token_step(room_id, tok, x, y, final[0], final[1])
         if _carries_riders(tok["id"]):
             await carry_riders(room_id, tok["id"])         # D83: a pushed mount carries
@@ -99,17 +119,22 @@ async def apply_forced_move(room_id, tok, kind, dest, notify_ws=None):
             visible, _ = _reveal_player_token(mp, tok)
             newly = mapmodel.reveal_cells(mp, visible)
             if newly:
-                set_map(room_id, mp)
+                set_map(room_id, mp, fl)
                 await broadcast(room_id, "explored", fog_patch(mp, newly))
         squares = max(abs(final[0] - origin[0]), abs(final[1] - origin[1]))
-        verb = {"push": "pushes", "pull": "pulls", "shove": "shoves", "knockback": "knocks back",
-                "throw": "throws", "teleport": "teleports"}[kind]
-        sys_msg(room_id, f"DM {verb} {tok['label']} {squares} square(s) to "
-                         f"{final[0]},{final[1]}.")
+        if chronicle:
+            sys_msg(room_id, chronicle)
+        else:
+            verb = {"push": "pushes", "pull": "pulls", "shove": "shoves",
+                    "knockback": "knocks back",
+                    "throw": "throws", "teleport": "teleports"}[kind]
+            sys_msg(room_id, f"DM {verb} {tok['label']} {squares} square(s) to "
+                             f"{final[0]},{final[1]}.")
         if notify_ws is not None:
             await send_to(notify_ws, "forced_moved", {"token_id": tok["id"], "kind": kind,
                                                       "from": {"cx": origin[0], "cy": origin[1]},
-                                                      "to": {"cx": final[0], "cy": final[1], "z": z}})
+                                                      "to": {"cx": final[0], "cy": final[1], "z": z},
+                                                      "floor": fl})
         return final
 
 

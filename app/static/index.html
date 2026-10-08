@@ -315,6 +315,10 @@ window.addEventListener("unhandledrejection", function(ev){
           <button id="btn-long-rest" title="Restore HP, spell slots, hit dice and long-rest resources">🛌 Long rest</button>
           <label title="Do not clear arbitrary conditions unless checked"><input id="long-rest-conds" type="checkbox"> clear conditions</label>
         </div>
+        <div class="row hidden" id="view-floor-row" title="D88: browse another plane's map WITHOUT moving anyone. Your brushes, edits and dark toggle apply to the plane you view.">
+          <small class="meta" style="opacity:.6">Viewing plane</small>
+          <select id="view-floor"></select>
+        </div>
         <details class="group" open>
           <summary>Narration</summary>
           <div class="group-body">
@@ -442,7 +446,17 @@ window.addEventListener("unhandledrejection", function(ev){
             <select id="obj-op" title="The ONE allowlisted operation the server runs when someone interacts">
               <option value="toggle">toggle state</option>
               <option value="door">door: open/close nearest (≤3)</option>
+              <option value="stair">stair: move user to plane</option>
+              <option value="lamp">lamp: static light (interact to toggle)</option>
             </select>
+            <span id="obj-stair-fields" class="hidden" title="D88: destination cell on the target plane — validated at use time; occupied or walled is refused">
+              <input id="obj-tfl" placeholder="to floor" maxlength="24" style="width:76px">
+              <input id="obj-tx" type="number" placeholder="x" style="width:52px">
+              <input id="obj-ty" type="number" placeholder="y" style="width:52px">
+            </span>
+            <span id="obj-lamp-fields" class="hidden" title="D89: bright radius in cells; the lamp lights this plane for everyone standing on it">
+              <input id="obj-bright" type="number" min="1" max="30" value="5" placeholder="bright" style="width:60px">
+            </span>
             <label class="tiny" style="display:flex;align-items:center;gap:3px" title="Only you may interact with it">
               <input id="obj-dm" type="checkbox">DM-only</label>
           </div>

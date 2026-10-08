@@ -3,6 +3,7 @@
 async function openRoom(code){
   const s = await api(`/rooms/${code}/state`);
   state.room = s; state.roomDeleted = false;   // fresh visit — re-arms auto-reconnect
+  state.viewFloor = "";                        // D88: DM plane browsing starts at primary
   state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || [];
   state.floors = s.floors || [""];
   state.grid = s.grid; state.editing = false; state.editMap = null; state.sel = null;
@@ -60,10 +61,25 @@ function applySideTab(){
   }
 }
 
+function renderViewFloor(){
+  // D88: the selector only earns its place once the room has planes to browse
+  const row = $("view-floor-row"), sel = $("view-floor");
+  if (!row || !sel) return;
+  const many = state.room && state.room.role === "dm" && (state.floors || [""]).length > 1;
+  row.classList.toggle("hidden", !many);
+  if (!many) return;
+  const cur = state.viewFloor || "";
+  sel.innerHTML = (state.floors || [""]).map(f =>
+    `<option value="${f.replace(/"/g,"&quot;")}" ${f===cur?"selected":""}>${f===""?"⬛ primary":f}</option>`).join("");
+  sel.onchange = () => { state.viewFloor = sel.value; refreshRoom(); };
+}
+
 async function refreshRoom(){
-  const s = await api(`/rooms/${state.room.code}/state`);
+  const s = await api(`/rooms/${state.room.code}/state`
+                      + (state.viewFloor ? `?floor=${encodeURIComponent(state.viewFloor)}` : ""));
   state.room = s; state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || []; state.grid = s.grid;
   state.floors = s.floors || [""];
+  state.viewFloor = s.view_floor || ""; renderViewFloor();   // D88: server is the view SSOT
   if (typeof renderFogToggle === "function") renderFogToggle();
   if (state.plan && !state.tokens.find(t => t.id === state.plan.token_id)) state.plan = null;
   updateMoveHud();
@@ -851,10 +867,13 @@ function wireArtRow(tok){
                                           asset_id: sel.value || null });
 }
 function _lightRowHtml(tok){
-  const lum = (tok.light | 0);
+  const lum = (tok.light | 0), dv = (tok.darkvision | 0);
   return `<div class="row" title="Light (D87): radius in cells this token emits. Only meaningful when the DM turned on darkness — in dark rooms sight comes from light alone.">`
     + `<span class="tiny"><b>Light</b></span><input id="lt-r" type="number" min="0" max="30" value="${lum}" style="width:46px">`
-    + `<span class="tiny">cells</span><button id="lt-apply">Apply</button></div>`;
+    + `<span class="tiny">cells</span><button id="lt-apply">Apply</button></div>`
+    + `<div class="row" title="Darkvision (D89): how far this token sees in darkness. A sense, not a torch — invisible to other players' fog, lights nothing.">`
+    + `<span class="tiny"><b>Darkvis.</b></span><input id="dv-r" type="number" min="0" max="30" value="${dv}" style="width:46px">`
+    + `<span class="tiny">cells</span><button id="dv-apply">Apply</button></div>`;
 }
 function wireLightRow(tok){
   const b = $("lt-apply"); if (!b) return;
@@ -865,6 +884,16 @@ function wireLightRow(tok){
   };
   b.onclick = send;
   $("lt-r").onkeydown = e => { if (e.key === "Enter") send(); };
+  const dvb = $("dv-apply");                                   // D89 darkvision
+  if (dvb){
+    const senddv = () => {
+      const r = parseInt($("dv-r").value, 10);
+      if (!Number.isInteger(r) || r < 0 || r > 30){ toast("Darkvision: 0 to 30 cells"); return; }
+      wsSend({ type: "token_darkvision", token_id: tok.id, radius: r });
+    };
+    dvb.onclick = senddv;
+    $("dv-r").onkeydown = e => { if (e.key === "Enter") senddv(); };
+  }
 }
 function _floorRowHtml(tok){
   const fls = state.floors && state.floors.length ? state.floors : [""];

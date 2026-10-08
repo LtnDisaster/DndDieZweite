@@ -1,3 +1,37 @@
+# Sprint 19 — audit fixes, floor maps, lighting v2 (2026-10-08)
+
+**Property broadcasts are no longer room-wide** (`token_image/span/visual/rot/
+controller/light/floor` → `visibility.send_property_to_interested`): if a token
+is hidden, only DMs, its owner and its CURRENT controller ever learn id, art
+URL, plane, radius or rotation. First-sight `token_add` and the ghost store use
+the identical hidden-strip. Asset access follows the RIDING token (own/operate
+it, or DM of its room) — the room-member grant and the global DM catalogue are
+gone. Floor changes validate the destination plane, refuse mounted riders, and
+cross-plane mounts are rejected outright; operated tokens light nothing.
+
+**D88 floor maps**: rooms carry one map per plane (`floor_maps` table; primary
+floor = the legacy blob, untouched). Every edit/move/fog/door/interact/vision
+site is plane-parameterized; floor maps are frame-clamped to the primary;
+`fog_off` is room-wide, `dark` per-floor. DMs browse planes with the "Viewing
+plane" selector (edits apply to the viewed plane); players are always on their
+own plane. Players change planes only via `stair` connector objects (Object
+brush → stair → target floor/cell) — destinations are validated, occupied or
+walled cells refuse with "No room down there."
+
+**D89 lighting v2**: lamps (Object brush → lamp) light their plane for
+everyone with a real LOS-limited reveal and are toggled in play (💡); an
+explicitly-off lamp now PERSISTS off (sanitizer fix — old levers silently
+flipped back to on after reload!). Darkvision is a per-token sense (token
+sheet → Darkvis.): owner-only sight in darkness, invisible to everyone
+else's fog.
+
+**If something floor-related misbehaves**: first check WHICH plane the
+failing action targets (client sends `floor: state.viewFloor`); then compare
+`/api/rooms/<code>/state` with and without `?floor=`. For lamps: reload the
+page — `on:false` must survive the reload; if not, the stored map object lost
+its state (check `floor_maps.map_json` / `room_state.map_json` for
+`"state":{"on":false}`).
+
 # Sprint 18 — Geometry truth, artwork, floors, darkness (2026-10-08) — DECISIONS D84–D87
 
 - **D84 centre contract:** the browser draws/hit-tests CENTRES while the wire
@@ -538,3 +572,34 @@ with old dimensions and position untouched (no relocation, ever). Successful
 resize broadcasts `token_span`; sheet and canvas update live and a fresh
 snapshot keeps the shape. `update_npc` now follows the same in-place rule when
 the span or size category changes.
+
+# SPRINT 20 (2026-10-08, D90) — cross-floor truth, browser foundation, resize
+
+## Root cause A (AoE/ping on the wrong plane)
+`abilities.execute` loaded `room_state.map_json` directly — every cast, on
+any floor, resolved terrain/LOS/targeting on the PRIMARY map;
+`tokens_in_cells` had no floor filter, so a fireball on the tavern floor
+cooked the crypt. Fix: one map-seam call (`net.get_map(room_id, caster
+floor)`) + `floor=` on the targeting helper; a cross-plane single target
+gets the exact unknown-id error. Vision sources gained the same plane filter
+(a token standing elsewhere no longer projects phantom sight onto the
+queried plane's coordinates). `aoe`/`ping` moved from room-wide broadcast to
+plane-scoped delivery (`send_to_plane_viewed` — token holders, DMs, and the
+token-less observers who stand on primary by the /state convention); pings
+clamp to the plane's map; the client stamps `floor` on both and paints only
+on the matching view floor.
+
+## Root cause B (editor resize lost pins and elevation)
+`edResize()` rebuilt the snapshot with traps/loot/objects/doors but silently
+dropped `pins` and `elev`; sanitize then legitimately emptied both. Now both
+carry through (pins bounds-filtered, elev row-wise like the server's explored
+carry). Node-vm functional test pins the behaviour; human resize check is in
+the browser checklist (Sprint 20 section).
+
+## P2 — no browser runtime, honest fallback
+The host has no browser (no Playwright/chromium — verified).
+`tests/test_browser_flow.py` runs the REAL 10_core+50_canvas code in a Node
+vm against the live WS/REST stack (tactical draw, real hit test on a 2x1
+token, real preview request/apply/confirm over the wire, walk completion,
+refresh persistence). No real browser has been executed; the tactical smoke
+steps remain a human item in MANUAL_BROWSER_CHECKLIST.md.

@@ -95,8 +95,13 @@ function connectWS(code){
       case "grid_reveal": refreshRoom(); break;   // D87: light changes re-lit the world
       case "token_floor": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.floor = p.floor || "";           // D86: plane change; add/leave follow
+                       if (state.room && state.room.role === "dm" && typeof renderViewFloor === "function") renderViewFloor();
+                       if (t.owner_user_id === state.me.id) refreshRoom();  // D88: view follows your token
                        if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "token_darkvision": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t) t.darkvision = p.radius | 0; } break;   // D89: owner-only sense
       case "floors_changed": { state.floors = p.floors || [""];  // D86: DM curated floor list
+                     if (typeof renderViewFloor === "function") renderViewFloor();
                      if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel)); } break;
       case "token_image": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.image = p.image || "";           // D85: server-made /assets/ ref

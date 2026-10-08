@@ -17,7 +17,7 @@ import pytest  # noqa: E402
 import bcrypt  # noqa: E402
 
 from app import abilities, db, events, ratelimit, ws  # noqa: E402
-from app.room import audio, chat, net  # noqa: E402
+from app.room import audio, chat, net, pings  # noqa: E402
 
 db.init_db()
 
@@ -47,6 +47,7 @@ def _reset_ws_state():
         if isinstance(d, dict):
             d.clear()
     ratelimit._hits.clear()
+    pings._hits.clear()
     audio.clear_rate_state()
     chat.clear_rate_state()
     events.clear()

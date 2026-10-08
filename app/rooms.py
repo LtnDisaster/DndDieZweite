@@ -566,28 +566,54 @@ def room_state(code: str, request: Request):
             m["char"]["notes"] = ""
     tokens_all = db.q("SELECT * FROM tokens WHERE room_id=? ORDER BY id", (room["id"],))
     st = db.q1("SELECT initiative, map_json, audio_json FROM room_state WHERE room_id=?", (room["id"],)) or {}
-    mp = mapmodel.load(st.get("map_json"))
+    # D88: WHICH plane's map is this snapshot about? The DM may pass ?floor=
+    # to browse a plane (viewing never moves a token); a player's snapshot is
+    # always their own primary plane (first owned token's floor). Unknown or
+    # unauthorized floor values fall back silently — never an error that
+    # would reveal which floors exist.
+    view_floor = ""
+    if room["_role"] == "dm":
+        req = str(request.query_params.get("floor") or "")
+        if req and FLOOR.exists(room["id"], req):
+            view_floor = req
+    else:
+        # own tokens first (home plane), then operated ones
+        pool = [t for t in tokens_all if t["owner_user_id"] == user["id"]] \
+            or [t for t in tokens_all if t.get("controller_user_id") == user["id"]]
+        view_floor = (pool[0].get("floor") or "") if pool else ""
+    mp = room_net.get_map(room["id"], view_floor)
     visible = set()
     if room["_role"] == "dm":
         tokens, ghosts = tokens_all, []
         for t in tokens:                                   # DM sees full stat blocks
             t["npc"] = db.j(t.get("npc"), None) or None
     else:
-        visible = ws.viewer_visible_cells(room["id"], user["id"], mp)
+        visible = ws.viewer_visible_cells(room["id"], user["id"], mp, floor=view_floor)
         # D86: which planes this viewer stands on (floors of own/operated
         # tokens). Tokens on other planes are ELSEWHERE, not hidden — they
         # must not even be listed, so their plane leaks nothing either.
         planes = {(t.get("floor") or "") for t in tokens_all
                   if t["owner_user_id"] == user["id"]
                   or t.get("controller_user_id") == user["id"]}
+        _plane_cache = {"": (mp, visible)}
+        def _plane(fl):
+            # D88: sight must be evaluated on the map the token STANDS ON —
+            # never decide a crypt token's visibility from the tavern's fog.
+            if fl not in _plane_cache:
+                mp_p = room_net.get_map(room["id"], fl)
+                _plane_cache[fl] = (mp_p, ws.viewer_visible_cells(room["id"], user["id"],
+                                                                  mp_p, floor=fl))
+            return _plane_cache[fl]
         def _visible_token(t):
-            if (t.get("floor") or "") not in planes:
+            fl = t.get("floor") or ""
+            if fl not in planes:
                 return False                      # D86: different plane = elsewhere
             if t["owner_user_id"] == user["id"] or t.get("controller_user_id") == user["id"]:
                 return True                       # D82: controllers always see their token
-            origin, side = footprint.occupied_origin(mp, t)
-            return any((i := mapmodel.flat_idx(mp, x, y)) is not None and i in visible
-                       for (x, y) in footprint.origin_cells(mp, origin, side))   # D72
+            mp_p, vis_p = _plane(fl)
+            origin, side = footprint.occupied_origin(mp_p, t)
+            return any((i := mapmodel.flat_idx(mp_p, x, y)) is not None and i in vis_p
+                       for (x, y) in footprint.origin_cells(mp_p, origin, side))   # D72
         tokens = [t for t in tokens_all if _visible_token(t)]
         for t in tokens:                                   # NPC stat blocks are DM-only
             t["npc"] = None
@@ -604,6 +630,7 @@ def room_state(code: str, request: Request):
                 t.pop("image", None)                 # D85: nor what artwork it wears
                 t.pop("floor", None)                 # D86: nor which plane it stands on
                 t.pop("light", None)                 # D87: nor how brightly it burns
+                t.pop("darkvision", None)            # D89: nor how well it sees
         last = ws._last_seen.get(room["id"], {}).get(user["id"], {})
         vis_ids = {t["id"] for t in tokens}
         ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]
@@ -620,6 +647,7 @@ def room_state(code: str, request: Request):
         "members": members, "tokens": tokens, "ghosts": ghosts, "messages": msgs,
         "chat": chat_msgs,
         "audio": audio.load_state(st.get("audio_json")),
+        "view_floor": view_floor,
         "grid": mapmodel.visible_map(mp, user["id"], room["_role"] == "dm", visible),
         "initiative": db.j(st.get("initiative"), {"combat": False, "order": [], "active": -1}),
         "quests": questlog.visible_for(room["id"], room["_role"] == "dm"),

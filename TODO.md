@@ -4,7 +4,7 @@ Living checklist. "Done" = shipped and covered by an in-repo test.
 Verify state with:
 
 ```bash
-docker compose run --rm test                     # CANONICAL: pinned py3.12 image — Sprint 18 close: 474 passed + 15 skipped (run with --build if the image predates the tests!)
+docker compose run --rm test                     # CANONICAL: pinned py3.12 image — Sprint 20 close: 499 passed + 17 skipped (Sprint 21: see below) — py3.12 canonical (run with --build if the image predates the tests!)
 ./.venv/bin/python -m pytest                     # dev-host run (py3.14 venv) — GREEN at Sprint 16 close (431 collected)
 ./.venv/bin/python -m compileall -q app          # byte-compile check
 for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
@@ -31,6 +31,47 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [x] Secure PNG token artwork: re-encoded, opaque ids, no oracle, DM-curated assignment (D85)
 - [x] Floors: independent occupancy/visibility planes; `token_floor` stairs; riders ride along (D86)
 - [x] Darkness + per-token light radius: LOS-lit vision, real shadows, DM unrestricted (D87)
+
+# Sprint 21 (privacy audit D91): canonical run with the NEW code DEFERRED at the hard stop
+# (the prebuilt image was stale); host py3.14: 6/6 privacy + 110-suite regression + compileall green. Canonical: docker compose run --build --rm test
+
+## Done — Sprint 20: cross-floor truth, security regression, browser foundation (2026-10-08)
+- [x] **P0 cross-floor AoE/ping correctness** (closes D88's limitation, D90):
+      `abilities.execute` resolves EVERYTHING (terrain, LOS, cover geometry,
+      targeting, footprint frames, naming filter) on the **caster's plane** via
+      the `net.get_map` seam; area targeting never sees other planes' tokens;
+      a cross-plane single target is refused with the unknown-id message (zero
+      oracle). Condition bumps for hidden tokens no longer ride the room-wide
+      `cond` channel (`visibility.send_cond_bump`). Vision sources are
+      plane-filtered at the shared choke points (`viewer_visible_cells` +
+      `floor` param — a lantern on the attic never lights the crypt's map).
+      `aoe` templates and `ping` are plane-scoped events: floor claim validated
+      (DM any existing plane; players their own planes, token-less member keeps
+      primary), bounds clamp to the plane's map, delivery via
+      `net.send_to_plane_viewed`; client sends `viewFloor` and guards painting
+      on it (`tests/test_sprint20_security.py` 12 tests, all families on live
+      dispatch paths)
+- [x] **P1 security regressions** riding the same suite: darkvision property
+      sweep, asset serve/list across controller grant/revoke and token death,
+      foreign/missing floor transitions refused in place, mount pair never
+      split across planes, lamp state surviving refresh AND stale editor
+      snapshots, hidden crypt token absent from `/state` token+ghost channels
+      and live WS window
+- [x] **P2 browser regression FOUNDATION** (`tests/test_browser_flow.py`): no
+      browser runtime exists on the host (no Playwright/chromium) — documented
+      fallback: the REAL client files run in a Node vm against the live
+      WS/REST stack: tactical draw, real `tokenAt` on a 2×1 token, real
+      `requestPathPreview` → live server → real `applyPathPreview` → real
+      `confirmPlan` over the wire → walk to completion → refresh persistence.
+      **No real browser was executed** — human checklist extended
+- [x] **P3 map-editor resize**: `edResize()` silently dropped `pins` AND the
+      `elev` layer from the editor snapshot (sanitize then legitimately
+      emptied them) — pins now carry through bounds-filtered, elevation
+      row-wise; a pin's plane association is preserved by construction.
+      Node-vm functional test pins it
+- [x] Pillow-era hygiene: `pings._hits` added to the conftest reset; canonical
+      run **499 passed, 17 skipped** (the two new Node-vm suites skip inside
+      the container — node is not in the test image)
 
 ## Done — Sprint 18: geometry truth, artwork, floors, darkness (2026-10-08)
 - [x] **D84 centre-contract**: move/preview convert aimed-centre→anchor in one place (`footprint.center_to_anchor`, same tie-break as `anchor_for_center`, 1x1 bit-identical); preview echoes `goal`+`anchor`; DM drag drops at token centre; plan ring uses the server anchor; Escape deselects; footprint overlay is a dashed outline, not a colour block; controller/`/state`/`token_add` all carry the real geometry (the companion 3x7-as-1x1 bug); pointer math pinned by a node-vm harness running the REAL click path (`tests/test_geometry_contract.py`)

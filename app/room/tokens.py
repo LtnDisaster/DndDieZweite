@@ -5,7 +5,8 @@ from .. import assets, db, footprint, floors, mapmodel, npc
 from . import movement
 from .net import broadcast, get_map, map_lock, send_to, sys_msg
 from .visibility import (broadcast_token_add, broadcast_token_step,
-                         forget_token, reevaluate_visibility)
+                         forget_token, reevaluate_visibility,
+                         send_property_to_interested)
 
 WALL = "#95a5a6"
 
@@ -49,11 +50,13 @@ def _clean_pos(msg):
     return x, y
 
 
-def _place_token(mp, token, x, y):
+def _place_token(mp, token, x, y, floor=""):
     side = footprint.token_span(token)
     desired = footprint.origin_from_pixel(x, y, mp["cell"], mp)
-    existing = db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens WHERE room_id=?",
-                    (token.get("room_id"),))
+    existing = [t for t in db.q(
+        "SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id, floor "
+        "FROM tokens WHERE room_id=?", (token.get("room_id"),))
+        if (t.get("floor") or "") == (floor or "")]      # D88: plane-local placement
     origin = footprint.find_valid_origin(mp, token, desired, existing)
     if origin is None:
         return None
@@ -88,7 +91,7 @@ async def handle_token_span(ws, room_id, user, is_dm, msg):
     if (tok.get("fw"), tok.get("fh")) == (fw, fh):
         return                                   # idempotent, no broadcast storm
     candidate = {**tok, "fw": fw, "fh": fh}
-    mp = get_map(room_id)
+    mp = get_map(room_id, tok.get("floor") or "")    # D88: candidate's plane
     origin, _ = footprint.occupied_origin(mp, tok)   # current anchor, WORLD space
     if not footprint.valid_final_position(mp, candidate, origin,
                                           _room_token_rows(room_id, tok.get("floor") or "")):
@@ -97,7 +100,8 @@ async def handle_token_span(ws, room_id, user, is_dm, msg):
                               "choose smaller dimensions"})
         return
     db.x("UPDATE tokens SET fw=?, fh=? WHERE id=?", (fw, fh, tok["id"]))
-    await broadcast(room_id, "token_span", {"token_id": tok["id"], "fw": fw, "fh": fh})
+    await send_property_to_interested(room_id, tok, "token_span",
+                                      {"token_id": tok["id"], "fw": fw, "fh": fh})
 
 
 async def handle_token_visual(ws, room_id, user, is_dm, msg):
@@ -121,7 +125,8 @@ async def handle_token_visual(ws, room_id, user, is_dm, msg):
     if (tok.get("vw"), tok.get("vh")) == (vw, vh):
         return                                   # idempotent, no broadcast storm
     db.x("UPDATE tokens SET vw=?, vh=? WHERE id=?", (vw, vh, tok["id"]))
-    await broadcast(room_id, "token_visual", {"token_id": tok["id"], "vw": vw, "vh": vh})
+    await send_property_to_interested(room_id, tok, "token_visual",
+                                      {"token_id": tok["id"], "vw": vw, "vh": vh})
 
 
 async def handle_token_image(ws, room_id, user, is_dm, msg):
@@ -153,7 +158,8 @@ async def handle_token_image(ws, room_id, user, is_dm, msg):
     if (tok.get("image") or "") == image:
         return                                   # idempotent, no broadcast storm
     db.x("UPDATE tokens SET image=? WHERE id=?", (image, tok["id"]))
-    await broadcast(room_id, "token_image", {"token_id": tok["id"], "image": image})
+    await send_property_to_interested(room_id, tok, "token_image",
+                                      {"token_id": tok["id"], "image": image})
 
 
 async def handle_token_floor(ws, room_id, user, is_dm, msg):
@@ -173,20 +179,63 @@ async def handle_token_floor(ws, room_id, user, is_dm, msg):
     name = str(msg.get("floor") or "")
     if not floors.exists(room_id, name):
         return await send_to(ws, "error", {"msg": "No such floor"})
+    if tok.get("mount_token_id"):
+        # SPRINT-19: a carried rider's floor is the MOUNT's plane — riding is
+        # what keeps it legal. Letting a rider "change floors" alone would
+        # strand it while carry_riders keeps teleporting its position on the
+        # mount's plane (cross-plane ghost positions). Ride via the mount.
+        return await send_to(ws, "error", {"msg": "Dismount before changing floors"})
     if (tok.get("floor") or "") == name:
         return                                   # idempotent, no broadcast storm
     async with map_lock(room_id):
+        # SPRINT-19 AUDIT (L4): stairs must not materialise you inside someone
+        # or inside their walls. D88: BOTH terrain and occupants come from the
+        # TARGET plane's own map — same validity rule every move obeys.
+        await movement._cancel_walk(tok["id"])       # never race a walk's writes
+        mp = get_map(room_id, name)
+        origin, _side = footprint.occupied_origin(mp, tok)
+        others = movement._room_tokens(room_id, tok["id"], name)
+        if not footprint.valid_final_position(mp, tok, origin, others):
+            return await send_to(ws, "error", {"msg": "No room for you on that floor"})
         db.x("UPDATE tokens SET floor=? WHERE id=?", (name, tok["id"]))
         tok["floor"] = name
-        await broadcast(room_id, "token_floor", {"token_id": tok["id"], "floor": name})
+        await send_property_to_interested(room_id, tok, "token_floor",
+                                          {"token_id": tok["id"], "floor": name})
         for r in db.q("SELECT * FROM tokens WHERE room_id=? AND mount_token_id=?",
                       (room_id, tok["id"])):
             db.x("UPDATE tokens SET floor=? WHERE id=?", (name, r["id"]))
-            await broadcast(room_id, "token_floor", {"token_id": r["id"], "floor": name})
-        mp = get_map(room_id)
+            r["floor"] = name
+            await send_property_to_interested(room_id, r, "token_floor",
+                                              {"token_id": r["id"], "floor": name})
         origin, _side = footprint.occupied_origin(mp, tok)
         cx, cy = origin
         await broadcast_token_step(room_id, tok, tok["x"], tok["y"], cx, cy)
+
+
+async def handle_token_darkvision(ws, room_id, user, is_dm, msg):
+    """D89 — a token's darkvision radius (cells, 0 = none). A SENSE, not a
+    light: it belongs to the owner's sight budget only (L5), so the channel is
+    DM/owner and the value ships exclusively to interested sockets."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    if not (is_dm or tok["owner_user_id"] == user["id"]):
+        await send_to(ws, "error", {"msg": "Not your token"})
+        return
+    try:
+        rad = int(msg.get("radius", msg.get("darkvision", 0)))
+    except (TypeError, ValueError):
+        return
+    rad = max(0, min(30, rad))
+    if (tok.get("darkvision") or 0) == rad:
+        return
+    db.x("UPDATE tokens SET darkvision=? WHERE id=?", (rad, tok["id"]))
+    tok["darkvision"] = rad
+    await send_property_to_interested(room_id, tok, "token_darkvision",
+                                      {"token_id": tok["id"], "radius": rad})
+    from .visibility import reevaluate_visibility     # the owner's sight changed
+    await reevaluate_visibility(room_id)
 
 
 async def handle_token_light(ws, room_id, user, is_dm, msg):
@@ -211,7 +260,8 @@ async def handle_token_light(ws, room_id, user, is_dm, msg):
         return                                   # idempotent, no broadcast storm
     db.x("UPDATE tokens SET light=? WHERE id=?", (rad, tok["id"]))
     tok["light"] = rad
-    await broadcast(room_id, "token_light", {"token_id": tok["id"], "radius": rad})
+    await send_property_to_interested(room_id, tok, "token_light",
+                                      {"token_id": tok["id"], "radius": rad})
     await reevaluate_visibility(room_id)
     await broadcast(room_id, "grid_reveal", None)   # re-lit terrain for viewers
 
@@ -240,7 +290,7 @@ async def handle_token_rotate(ws, room_id, user, is_dm, msg):
         return                                   # idempotent, no broadcast storm
     await movement._cancel_walk(tok["id"])       # never race a walk's step writes
     async with map_lock(room_id):
-        mp = dict(get_map(room_id))
+        mp = dict(get_map(room_id, tok.get("floor") or ""))   # D88: its plane
         mp["room_id"] = room_id
         candidate = {**tok, "rot": rot}
         old_origin, old_span = footprint.occupied_origin(mp, tok)
@@ -256,7 +306,8 @@ async def handle_token_rotate(ws, room_id, user, is_dm, msg):
         # D63 leak-parity: the facing broadcast carries NO coordinates — the
         # re-centring move rides the visibility-filtered step channel, so a
         # viewer who cannot see this token learns nothing about where it went.
-        await broadcast(room_id, "token_rot", {"token_id": tok["id"], "rot": rot})
+        await send_property_to_interested(room_id, tok, "token_rot",
+                                          {"token_id": tok["id"], "rot": rot})
         tok["rot"], tok["x"], tok["y"] = rot, x, y
         await broadcast_token_step(room_id, tok, x, y, new_origin[0], new_origin[1])
         if movement._carries_riders(tok["id"]):
@@ -291,9 +342,18 @@ async def handle_token_controller(ws, room_id, user, is_dm, msg):
             return
     if (tok.get("controller_user_id")) == cid:
         return                                   # idempotent, no broadcast storm
+    old_cid = tok.get("controller_user_id")
     db.x("UPDATE tokens SET controller_user_id=? WHERE id=?", (cid, tok["id"]))
-    await broadcast(room_id, "token_controller",
-                    {"token_id": tok["id"], "controller_user_id": cid})
+    tok["controller_user_id"] = cid
+    # SPRINT-19 AUDIT: who CONTROLS a token is exactly the kind of property the
+    # add/`/state` channels strip from plain viewers — it goes to the DM, the
+    # owner, the new and the revoked controller only. Then refresh per-viewer
+    # delivery: the new controller receives the token itself (planes include
+    # operated tokens), the revoked one may lose sight of it again.
+    await send_property_to_interested(room_id, tok, "token_controller",
+                                      {"token_id": tok["id"], "controller_user_id": cid},
+                                      extra_uids=(old_cid,))
+    await broadcast_token_add(room_id, tok)
 
 
 async def handle_token_mount(ws, room_id, user, is_dm, msg):
@@ -322,10 +382,17 @@ async def handle_token_mount(ws, room_id, user, is_dm, msg):
         if mid == tok["id"]:
             await send_to(ws, "error", {"msg": "A token cannot ride itself"})
             return
-        mount = db.q1("SELECT id, mount_token_id FROM tokens WHERE id=? AND room_id=?",
+        mount = db.q1("SELECT id, mount_token_id, floor FROM tokens WHERE id=? AND room_id=?",
                       (mid, room_id))
         if mount is None:
             await send_to(ws, "error", {"msg": "That mount is not in this room"})
+            return
+        # SPRINT-19: carrying happens ON A PLANE. A rider on another floor than
+        # its mount is a contradiction — carry_riders would teleport its
+        # position on the mount's plane while the rider's own plane (collision,
+        # visibility) disagrees. Same floor, or no ride.
+        if (mount.get("floor") or "") != (tok.get("floor") or ""):
+            await send_to(ws, "error", {"msg": "Mount and rider must share a floor"})
             return
         # the mount's own mount chain must never lead back to this token
         cur, hops = mount["mount_token_id"], 0
@@ -340,14 +407,25 @@ async def handle_token_mount(ws, room_id, user, is_dm, msg):
         return                                   # idempotent, no broadcast storm
     was_mounted = tok.get("mount_token_id")
     db.x("UPDATE tokens SET mount_token_id=? WHERE id=?", (mid, tok["id"]))
-    await broadcast(room_id, "token_mount", {"token_id": tok["id"], "mount_token_id": mid})
+    # SPRINT-21: the riding RELATIONSHIP is token state — for a hidden NPC
+    # (as rider or as mount) it must not name anyone to players who cannot
+    # see it. Audience: rider's owner/controller + DM (property gate) + the
+    # mount's owner/controller, so a player always learns who rides their horse.
+    extra = set()
+    if mid is not None:
+        mrow = db.q1("SELECT owner_user_id, controller_user_id FROM tokens WHERE id=?", (mid,))
+        if mrow:
+            extra = {u for u in (mrow["owner_user_id"], mrow["controller_user_id"]) if u}
+    await send_property_to_interested(room_id, tok, "token_mount",
+                                      {"token_id": tok["id"], "mount_token_id": mid},
+                                      extra_uids=extra)
     if was_mounted is not None and mid is None:
         # D83 carrying: dismounted, the rider is no longer carried — its last
         # centre-inside-the-mount position can now sit inside the (now foreign)
         # mount. Deterministically re-home it via the existing placement spiral
         # instead of leaving it mechanically illegal.
         async with map_lock(room_id):
-            mp = get_map(room_id)
+            mp = get_map(room_id, tok.get("floor") or "")   # D88: its plane
             tok = {**tok, "mount_token_id": None}       # validate as UNMOUNTED
             origin, span = footprint.occupied_origin(mp, tok)
             if not footprint.valid_final_position(mp, tok, origin,
@@ -381,16 +459,16 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
     size = _clean_size(msg.get("size") or base.get("size"))
     fw, fh = _clean_span(msg, size)
     disposition = _clean_disposition(msg.get("disposition") or base.get("disposition"))
-    mp = get_map(room_id)
+    fl = str(msg.get("floor") or "")        # D86/D88: plane for new tokens
+    if fl and not floors.exists(room_id, fl):
+        return await send_to(ws, "error", {"msg": "No such floor"})
+    mp = get_map(room_id, fl)               # terrain of THAT plane decides placement
     placed = _place_token(mp, {"room_id": room_id, "id": 0, "size": size,
-                               "fw": fw, "fh": fh}, x, y)
+                               "fw": fw, "fh": fh}, x, y, fl)
     if placed is None:
         await send_to(ws, "error", {"msg": "No valid placement for that footprint"})
         return
     x, y = placed
-    fl = str(msg.get("floor") or "")        # D86: optional plane for new tokens
-    if fl and not floors.exists(room_id, fl):
-        return await send_to(ws, "error", {"msg": "No such floor"})
     tid = db.x("INSERT INTO tokens (room_id,label,color,x,y,npc,size,disposition,fw,fh,floor) "
                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                (room_id, label, color, x, y, db.json_dumps(block), size, disposition, fw, fh, fl))
@@ -421,7 +499,7 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
     fw, fh = _clean_span(base, size, tok)
     disposition = _clean_disposition(msg.get("disposition", tok.get("disposition", "")))
     candidate = {**tok, "size": size, "fw": fw, "fh": fh}
-    mp = get_map(room_id)
+    mp = get_map(room_id, tok.get("floor") or "")     # D88: its plane
     existing = _room_token_rows(room_id, tok.get("floor") or "")
     desired = footprint.origin_from_pixel(tok["x"], tok["y"], mp["cell"], mp)
     if (fw, fh) != (tok.get("fw"), tok.get("fh")) or size != tok.get("size"):
@@ -460,5 +538,5 @@ async def handle_del_token(ws, room_id, user, is_dm, msg):
     # Gone is a TRANSIENT sync event, not a stored state: forget_token clears the
     # server-side last-seen memory and broadcasts token_gone; the row itself is
     # gone, so no reload/snapshot can ever resurrect it (D73).
-    await forget_token(room_id, tok["id"])
+    await forget_token(room_id, tok["id"], token=tok)
     await broadcast(room_id, "snapshot", None)

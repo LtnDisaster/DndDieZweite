@@ -100,6 +100,10 @@ def test_stranger_gets_404_not_403(client):
 
 
 def test_room_access_follows_the_token(client):
+    """SPRINT-19 RE-SCOPED: serving follows what a viewer LEGITIMATELY SEES,
+    not mere room membership. NPC artwork is stripped from player channels, so
+    a plain room member gets the uniform 404 — the room was never a read grant
+    for hidden or NPC art. Operators and the DM of a riding room keep access."""
     dm, player, code, _ = base_room(client)
     stranger = reg(client, "st")
     aid = _put(client, dm, _png(12, 12), "dmart").json()["id"]
@@ -111,6 +115,16 @@ def test_room_access_follows_the_token(client):
         assert recv_until(ws, "token_image")["payload"]["image"] == f"/assets/{aid}"
         assert db.q1("SELECT image FROM tokens WHERE id=?", (tok,))["image"] == f"/assets/{aid}"
         assert client.get(f"/api/assets/{aid}", headers=H(stranger)).status_code == 404
+        # A plain room member may NOT read NPC artwork (the WS add strips it —
+        # REST must not hand back what the game deliberately withholds).
+        assert client.get(f"/api/assets/{aid}", headers=H(player)).status_code == 404
+        # The DM reads art riding in their room.
+        assert client.get(f"/api/assets/{aid}", headers=H(dm)).status_code == 200
+        # Making the player the token's OPERATOR grants the read (and the live
+        # token_add carries the image for them).
+        pid = db.q1("SELECT id FROM users WHERE username=?", (player["name"],))["id"]
+        ws.send_json({"type": "token_controller", "token_id": tok, "user_id": pid})
+        assert recv_until(ws, "token_controller")["payload"]["controller_user_id"] == pid
         assert client.get(f"/api/assets/{aid}", headers=H(player)).status_code == 200
         assert client.delete(f"/api/assets/{aid}", headers=H(dm)).status_code == 409
         ws.send_json({"type": "token_image", "token_id": tok, "asset_id": None})

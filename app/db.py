@@ -149,6 +149,11 @@ CREATE TABLE IF NOT EXISTS quests (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS floor_maps(
+  room_id  INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  floor    TEXT    NOT NULL,
+  map_json TEXT    NOT NULL
+);
 CREATE TABLE IF NOT EXISTS assets (
     id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -202,6 +207,13 @@ def tx():
 def init_db():
     c = conn()
     c.executescript(SCHEMA)
+    # D88: (room_id, floor) must be unique for set_map's upsert. DBs created
+    # mid-sprint hold the unindexed table (possibly with duplicates) —
+    # keep-last, then index. Idempotent on fresh DBs.
+    c.execute("DELETE FROM floor_maps WHERE rowid NOT IN "
+              "(SELECT MAX(rowid) FROM floor_maps GROUP BY room_id, floor)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS floor_maps_ux "
+              "ON floor_maps(room_id, floor)")
     def migrate(table, col, ddl):
         cols = [r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
         if col not in cols:
@@ -240,6 +252,7 @@ def init_db():
     # D87: light radius in grid cells a token EMITS (0 = none). Only matters
     # in DARK rooms (grid.dark); the DM branch never restricts.
     migrate("tokens", "light", "light INTEGER DEFAULT 0")
+    migrate("tokens", "darkvision", "darkvision INTEGER DEFAULT 0")   # D89
     # D86: the room's floor list — JSON [{name}], '' = primary (legacy) floor.
     migrate("rooms", "floors", "floors TEXT DEFAULT '[]'")
     migrate("messages", "visibility", "visibility TEXT NOT NULL DEFAULT 'public'")

@@ -134,19 +134,85 @@ def sys_msg(room_id, body):
     db.x("INSERT INTO messages (room_id,type,body) VALUES (?,'system',?)", (room_id, body))
 
 
-def get_map(room_id) -> dict:
-    st = db.q1("SELECT map_json FROM room_state WHERE room_id=?", (room_id,))
-    return mapmodel.load((st or {}).get("map_json"))
+def get_map(room_id, floor="") -> dict:
+    """D88 — the PRIMARY floor ("") keeps reading room_state.map_json exactly
+    as before (zero migration, byte-identical behaviour for every old room).
+    A named floor has its own map row; a never-edited named floor returns a
+    BLANK map sized to the primary (a fresh plane, not a copy of below)."""
+    base = mapmodel.load((db.q1("SELECT map_json FROM room_state WHERE room_id=?",
+                                (room_id,)) or {}).get("map_json"))
+    if not floor:
+        return base
+    row = db.q1("SELECT map_json FROM floor_maps WHERE room_id=? AND floor=?",
+                (room_id, str(floor)))
+    if row is None:
+        blank = mapmodel.load(None)
+        blank["fog_off"] = False                    # room-wide flag lives on primary
+        return mapmodel.fit(blank, base)
+    mp = mapmodel.fit(mapmodel.load(row["map_json"]), base)
+    mp["fog_off"] = bool(base.get("fog_off"))     # room-wide flag lives on primary
+    return mp
 
 
-def set_map(room_id, mp):
-    db.x("UPDATE room_state SET map_json=? WHERE room_id=?", (json.dumps(mp), room_id))
+def set_map(room_id, mp, floor=""):
+    if not floor:
+        db.x("UPDATE room_state SET map_json=? WHERE room_id=?", (json.dumps(mp), room_id))
+        return
+    db.x("INSERT INTO floor_maps(room_id,floor,map_json) VALUES(?,?,?) "
+         "ON CONFLICT(room_id,floor) DO UPDATE SET map_json=excluded.map_json",
+         (room_id, str(floor), json.dumps(mp)))
+
+
+def plane_viewers(room_id, floor):
+    """user_ids who legitimately STAND on a plane: every DM, and everyone with
+    a token (owned or operated) there (D88). Plane-scoped broadcasts (fog,
+    object state, door reveals) must never wake sockets that are elsewhere —
+    a client would happily paint another plane's cells into its own grid."""
+    uids = set()
+    for m in db.q("SELECT user_id, role FROM room_members WHERE room_id=?", (room_id,)):
+        if m["role"] == "dm":
+            uids.add(m["user_id"])
+    for t in db.q("SELECT owner_user_id, controller_user_id FROM tokens "
+                  "WHERE room_id=? AND floor=?", (room_id, str(floor))):
+        if t["owner_user_id"]:
+            uids.add(t["owner_user_id"])
+        if t["controller_user_id"]:
+            uids.add(t["controller_user_id"])
+    return uids
+
+
+async def send_to_plane(room_id, floor, kind, payload):
+    for uid in plane_viewers(room_id, floor):
+        for sock in list(clients(room_id).get(uid) or ()):
+            await send_to(sock, kind, payload)
+
+
+def plane_watchers(room_id, floor):
+    """Who may SEE an event painted on a plane (SPRINT-20, aoe/pings): the
+    plane's token holders and every DM (plane_viewers), PLUS the token-less
+    observers — the /state convention says nobody stands nowhere: without any
+    token you stand on the PRIMARY plane. Strict map-truth channels (fog,
+    doors, objects) keep the narrower ``plane_viewers`` set."""
+    uids = plane_viewers(room_id, floor)
+    if not floor:
+        for m in db.q("SELECT user_id FROM room_members WHERE room_id=?", (room_id,)):
+            if db.q1("SELECT 1 AS hit FROM tokens WHERE room_id=? AND "
+                     "(owner_user_id=? OR controller_user_id=?) LIMIT 1",
+                     (room_id, m["user_id"], m["user_id"])) is None:
+                uids.add(m["user_id"])
+    return uids
+
+
+async def send_to_plane_viewed(room_id, floor, kind, payload):
+    for uid in plane_watchers(room_id, floor):
+        for sock in list(clients(room_id).get(uid) or ()):
+            await send_to(sock, kind, payload)
 
 
 def fog_patch(mp, newly):
     return {"cells": newly, "terrain": {str(i): mp["cells"][i] for i in newly}}
 
 
-def save_map_and_notify(room_id, mp):
-    set_map(room_id, mp)
+def save_map_and_notify(room_id, mp, floor=""):
+    set_map(room_id, mp, floor)
     notify(room_id, "map_changed", None)

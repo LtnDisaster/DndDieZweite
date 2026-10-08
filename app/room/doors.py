@@ -8,7 +8,8 @@ closed (or locked) door blocks movement, which the pathfinder enforces server-si
 """
 from .. import db, events, footprint, los, mapmodel
 from . import authz
-from .net import broadcast, fog_patch, get_map, map_lock, send_to, set_map, sys_msg
+from .net import (broadcast, fog_patch, get_map, map_lock, send_to,
+                  send_to_plane, set_map, sys_msg)
 
 
 def _door_of(msg, mp):
@@ -21,12 +22,15 @@ def _door_of(msg, mp):
     return mapmodel.find_door(mp, x, y, bx, by)
 
 
-def _player_cells(room_id, user_id, mp):
+def _player_cells(room_id, user_id, mp, floor=""):
     """Cells occupied by ANY token this user owns OR controls (D82: a
-    companion counts for door reach — operational authority, authz SSOT)."""
+    companion counts for door reach — operational authority, authz SSOT).
+    D88: reach is SAME-PLANE — a token on another floor reaches nothing here."""
     cells = set()
     c = mp["cell"]
     for tok in authz.controlled_rows(room_id, user_id):
+        if (tok.get("floor") or "") != floor:
+            continue
         cx = max(0, min(mp["w"] - 1, int(tok["x"] // c)))
         cy = max(0, min(mp["h"] - 1, int(tok["y"] // c)))
         cells.add((cx, cy))
@@ -38,8 +42,16 @@ async def handle_door(ws, room_id, user, is_dm, msg):
         x, y = int(msg["x"]), int(msg["y"])
     except (KeyError, ValueError, TypeError):
         return
+    # D88: a door belongs to a plane. Players act on it only from a token on
+    # the SAME plane (their view-floor claim is validated against their own
+    # tokens, never trusted); the DM acts on any plane.
+    fl = str(msg.get("floor") or "")
+    if not is_dm:
+        planes = {(t.get("floor") or "") for t in authz.controlled_rows(room_id, user["id"])}
+        if fl not in planes:
+            return                          # like a door that is not there
     async with map_lock(room_id):
-        mp = get_map(room_id)
+        mp = get_map(room_id, fl)
         door = _door_of({"x": x, "y": y, "dir": msg.get("dir")}, mp)
         if door is None:
             return
@@ -48,7 +60,7 @@ async def handle_door(ws, room_id, user, is_dm, msg):
         if is_dm:
             if action == "remove":
                 mp["doors"] = [d for d in mp["doors"] if d is not door]
-                set_map(room_id, mp)
+                set_map(room_id, mp, fl)
                 events.emit(events.make("door_removed", room_id=room_id, actor_id=user["id"],
                                         x=door["x"], y=door["y"], dir=door["dir"]))
                 await broadcast(room_id, "map_changed", None)
@@ -77,16 +89,16 @@ async def handle_door(ws, room_id, user, is_dm, msg):
             if door["locked"]:
                 await send_to(ws, "error", {"msg": "The door is locked"})
                 return
-            cells = _player_cells(room_id, user["id"], mp)
+            cells = _player_cells(room_id, user["id"], mp, fl)
             if not cells & {(door["x"], door["y"]), (bx, by)}:
                 await send_to(ws, "error", {"msg": "Walk up to the door first"})
                 return
             door["closed"] = not door["closed"]
-        set_map(room_id, mp)
-    await door_toggled(room_id, user["id"], door)
+        set_map(room_id, mp, fl)
+    await door_toggled(room_id, user["id"], door, fl)
 
 
-async def door_toggled(room_id, actor_id, door):
+async def door_toggled(room_id, actor_id, door, floor=""):
     """Shared post-flip lifecycle for an ALREADY-FLIPPED, PERSISTED door: LOS
     reveal on open, chronicle line, event fact, map_changed broadcast.
     Used by handle_door and by world-object levers (D82) — one door lifecycle,
@@ -95,13 +107,14 @@ async def door_toggled(room_id, actor_id, door):
     newly = []
     if opened:
         async with map_lock(room_id):
-            mp = get_map(room_id)
+            mp = get_map(room_id, floor)
             for tok in db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens "
-                            "WHERE room_id=? AND owner_user_id IS NOT NULL", (room_id,)):
+                            "WHERE room_id=? AND owner_user_id IS NOT NULL AND floor=?",
+                            (room_id, str(floor))):
                 visible = los.visible_cells(mp, footprint.player_source_cells(mp, [tok]))
                 newly += mapmodel.reveal_cells(mp, visible)
             if newly:
-                set_map(room_id, mp)
+                set_map(room_id, mp, floor)
     state = "closes" if door["closed"] else "swings open"
     verb = "locks" if door["locked"] and door["closed"] else state
     if not (door.get("dm_only") or door.get("secret")):
@@ -112,5 +125,5 @@ async def door_toggled(room_id, actor_id, door):
                             actor_id=actor_id, x=door["x"], y=door["y"], dir=door["dir"],
                             locked=bool(door["locked"])))
     if newly:
-        await broadcast(room_id, "explored", fog_patch(mp, newly))
+        await send_to_plane(room_id, floor, "explored", fog_patch(mp, newly))
     await broadcast(room_id, "map_changed", None)

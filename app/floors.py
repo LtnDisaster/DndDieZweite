@@ -71,4 +71,5 @@ def remove(room_id, value):
         return False, "Tokens still stand on this floor"
     floors = [f for f in parse(room) if f != name]
     db.x("UPDATE rooms SET floors=? WHERE id=?", (json.dumps(floors), room_id))
+    db.x("DELETE FROM floor_maps WHERE room_id=? AND floor=?", (room_id, name))  # D88
     return True, floors

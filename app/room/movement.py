@@ -12,7 +12,8 @@ from .growth import maybe_grow_map
 from . import authz, combat as CB
 from .net import broadcast, fog_patch, get_map, map_lock, send_to, set_map
 from .traps import at_cell, hit_trap, take_loot
-from .visibility import broadcast_token_step, viewer_visible_cells
+from .visibility import (broadcast_token_step, viewer_visible_cells,
+                         send_presence_event)
 
 STEP_DELAY = 0.11
 # token_id -> walk asyncio.Task
@@ -33,7 +34,15 @@ async def _announce_move(room_id, token_id, moving, reason=None):
     payload = {"token_id": token_id, "moving": bool(moving)}
     if reason:
         payload["reason"] = reason
-    await broadcast(room_id, "move_state", payload)
+    # SPRINT-21: a walk ring for a token no player can see must not announce
+    # its id either. Presence-gated (owned/character walks stay room-wide);
+    # deleted tokens (row None) keep the plain channel for client cleanup.
+    tok = db.q1("SELECT id, owner_user_id, character_id, controller_user_id, floor, x, y "
+                "FROM tokens WHERE id=?", (token_id,))
+    if tok is None:
+        await broadcast(room_id, "move_state", payload)
+    else:
+        await send_presence_event(room_id, tok, "move_state", payload)
 
 
 def _room_tokens(room_id, exclude_id=None, floor=None):
@@ -100,10 +109,10 @@ async def carry_riders(room_id, token_id):
     Nested chains (A on B on C) propagate top-down, bounded and cycle-tolerant;
     the cycle guard at assignment time (tokens.handle_token_mount) stays the
     real protection."""
-    mp = get_map(room_id)
     parent = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
     if parent is None:
         return
+    mp = get_map(room_id, parent.get("floor") or "")   # D88: carry on the mount's plane
     frontier, seen = [parent], {token_id}
     while frontier:
         nxt = []
@@ -114,6 +123,12 @@ async def carry_riders(room_id, token_id):
                 if r["id"] in seen or len(seen) > 64:
                     continue
                 seen.add(r["id"])
+                # SPRINT-19 plane guard: carrying is same-plane only (D86
+                # planes are independent worlds). Defensive: legacy or
+                # inconsistent data must never teleport a rider's position
+                # onto another floor's coordinate space.
+                if (r.get("floor") or "") != (p.get("floor") or ""):
+                    continue
                 anchor = footprint.anchor_for_center(p_origin, p_span,
                                                      footprint.oriented_span(r))
                 x, y = footprint.origin_pixels(anchor, footprint.token_span(r),
@@ -175,7 +190,7 @@ async def handle_move(ws, room_id, user, is_dm, msg):
         if budget <= 0:
             await send_to(ws, "error", {"msg": "No movement left this turn — Dash or End Turn"})
             return
-    mp = get_map(room_id)
+    mp = get_map(room_id, tok.get("floor") or "")     # D88: YOUR plane's map
     cell = mp["cell"]
     try:
         tx, ty = int(msg["tx"]), int(msg["ty"])
@@ -205,11 +220,11 @@ async def handle_move(ws, room_id, user, is_dm, msg):
         # Only a player-owned token lifts fog; NPC/DM tokens never reveal for players.
         if tok["owner_user_id"] is not None:
             async with map_lock(room_id):
-                mp = get_map(room_id)
+                mp = get_map(room_id, tok.get("floor") or "")
                 visible, _ = _reveal_player_token(mp, tok)
                 newly = mapmodel.reveal_cells(mp, visible)
                 if newly:
-                    set_map(room_id, mp)
+                    set_map(room_id, mp, tok.get("floor") or "")
             if newly:
                 await broadcast(room_id, "explored", fog_patch(mp, newly))
         await maybe_grow_map(room_id, tok)
@@ -291,7 +306,7 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk")
             # write are atomic against them: a route valid when the walk began can no
             # longer carry the token through geometry that became illegal mid-walk.
             async with map_lock(room_id):
-                mp = get_map(room_id)
+                mp = get_map(room_id, tok.get("floor") or "")   # D88 plane
                 from_origin, side = footprint.occupied_origin(mp, tok)
                 legal = step_legal(mp, from_origin, (cx, cy),
                                    blocked_edges=mapmodel.blocked_edges(mp), footprint=side,
@@ -321,8 +336,9 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk")
             if has_riders:
                 await carry_riders(room_id, token_id)   # riders track every step
             reveals = tok["owner_user_id"] is not None
+            fl_walk = tok.get("floor") or ""                   # D88 plane
             async with map_lock(room_id):
-                mp = get_map(room_id)
+                mp = get_map(room_id, fl_walk)
                 visible, _ = _reveal_player_token(mp, tok)
                 newly = mapmodel.reveal_cells(mp, visible) if reveals else []
                 map_dirty = False
@@ -342,7 +358,7 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk")
                     if await take_loot(room_id, tok, loot):
                         map_dirty = True
                 if newly or map_dirty:
-                    set_map(room_id, mp)
+                    set_map(room_id, mp, fl_walk)
             if newly:
                 await broadcast(room_id, "explored", fog_patch(mp, newly))
             if map_dirty:
@@ -381,21 +397,21 @@ async def handle_stop_move(ws, room_id, user, is_dm, msg):
     if tok is None:
         return
     await _cancel_walk(tid)
-    mp = get_map(room_id)
+    mp = get_map(room_id, tok.get("floor") or "")
     origin, side = footprint.occupied_origin(mp, tok)
     tok = db.q1("SELECT * FROM tokens WHERE id=?", (tid,)) or tok
     await broadcast_token_step(room_id, tok, tok["x"], tok["y"], origin[0], origin[1])
     await _announce_move(room_id, tid, False, "manual")
 
 
-def _preview_allowed_cells(mp, room_id, user, is_dm):
+def _preview_allowed_cells(mp, room_id, user, is_dm, floor=""):
     if is_dm:
         return None
     # flat STORAGE indices (explored array / los) -> WORLD cells for path/footprint
     allowed = {mapmodel.world_of(mp, i % mp["w"], i // mp["w"])
                for i, explored in enumerate(mp["explored"]) if explored}
     allowed.update(mapmodel.world_of(mp, i % mp["w"], i // mp["w"]) for i in
-                   viewer_visible_cells(room_id, user["id"], mp))
+                   viewer_visible_cells(room_id, user["id"], mp, floor=floor))
     return allowed
 
 
@@ -420,14 +436,15 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
     if why:
         await send_to(ws, "error", {"msg": why})
         return
-    mp = get_map(room_id)
+    mp = get_map(room_id, tok.get("floor") or "")     # D88: the token's own plane
     origin, side = footprint.occupied_origin(mp, tok)
     # D84: clicked cell = desired CENTER; convert to the canonical anchor
     # (same single rule as handle_move — preview and execution must agree).
     goal_cx, goal_cy = tx, ty                       # the CENTER the player aimed at
     tx, ty = footprint.center_to_anchor((goal_cx, goal_cy), side)
     tx, ty = footprint.clamp_origin(mp, (tx, ty), side)          # WORLD clamp (D72)
-    allowed = _preview_allowed_cells(mp, room_id, user, is_dm)
+    allowed = _preview_allowed_cells(mp, room_id, user, is_dm,
+                                     floor=tok.get("floor") or "")
     if not footprint.valid_final_position(mp, tok, (tx, ty), _room_tokens(room_id, tok["id"], tok.get("floor") or ""), allowed):
         await send_to(ws, "error", {"msg": "No path there"})
         return

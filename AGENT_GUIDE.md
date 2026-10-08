@@ -398,7 +398,11 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
     operations; never fake WS clients (D52).
 - Effect geometry:
   - `app/effects.py::effect_cells()` — pure `point|line|cone|circle|square`;
-    client parity locked by Node-vm test. Visual relay `room/aoe.py` unchanged.
+    client parity locked by Node-vm test. Visual relay `room/aoe.py` is
+    PLANE-SCOPED (D90): DM's claimed floor validated, delivered via
+    `send_to_plane_viewed`. `abilities.execute` resolves everything on the
+    CASTER's plane (map seam `net.get_map`, targeting `tokens_in_cells(floor=)`,
+    cross-plane single target = `No target token`).
 - Tests:
   - `tests/test_quests.py`, `tests/test_progression.py`, `tests/test_effects.py`
 
@@ -561,7 +565,8 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `token_span` / `token_visual` / `token_rot` | room.tokens | room | no | D81/D82 mechanical span, visual bounds and facing (fields also ride snapshots/token_add) |
 | `token_controller` / `token_mount` | room.tokens | room | no | D82 relationship broadcasts; hidden NPC tokens strip controller (D81 leak-parity) |
 | `object_state` | room.interact | room | no | D82 generic object boolean flipped (state also rides `/state` grid) |
-| `ping` | pings | room | no |
+| `ping` | pings | plane's watchers (D90: token holders + DM + token-less observers on primary) | no |
+| `aoe` | aoe relay | plane's watchers (DM tool, D90) | no |
 | `map_expanded` | room.growth | room | no | auto world growth (D67, flag-off default D77): new `w,h,origin`; NO pixel shift (D72) — clients refetch; player-owned token walks/teleports only |
 | `forced_moved` | room.moveforced | DM socket | private | final cell + z of a forced move (D71); movement itself rides `step` |
 | `quests_changed` | room quests | room | no | payload-less; clients refetch filtered `/state` |
@@ -770,6 +775,8 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_quests.py` | quest CRUD via WS, DM-only server filtering (live + `/state` + raw-payload grep), notice visibility, reconnect reconstruction, player mutation refusal, quest/door event emission |
 | `tests/test_progression.py` | class-level validation, derived total + PB, legacy-column sync, owner/DM/stranger authorization |
 | `tests/test_effects.py` | point/line/cone/circle/square geometry, clipping, determinism, server≡client `aoeCells` parity (Node vm) |
+| `tests/test_sprint20_security.py` | D90: caster-plane ability truth, cross-plane refusal no-oracle, hidden-token cond gate, plane-scoped aoe/ping (+darkvision/asset/floor/mount/lamp/state sweeps), editor resize pin/elev carry (Node vm) |
+| `tests/test_browser_flow.py` | real-JS tactical flow against the live WS stack: tactical draw, rectangular-token hit test, preview→confirm over the wire, refresh persistence — the documented NO-BROWSER harness |
 | `tests/test_abilities.py` | DC/attack derivation, save-half, resist/immune through defense pipeline, death-pipeline entry, heal, condition, concentration flag, slot+resource consumption, upcast validation, attack-vs-AC+crit, footprint flank, LOS/door, range authority, actor spoofing refusal, hidden-token non-leak |
 | `tests/test_diorama_parity.py` | confirmed-path revalidation refusal (`route_invalid`), shared camera-space click math (Node vm), view-aware click/token/double-click, tool parity, sheet-crash guard |
 | `tests/test_downed_movement.py` | 0-HP preview/move/teleport refusal, per-step downed stop, NPC corpse DM-drag stays allowed |

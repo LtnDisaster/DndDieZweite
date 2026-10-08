@@ -185,6 +185,33 @@ def default_map(w=DEFAULT_W, h=DEFAULT_H):
             "objects": []}
 
 
+def fit(mp, base):
+    """D88: every floor shares the primary map's DIMENSIONS and world anchor
+    (one camera, one world window, one growth story). A floor map is clamped
+    to the base: rows copy row-wise, missing cells read as floor, extras are
+    dropped. Content is preserved where it still fits."""
+    if not mp:
+        return dict(base)
+    w, h, cell = base["w"], base["h"], base["cell"]
+    out = dict(mp)
+    out["w"], out["h"] = w, h
+    out["origin"] = list(base.get("origin") or [0, 0])
+    src = mp.get("cells") or []
+    ow = mp.get("w") or w
+    cells = [0] * (w * h)
+    for y in range(min(h, mp.get("h") or 0)):
+        row = src[y * ow: y * ow + min(ow, w)]
+        cells[y * w: y * w + len(row)] = row
+    out["cells"] = cells
+    ex = mp.get("explored") or []
+    exn = [0] * (w * h)
+    for y in range(min(h, mp.get("h") or 0)):
+        row = ex[y * ow: y * ow + min(ow, w)]
+        exn[y * w: y * w + len(row)] = row
+    out["explored"] = exn
+    return out
+
+
 def load(raw, default=None):
     mp = default_map()
     if default:
@@ -254,7 +281,11 @@ def _clean_object(o, w, h, ox=0, oy=0):
            "x": max(ox, min(ox + w - 1, x)), "y": max(oy, min(oy + h - 1, y)),
            "label": _label(o.get("label")),
            "dm_only": bool(o.get("dm_only")),
-           "state": ({"on": True} if isinstance(o.get("state"), dict) and o["state"].get("on") else {})}
+           # an EXPLICIT off ({"on": false}) is world truth (D89 lamps, D82
+           # levers) — only absent/garbage state normalizes to the default-on {}
+           "state": ({"on": bool(o["state"]["on"])}
+                     if isinstance(o.get("state"), dict) and "on" in o["state"]
+                     else ({"on": True} if isinstance(o.get("state"), dict) and o["state"].get("on") else {}))}
     it = o.get("interact")
     if isinstance(it, dict):
         op = it.get("op")
@@ -272,6 +303,28 @@ def _clean_object(o, w, h, ox=0, oy=0):
                 return out
             out["interact"] = {"label": label,
                                "op": {"kind": "door", "x": dx, "y": dy, "dir": dir_}}
+        elif kind == "stair":
+            # D88: validated plane transition — destination is checked at USE
+            # time (floor exists, cell free); dangling here = plain decoration.
+            try:
+                sx, sy = int(op["x"]), int(op["y"])
+            except (KeyError, TypeError, ValueError):
+                return out
+            if "floor" not in op:
+                return out
+            to = str(op["floor"])[:24].strip()
+            out["interact"] = {"label": label,
+                               "op": {"kind": "stair", "floor": to, "x": sx, "y": sy}}
+        elif kind == "lamp":
+            # D89: static light source. The light is DATA (radius) + the
+            # existing boolean state carrier (on/off); runtime flips go
+            # through the allowlisted interact op, never through map edits.
+            try:
+                bright = max(0, min(30, int(op["bright"])))
+            except (KeyError, TypeError, ValueError):
+                bright = 5
+            out["interact"] = {"label": label,
+                               "op": {"kind": "lamp", "bright": bright}}
         # any other kind: silently dropped — DATA never carries code
     return out
 
@@ -479,6 +532,10 @@ def visible_map(mp, user_id, is_dm, visible_cells=()):
                 "state": o.get("state") or {}}
         if it:
             copy["interact"] = {"label": it["label"], "kind": it["op"]["kind"]}
+            if it["op"]["kind"] == "lamp":
+                # glow radius is view furniture, not a secret (D89)
+                copy["interact"]["bright"] = it["op"].get("bright", 5)
+                copy["interact"]["on"] = bool((o.get("state") or {}).get("on", True))
         objects.append(copy)
     return {"w": w, "h": h, "cell": mp["cell"], "origin": origin_of(mp),
             "cells": cells, "elev": elev,

@@ -4,7 +4,7 @@
 current LOS calculation: hiding a cell does not blind a player who can see it now.
 """
 from .. import db, mapmodel
-from .net import broadcast, get_map, map_lock, send_to, set_map
+from .net import broadcast, get_map, map_lock, send_to, send_to_plane, set_map
 
 
 async def handle_fog_edit(ws, room_id, user, is_dm, msg):
@@ -28,8 +28,9 @@ async def handle_fog_edit(ws, room_id, user, is_dm, msg):
     if not updates:
         return
 
+    fl = str(msg.get("floor") or "")        # D88: edit the plane you see
     async with map_lock(room_id):
-        mp = get_map(room_id)
+        mp = get_map(room_id, fl)
         changed = {}
         terrain = {}
         for x, y, explored in updates:
@@ -42,8 +43,10 @@ async def handle_fog_edit(ws, room_id, user, is_dm, msg):
                 terrain[str(idx)] = mp["cells"][idx] if explored else None
         if not changed:
             return
-        set_map(room_id, mp)
-    await broadcast(room_id, "fog_changed", {"cells": changed, "terrain": terrain})
+        set_map(room_id, mp, fl)
+    # D88: plane-scoped — a client must never receive fog truth for a plane it
+    # is not standing on (the client applies cells/explored blindly).
+    await send_to_plane(room_id, fl, "fog_changed", {"cells": changed, "terrain": terrain})
 
 
 async def handle_fog_toggle(ws, room_id, user, is_dm, msg):

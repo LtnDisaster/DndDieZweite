@@ -132,13 +132,24 @@ def image_path(row) -> str | None:
 
 
 def serve_allowed(row, requester_id: int) -> bool:
-    """Owner, or the asset rides a token in a room the requester belongs to."""
+    """SPRINT-19 AUDIT (L3): the old rule served any room member anything that
+    rode ANY token of the room — a hidden NPC's artwork, an OTHER-plane token's
+    artwork, and even plain NPC artwork that the WS channels strip: a leaked or
+    guessed id turned REST into the leak the WS path closed. Reading now follows
+    exactly what a viewer legitimately SEES: own uploads; artwork riding a
+    token they own or operate; a DM additionally gets artwork riding tokens in
+    rooms they DM. Everything else is the uniform 404 — still no oracle."""
     if row["user_id"] == requester_id:
+        return True
+    ref = f"/assets/{row['id']}"
+    if db.q1("SELECT 1 AS hit FROM tokens WHERE image=? AND "
+             "(owner_user_id=? OR controller_user_id=?) LIMIT 1",
+             (ref, requester_id, requester_id)) is not None:
         return True
     return db.q1("SELECT 1 AS hit FROM tokens t "
                  "JOIN room_members m ON m.room_id = t.room_id "
-                 "WHERE t.image=? AND m.user_id=? LIMIT 1",
-                 (f"/assets/{row['id']}", requester_id)) is not None
+                 "WHERE t.image=? AND m.user_id=? AND m.role='dm' LIMIT 1",
+                 (ref, requester_id)) is not None
 
 
 @router.put("/assets")
@@ -155,21 +166,29 @@ def list_assets(request: Request, room: str = "", user=Depends(require_user)):
                 "ORDER BY created_at DESC LIMIT 500", (user["id"],))
     if room:
         _, r = room_of(request, room)
+        mine = {a["id"] for a in rows}
+        # SPRINT-19 AUDIT (L3): the old DM branch listed EVERY user's ENTIRE
+        # upload catalogue (globally, unrelated to any room), and the player
+        # branch listed metadata of assets riding ANY room token — hidden NPC
+        # and other-plane included: names of private artwork the player may
+        # never see. Listing now mirrors serve_allowed exactly: a DM browses
+        # art riding tokens in rooms they DM; a player browses art riding
+        # tokens they own or operate in this room. Own uploads always listed.
         if r["_role"] == "dm":
-            mine = {a["id"] for a in rows}
-            for a in db.q("SELECT id,name,w,h,bytes,created_at FROM assets "
-                          "WHERE user_id != ? ORDER BY created_at DESC LIMIT 500",
-                          (user["id"],)):
-                if a["id"] not in mine:
-                    rows.append(a)
+            q = ("SELECT DISTINCT a.id,a.name,a.w,a.h,a.bytes,a.created_at "
+                 "FROM assets a JOIN tokens t ON t.image = '/assets/'||a.id "
+                 "JOIN room_members m ON m.room_id = t.room_id "
+                 "WHERE m.user_id=? AND m.role='dm'")
+            args = (user["id"],)
         else:
-            mine = {a["id"] for a in rows}
-            for a in db.q("SELECT DISTINCT a.id,a.name,a.w,a.h,a.bytes,a.created_at "
-                          "FROM assets a JOIN tokens t ON t.image = '/assets/'||a.id "
-                          "WHERE t.room_id=?", (r["id"],)):
-                if a["id"] not in mine:
-                    rows.append(a)
-                    mine.add(a["id"])
+            q = ("SELECT DISTINCT a.id,a.name,a.w,a.h,a.bytes,a.created_at "
+                 "FROM assets a JOIN tokens t ON t.image = '/assets/'||a.id "
+                 "WHERE t.room_id=? AND (t.owner_user_id=? OR t.controller_user_id=?)")
+            args = (r["id"], user["id"], user["id"])
+        for a in db.q(q + " ORDER BY a.created_at DESC LIMIT 500", args):
+            if a["id"] not in mine:
+                rows.append(a)
+                mine.add(a["id"])
     return {"assets": rows}
 
 

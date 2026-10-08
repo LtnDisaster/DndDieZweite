@@ -220,6 +220,11 @@ function wire(){
     const n = $("dm-npc-name").value.trim(); if (n){ wsSend({ type:"add_token", label:n }); $("dm-npc-name").value=""; }
   };
   $("btn-edit-map").onclick = () => { state.editing ? editorClose() : editorOpen(); };
+  const osel = $("obj-op");                                    // D88/D89 op fields
+  if (osel) osel.onchange = () => {
+    const sf = $("obj-stair-fields"), lf = $("obj-lamp-fields");
+    if (sf) sf.classList.toggle("hidden", osel.value !== "stair");
+    if (lf) lf.classList.toggle("hidden", osel.value !== "lamp"); };
   $("btn-long-rest").onclick = () => wsSend({ type: "long_rest",
     clear_conditions: !!($("long-rest-conds") && $("long-rest-conds").checked) });
   $("btn-aoe").onclick = () => { state.aoeArmed = !state.aoeArmed;
@@ -250,7 +255,8 @@ function wire(){
   if (dt) dt.onclick = () => {                     // D87: DM darkness switch
     if (!state.grid || state.room.role !== "dm") return;
     const dark = !state.grid.dark;
-    wsSend({ type: "map_edit", map: { ...state.grid, dark }, dark });
+    wsSend({ type: "map_edit", map: { ...state.grid, dark }, dark,
+             floor: state.viewFloor || "" });                  // D88: the plane you view
   };
   const ft = $("btn-fog-toggle");
   if (ft) ft.onclick = () => {
@@ -270,7 +276,8 @@ function wire(){
   renderFogToggle();
   $("btn-ed-save").onclick = () => {
     if (!state.editMap) return;
-    wsSend({ type:"map_edit", map: state.editMap, reset_fog: $("ed-fog").checked });
+    wsSend({ type:"map_edit", map: state.editMap, reset_fog: $("ed-fog").checked,
+             floor: state.viewFloor || "" });                  // D88: edits land on the viewed plane
     toast("Map saved");
   };
   $("btn-ed-cancel").onclick = editorClose;

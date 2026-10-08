@@ -1376,3 +1376,117 @@ arrive via the standard `token_add` path, lost ones via `token_leave`, and a
 `grid_reveal` nudge refreshes terrain. Hidden tokens leak neither radius nor
 plane. **IN A DARK ROOM, LIGHT IS VISION — and every light you carry is a
 window into your position.**
+
+## D88 — Independent floor maps: one world frame, per-plane content
+
+Rooms may now hold a MAP PER PLANE. The primary floor ("") keeps reading the
+legacy `room_state.map_json` byte-for-byte — zero migration, every old room
+behaves identically. Named floors get their own row in the new
+`floor_maps(room_id, floor, map_json)` table (UNIQUE index added in
+`init_db`, dedup-safe for DBs created mid-sprint). `net.get_map(room_id,
+floor)` / `set_map(..., floor)` are the single seam: every former call site
+(movement, walk, forced moves, doors, fog, interact, vision, /state, map/fog
+edits) is now plane-parameterized. Invariants: every floor map is
+`mapmodel.fit()`-clamped to the PRIMARY map's dimensions and world anchor
+(one camera, one world window, one growth story); `fog_off` stays room-wide
+(primary-SSOT, injected into every plane read); `dark` is a per-floor field.
+
+Vision is computed ON THE MAP THE TOKEN STANDS ON — never is a crypt token's
+visibility decided by the tavern's fog (`send_token_event`, /state
+`_visible_token` via per-plane caches). Player transitions run only through
+validated connectors: the D82 allowlisted `stair {floor,x,y}` object op,
+reach-gated like doors, destination validated on the TARGET plane (terrain +
+occupants; occupied or walled refuses outright, viewing never moves anyone).
+Plane-scoped delivery (`net.send_to_plane`) keeps `fog_changed`, door reveals
+and `object_state` from ever repainting a socket that stands on another
+plane. DMs get a view-floor selector; players' /state is always their own
+primary plane (their first owned — else operated — token's floor).
+Remaining documented limitation (SPRINT 18/19): `abilities.py` resolved areas
+on the primary map (aoe/pings room-global). CLOSED BY D90.
+
+## D89 — Lighting v2: lamps are world objects, darkvision is a private sense
+
+Static light sources are authored, not coded: map objects with the allowlisted
+`lamp {bright}` op light their PLANE for everyone standing there — light is
+not owned information — and each source reveals exactly what its own LOS
+carries (`_lit_cells` per plane). Lamps toggle through the same allowlisted
+interact op; the boolean `state.on` carrier now PERSISTS explicitly-off
+(`{"on": false}` is truth — the sanitizer previously normalized it away, a
+latent D82 lever bug). Token `darkvision` (new column, 0–30) is a SENSE:
+owner-only in the dark-branch sight budget, DM/owner-writable via the
+filtered `token_darkvision` channel, stripped from every hidden-token
+payload like light/floor. Map edits that add or move lamps re-run the
+per-viewer visibility decision; plain terrain edits keep the classic
+next-move semantics. **The Sprint-19 audit additionally closed L1–L5: all
+property broadcasts (`token_image/span/visual/rot/controller/light/floor`)
+now travel via `visibility.send_property_to_interested` (DMs, owner, current
+controller only); first-sight `token_add` and the ghost store use the same
+hidden-strip as the add channel; asset listing/serving follows the RIDING
+token (own/operate it, or DM its room) instead of room membership; floor
+changes validate the destination and refuse mounted riders; cross-plane
+mounts are rejected; and operated tokens light nothing their controller
+should not see.**
+
+## D90 — The caster's plane is ability truth; templates and pings are plane events
+
+Sprint 20 closes D88's documented limitation on the real dispatch paths.
+
+**Ability resolution.** `abilities.execute` loads its map through the ONE
+plane seam (`net.get_map(room_id, caster_token.floor)`) — so range, LOS,
+cover geometry, obstacles, footprint frames and the naming filter all answer
+to the CASTER's plane, never to `room_state.map_json`. Area targeting
+(`tokens_in_cells(floor=)`) never considers another plane's tokens: a token
+elsewhere is not "hidden in the blast", it is not there — entries,
+hidden_count and the chronicle all agree. A `single` target on another plane
+is refused with the SAME message an unknown id gets (`No target token`): the
+channel is not an oracle for "a token exists somewhere else". No second
+targeting engine: the ability executor gained one floor variable and one map
+seam call.
+
+**Vision sources.** With a plane passed (`viewer_visible_cells(..., floor)`),
+a viewer's tokens are sight sources only on their OWN plane's map — a
+lantern or the mere body of a token on the attic no longer projects phantom
+vision into the crypt's coordinates (classic and dark branches, all live
+call sites: token delivery, `/state`, path previews, ability naming).
+
+**Property channels.** Condition bumps for tokens without a table presence
+(hidden NPC tokens) are delivered through the token-delivery audience
+(`visibility.send_cond_bump`) — an AoE that restrains an unseen patrol no
+longer announces id+condition to every socket.
+
+**Templates and pings.** `aoe` (DM tool) validates the claimed floor
+(map_edit precedent) and delivers via `net.send_to_plane_viewed` — the
+plane's token holders, every DM, and the token-less observers who, per the
+`/state` convention, stand on the PRIMARY plane. `ping` follows the same
+watcher set for delivery; its SEND gate keeps the historic primary-plane
+freedom (a ping claims no position; joining before seating was always legal)
+and requires standing on (or DM-ing) any NAMED plane. Both clamp bounds to
+the plane's map; both carry `floor` on the wire and the client paints only
+on the matching view floor. Strict map-truth channels (fog/door/object) keep
+the narrower `plane_viewers` set unchanged.
+
+**Editor resize (P3).** `edResize()` rebuilt the edit snapshot with traps,
+loot, doors and objects but NOT `pins` or `elev` — sanitize then legitimately
+emptied both, so every resize silently deleted the plane's pins and heights.
+Carried through now (bounds-filtered pins, row-wise elevation); a pin lives
+in its plane's map, so its floor association survives resize by construction.
+
+## D91 — The presence gate is the choke point for ALL id-bearing token state
+
+Sprint 20 closed the ability path; the audit closed the rest. Every channel
+that NAMES a token with state (manual cond_add/cond_remove/stand,
+knock_prone — trap callers included, initiative-driven condition ticks, walk
+`move_state`, `token_gone`) now flows through ONE helper:
+`visibility.send_presence_event`. Table presence (owned token or character
+token) keeps the classic room-wide channel — the gate is presence, not
+sender, so players' own tokens stay fully public to the table. Unseen tokens
+are delivered per-viewer through the same plane+LOS+controller decision as
+the token channel itself. `token_mount` joins the D82 property audience
+(rider ∪ mount owners/controllers — a player always learns who rides their
+horse). `death` and `snapshot` were verified SAFE by construction (PC-only
+or null-payload refetch — /state is server-filtered).
+
+Audited-and-kept by convention: the `initiative` payload lists every combatant's
+id/label (DM adding a monster to the tracker is a table-visible act; per-viewer
+initiative would fork the turn UI = rewrite, not hardening); chronicle `sys_msg`
+lines name conditions by design (public table record, D90).

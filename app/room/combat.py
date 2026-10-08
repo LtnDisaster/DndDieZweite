@@ -50,6 +50,19 @@ def token_dex_mod(tok):
     return npc.dex_mod(block) if block else 0
 
 
+async def _cond_update(room_id, token_id, conds):
+    """SPRINT-21: initiative-driven condition ticks (round expiry, first-turn
+    hooks) must respect the presence gate — a condition expiring on a token no
+    player can see must not name it. Tokens gone from the DB keep the plain
+    channel (nothing left to leak about)."""
+    from .visibility import send_cond_bump
+    tok = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
+    if tok is None:
+        await _cond_update(room_id, token_id, conds)
+        return
+    await send_cond_bump(room_id, tok, conds)
+
+
 def get_init(room_id):
     st = db.q1("SELECT initiative FROM room_state WHERE room_id=?", (room_id,))
     init = db.j((st or {}).get("initiative"), {"combat": False, "order": [], "active": -1, "round": 0}) \
@@ -228,7 +241,7 @@ async def handle_init_start(ws, room_id, user, is_dm, msg):
     init = {"combat": True, "round": 1, "order": order, "active": 0}
     begin_turn(init)
     for token_id, conds in first_turn_hooks(room_id, init):
-        await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
+        await _cond_update(room_id, token_id, conds)
     set_init(room_id, init)
     sys_msg(room_id, "Combat started! — Round 1")
     await broadcast(room_id, "initiative", init)
@@ -241,7 +254,7 @@ async def handle_init_next(ws, room_id, user, is_dm, msg):
     if init["combat"] and init["order"]:
         init, wrapped, updates = advance_turn(room_id, init)
         for token_id, conds in updates:
-            await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
+            await _cond_update(room_id, token_id, conds)
         if wrapped:
             sys_msg(room_id, f"— Round {init['round']} —")
         set_init(room_id, init)
@@ -263,7 +276,7 @@ async def _end_turn_common(ws, room_id, user, is_dm):
             return
     init, wrapped, updates = advance_turn(room_id, init)
     for token_id, conds in updates:
-        await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
+        await _cond_update(room_id, token_id, conds)
     if wrapped:
         sys_msg(room_id, f"— Round {init['round']} —")
     set_init(room_id, init)
@@ -294,7 +307,7 @@ async def handle_init_end_round(ws, room_id, user, is_dm, msg):
     updates.extend(first_turn_hooks(room_id, init))
     set_init(room_id, init)
     for token_id, conds in updates:
-        await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
+        await _cond_update(room_id, token_id, conds)
     sys_msg(room_id, f"— Round {init['round']} —")
     await broadcast(room_id, "initiative", init)
 

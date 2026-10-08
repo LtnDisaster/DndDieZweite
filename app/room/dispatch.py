@@ -1,5 +1,5 @@
 """Message dispatch: map a message ``type`` to its handler. Flat registry, no bus."""
-from .. import db, mapmodel
+from .. import db, floors, mapmodel
 from .aoe import handle_aoe
 from .abilities import handle_ability_cast
 from .audio import (handle_audio_add, handle_audio_pause, handle_audio_play,
@@ -31,7 +31,8 @@ from .status import handle_exhaustion, handle_inspiration, handle_temp_hp
 from .tokens import (handle_add_token, handle_del_token, handle_token_controller,
                      handle_token_mount, handle_token_rotate, handle_token_span,
                      handle_token_visual, handle_update_npc, handle_token_image,
-                     handle_token_floor, handle_token_light)
+                     handle_token_floor, handle_token_light,
+                     handle_token_darkvision)
 
 
 async def handle_map_edit(ws, room_id, user, is_dm, msg):
@@ -42,12 +43,19 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
     if mp_new is None:
         await send_to(ws, "error", {"msg": "Invalid map data"})
         return
+    # D88: which plane is being edited ("" = primary, unchanged semantics).
+    # Every extra floor fits the primary frame — one world, one camera.
+    fl = str(msg.get("floor") or "")
+    if not floors.exists(room_id, fl):
+        return await send_to(ws, "error", {"msg": "No such floor"})
+    if fl:
+        mp_new = mapmodel.fit(mp_new, get_map(room_id))
     async with map_lock(room_id):
-        old = get_map(room_id)
+        old = get_map(room_id, fl)
         same_size = (mp_new["w"], mp_new["h"]) == (old["w"], old["h"])
-        # The fog-off flag is owned by fog_toggle only; editor snapshots
-        # never carry it and must not reset an active reveal.
-        mp_new["fog_off"] = bool(old.get("fog_off"))
+        # The fog-off flag is owned by fog_toggle only (room-wide, primary-
+        # stored); editor snapshots never carry it and must not reset it.
+        mp_new["fog_off"] = bool(get_map(room_id).get("fog_off"))
         # D87: darkness is toggled EXPLICITLY via the map_edit "dark" field —
         # a stale editor snapshot must not silently flip it (fog_off precedent).
         if "dark" not in msg:
@@ -90,12 +98,20 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
             prev = old_objs.get(obj.get("id"))
             if prev is not None:
                 obj["state"] = prev.get("state") or {}
-        set_map(room_id, mp_new)
-    sys_msg(room_id, "DM updated the map.")
+        set_map(room_id, mp_new, fl)
+    sys_msg(room_id, "DM updated the map." if not fl else f"DM updated the map on {fl}.")
     await broadcast(room_id, "map_changed", None)
+    # D89: a map that LIGHTS the world must not sit stale — when the edit
+    # introduces or moves static light sources, re-run the per-viewer token
+    # visibility decision. (Dark flips re-run below via dark_changed; plain
+    # terrain edits keep the classic next-move revalidation semantics.)
+    if any(((o.get("interact") or {}).get("op") or {}).get("kind") == "lamp"
+           for o in mp_new.get("objects", [])) or \
+       any(((o.get("interact") or {}).get("op") or {}).get("kind") == "lamp"
+           for o in old.get("objects", [])):
+        from .visibility import reevaluate_visibility
+        await reevaluate_visibility(room_id)
     if dark_changed:
-        # Who can see what depends entirely on the light now — re-run the
-        # per-viewer token visibility decision for the whole room.
         from .visibility import reevaluate_visibility
         await reevaluate_visibility(room_id)
 
@@ -125,6 +141,7 @@ HANDLERS = {
     "token_image": handle_token_image,        # D85: server-validated artwork asset only
     "token_floor": handle_token_floor,        # D86: change the occupancy/visibility plane
     "token_light": handle_token_light,        # D87: light radius in cells (dark rooms)
+    "token_darkvision": handle_token_darkvision,   # D89: sense radius (owner-only sight)
     "token_rotate": handle_token_rotate,      # D82: visual facing only, never the footprint
     "token_controller": handle_token_controller,   # D82: DM assigns a generic controller
     "token_mount": handle_token_mount,             # D82: acyclic rider→mount relationship

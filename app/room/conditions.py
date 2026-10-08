@@ -3,6 +3,7 @@ from .. import conditions as C
 from .. import db, movecost
 from . import authz
 from .net import broadcast, send_to, sys_msg
+from .visibility import send_cond_bump, send_presence_event
 
 
 def _target(room_id, user, is_dm, msg):
@@ -24,7 +25,7 @@ async def handle_cond_add(ws, room_id, user, is_dm, msg):
     conds = C.add(C.load(tok), msg.get("key"), msg.get("rounds", 0), msg.get("until", ""))
     db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), tok["id"]))
     sys_msg(room_id, f"{tok['label']} is now {C.label(str(msg.get('key','')).strip())}.")
-    await broadcast(room_id, "cond", {"token_id": tok["id"], "conds": conds})
+    await send_cond_bump(room_id, tok, conds)     # SPRINT-21: hidden NPC stays hidden
 
 
 async def handle_cond_remove(ws, room_id, user, is_dm, msg):
@@ -36,7 +37,7 @@ async def handle_cond_remove(ws, room_id, user, is_dm, msg):
         return
     conds = C.remove(C.load(tok), msg.get("key"))
     db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), tok["id"]))
-    await broadcast(room_id, "cond", {"token_id": tok["id"], "conds": conds})
+    await send_cond_bump(room_id, tok, conds)
 
 
 def stand_cost_units(tok):
@@ -84,7 +85,7 @@ async def handle_stand(ws, room_id, user, is_dm, msg):
     if cost:
         CB.spend_move(room_id, tok["id"], cost)
     sys_msg(room_id, f"{tok['label']} stands up." + (f" ({cost} movement)" if cost else ""))
-    await broadcast(room_id, "cond", {"token_id": tok["id"], "conds": new})
+    await send_cond_bump(room_id, tok, new)
     if cost:
         await broadcast(room_id, "initiative", CB.get_init(room_id))
 
@@ -98,7 +99,7 @@ async def knock_prone(room_id, tok, actor="DM"):
     conds = C.add(C.load(tok), "prone", 0, "")
     db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), tok["id"]))
     sys_msg(room_id, f"{tok['label']} is knocked prone ({actor}).")
-    await broadcast(room_id, "cond", {"token_id": tok["id"], "conds": conds})
+    await send_cond_bump(room_id, tok, conds)     # trap knocks too (D83 callers)
     return conds
 
 

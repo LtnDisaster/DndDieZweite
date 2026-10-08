@@ -326,7 +326,13 @@ def test_wall_painted_midwalk_stops_movement(client, monkeypatch):
         payload, events = _await_walk_end(ws)
         kinds = [e.get("kind") for e in events]
         assert payload["reason"] == "path_blocked"
-        assert kinds.count("step") <= 1                                # never enters the new wall
+        # D89 note: a map edit re-runs the vision decision, so already-in-flight
+        # steps may arrive after map_changed — the invariant is the POSITION:
+        # the token must never come to rest inside the newly painted wall.
+        assert kinds.count("step") >= 1
+        _row = db.q1("SELECT x, y FROM tokens WHERE id=?", (tok,))
+        assert (int(_row["x"] // 50), int(_row["y"] // 50)) != (11, 6)   # never inside
+        assert int(_row["x"] // 50) <= 11                               # never beyond
         assert "map_changed" in kinds                                  # the edit that stopped it
 
     cur = next(t for t in state_of(client, dm, code)["tokens"] if t["id"] == tok)

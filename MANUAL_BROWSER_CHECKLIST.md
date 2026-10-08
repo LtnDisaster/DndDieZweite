@@ -268,6 +268,11 @@ Darkness (DM candle button 🕯 in the brush bar):
 
 ## History
 
+- Sprint 20: D90 section added (caster-plane ability truth, plane-scoped AoE/ping,
+  resize pin/elev carry). Canonical close: 499 passed + 17 skipped. The
+  "browser flow" automation is a Node-vm harness — no real browser runtime
+  exists on the test host.
+
 - Sprint 18: D84–D87 section added (centre contract, artwork pipeline, floor
   planes, darkness/light). Canonical run at close: 474 passed + 15 skipped.
 - Sprint 17: D83 section (rotation orients the footprint, carrying riders,
@@ -281,3 +286,24 @@ Darkness (DM candle button 🕯 in the brush bar):
   legitimate fog as a total failure).
 - Sprint 11: smoke test created after black-screen/Diorama one-way/room-delete
   manual regressions (see DECISIONS D75–D77, MANUAL_FIX_NOTES.md).
+
+## Sprint 19 — Floor maps, stair connectors, lighting v2 (D88/D89)
+- [ ] DM: create floor "crypt", select it in "Viewing plane" — map, grid and canvas show the crypt; token positions unchanged; switch back restores primary view.
+- [ ] DM: edit walls/dark/fog while crypt is selected → primary map untouched; a player on primary sees none of it.
+- [ ] DM: place a "stair" object (Edit map → Object → stair → target floor/cell); player walks next to it, clicks 🕹 → token moves to crypt at the destination; player's board re-renders the crypt; chronicle shows the 🪜 line.
+- [ ] DM: stand an NPC on a stair destination first → player's attempt answers "No room down there." and the token stays.
+- [ ] DM: enable darkness on crypt only → crypt is dark (light-governed), primary stays normally lit.
+- [ ] DM: place a lamp (Object → lamp) on crypt; a player on crypt sees what its glow circle reaches; player clicks 💡 to extinguish → circle and revealed tokens vanish for everyone on crypt; reload page → lamp stays off.
+- [ ] Player: token sheet → Darkvis. 8 in a dark room with no light → that player now sees ~8 cells around their token, nobody else gains sight of it.
+- [ ] DM: token light on an NPC another player controls → controller gains no light-vision from it.
+- [ ] Old room (created before Sprint 19): map, fog, doors, levers behave exactly as in Sprint 18.
+
+## Sprint 20 — Cross-floor AoE/ping truth, resize carry (D90)
+- [ ] DM views "crypt"; arms AoE template and clicks: a PLAYER standing on the crypt sees the template; a player on primary sees nothing. Switch DM view back to primary → previously shown foreign-plane template does NOT linger/paint.
+- [ ] Player pings on their own plane: seen by the DM and plane mates only; a player standing on another plane sees nothing. Ping spam (≥6 in 2s) still gets rate-limited.
+- [ ] Player token on primary, DM moves an NPC to "crypt" at the SAME map coordinates; player casts an area ability at those cells: chronicle/roll effects hit only the primary token — the crypt NPC is not named, not counted, HP unchanged (check sheet as DM).
+- [ ] Player targets the crypt NPC directly (token id known): answer is the ordinary "No target token" — identical to a bogus id.
+- [ ] DM sets light/darkvision/artwork/floor on a hidden NPC while a player watches: that player's console/network sees no token_image/light/darkvision/floor events for the unseen token.
+- [ ] DM edits map with resize (e.g. 40→30 wide) on a plane that has pins and elevation steps: pins that still fit are where they were (same titles/visibility), elevation heights survive; pins outside the new window drop (by design).
+- [ ] Lamp toggled off on a plane → refresh the page (F5): still off. A DM with an OLD editor tab saves the map: lamp stays off.
+- [ ] Tactical smoke (mirrors tests/test_browser_flow.py — automated there in a Node vm, NEVER in a real browser so far): open Tactical → own token visible → click a rectangular (≥2 wide) token: it selects → click a valid destination: gold preview appears within budget → confirm → token walks to the anchored final cell → F5 refresh: token still in place and still selectable at that spot.

@@ -267,7 +267,7 @@ function drawTactical(){
               // D82: world objects. Players only ever RECEIVE visible objects
               // (mapmodel.visible_map filters them), so any object in the
               // payload may be drawn. State on/off is part of the world.
-              (gm.objects||[]).map(o=>[o, o.interact ? "🕹" : "•",
+              (gm.objects||[]).map(o=>[o, _objKind(o)==="lamp" ? "💡" : o.interact ? "🕹" : "•",
                                        o.state && o.state.on ? "#2ecc71" : "#7f8c8d", "obj"])) : [];
     for (const [e, ic, col, kind] of marks){
       const isDM = state.room.role === "dm";
@@ -282,6 +282,14 @@ function drawTactical(){
       ctx.fillStyle = "#fff"; ctx.font = `${c*.34}px sans-serif`; ctx.textAlign = "center";
       ctx.fillText(ic, sx, sy + c*.12);           // white glyph reads on any emoji font
       ctx.restore();
+      // D89: a lit lamp glows on the map — the light itself is what the
+      // server's vision uses; the circle is its honest on-map echo.
+      if (kind === "obj" && _objKind(e) === "lamp" && !(e.state && e.state.on === false)){
+        ctx.save(); ctx.globalAlpha = .14; ctx.beginPath();
+        ctx.arc(sx, sy, c*(.5 + ((e.interact.bright != null ? e.interact.bright
+                                 : (e.interact.op && e.interact.op.bright) || 5))), 0, Math.PI*2);
+        ctx.fillStyle = "#f5c542"; ctx.fill(); ctx.restore();
+      }
       if (e.taken_by != null && e.taken_by !== 0){ ctx.strokeStyle = "#555"; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.moveTo(sx-c*.2, sy-c*.2); ctx.lineTo(sx+c*.2, sy+c*.2); ctx.stroke(); }
     }
@@ -475,6 +483,8 @@ function tokenAt(x, y){
         || (ox-x)**2 + (oy-y)**2 < (radius + side*c*.18)**2;
   });
 }
+function _objKind(o){ const it=o && o.interact; if(!it) return "";
+  return (it.op && it.op.kind) || it.kind || ""; }
 function objectAt(x, y){
   // WORLD cell lookup in the per-viewer (server-filtered) object list.
   if (!state.grid) return null;
@@ -559,7 +569,8 @@ function flushFogEdit(){
   });
   if (!cells.length) return;
   state.fogTouched = {};
-  for (let i = 0; i < cells.length; i += 512) wsSend({ type:"fog_edit", cells: cells.slice(i, i + 512) });
+  for (let i = 0; i < cells.length; i += 512) wsSend({ type:"fog_edit", cells: cells.slice(i, i + 512),
+                                                       floor: state.viewFloor || "" });  // D88
 }
 function paint(cx, cy){
   const gm = state.editMap; if (!gm || !gm.cells) return;
@@ -603,6 +614,16 @@ function paint(cx, cy){
     const o = { id: eid(), x:cx, y:cy, label, dm_only: !!$("obj-dm").checked, state: {} };
     if ($("obj-op").value === "toggle"){
       o.interact = { label: act, op: { kind:"toggle" } };
+    } else if ($("obj-op").value === "lamp"){                   // D89 static light
+      o.interact = { label: act,
+                     op: { kind:"lamp", bright: Math.max(1, Math.min(30, +$("obj-bright").value || 5)) } };
+      o.state = { on: true };
+    } else if ($("obj-op").value === "stair"){                  // D88 connector
+      const to = ($("obj-tfl").value || "").trim().slice(0,24);
+      if (!to){ toast("Stairs need a target floor name"); return; }
+      o.interact = { label: act,
+                     op: { kind:"stair", floor: to,
+                           x: +$("obj-tx").value || 0, y: +$("obj-ty").value || 0 } };
     } else {
       const d = nearestDoor(gm, cx, cy);
       if (!d){ toast("Link a door first — none within 3 cells"); return; }
@@ -732,6 +753,10 @@ function hexA(hex, a){
 let _aoeT = null;
 function showAoe(p){
   const g = state.grid; if (!g) return;
+  // D88/SPRINT-20: a template belongs to the plane it was placed on — paint it
+  // only while that plane is the viewed one (the DM browses; server scoped the
+  // delivery to the plane's viewers already).
+  if (String(p.floor || "") !== String(state.viewFloor || "")) return;
   const cells = aoeCells(p.shape, p.x, p.y, p.size, g, p.dir);
   state.aoe = { cells, color: p.color || "#e74c3c", exp: Date.now() + 7000 };
   draw();
@@ -742,6 +767,7 @@ function clearAoe(){ state.aoe = null; if (_aoeT){ clearTimeout(_aoeT); _aoeT = 
 
 function showPing(p){
   if (!p || p.x == null || p.y == null) return;
+  if (String(p.floor || "") !== String(state.viewFloor || "")) return;   // SPRINT-20 plane guard
   const c = cellSize(), gm = state.grid; if (!gm) return;
   state.pings.push({ x:p.x*c + c/2, y:p.y*c + c/2, color:p.color || "#f1c40f", exp:Date.now()+2500 });
   if (state.pings.length > 20) state.pings.splice(0, state.pings.length - 20);
@@ -784,14 +810,15 @@ function onDown(e){
     const size = Math.max(0, Math.min(30, +$("aoe-size").value || 5));
     const color = ($("aoe-color") && $("aoe-color").value) || "#e74c3c";
     showAoe({ shape, x: cx, y: cy, size, dir, color });
-    wsSend({ type:"aoe", shape, x: cx, y: cy, size, dir, color });
+    wsSend({ type:"aoe", shape, x: cx, y: cy, size, dir, color,
+             floor: state.viewFloor || "" });            // D88: the plane you view
     state.aoeArmed = false; const b = $("btn-aoe"); if (b) b.classList.remove("active");
     return;
   }
   if (state.pingArmed && !state.editing){
     const { cx, cy } = clickCell(p);
     const color = "var(--gold)" === "var(--gold)" ? "#f1c40f" : "#f1c40f";
-    wsSend({ type:"ping", x: cx, y: cy, color });
+    wsSend({ type:"ping", x: cx, y: cy, color, floor: state.viewFloor || "" });  // D88
     state.pingArmed = false; const b = $("btn-ping"); if (b) b.classList.remove("active");
     return;
   }
@@ -819,7 +846,8 @@ function onDown(e){
     // without an interact field are decoration — clicks pass through to move.
     if (!state.editing){
       const ob = objectAt(wx, wy);
-      if (ob && ob.interact){ wsSend({ type:"interact", object_id: ob.id }); return; }
+      if (ob && ob.interact){ wsSend({ type:"interact", object_id: ob.id,
+                                       floor: state.viewFloor || "" }); return; }  // D88
     }
     // Keep the selected movable token while clicking an empty destination.
     // Clearing the sheet here used to clear state.sel before ownToken(), which
@@ -941,9 +969,16 @@ function edResize(){
   const inW = (x, y) => x >= ox && y >= oy && x < ox + w && y < oy + h;
   const gm = { w, h, cell: old.cell, origin: [ox, oy], cells: new Array(w*h).fill(0), explored: new Array(w*h).fill(0),
                traps: old.traps.filter(t => inW(t.x, t.y)), loot: old.loot.filter(l => inW(l.x, l.y)),
+               // SPRINT-20: pins and the elevation layer used to fall off this
+               // snapshot silently — sanitize then legitimately emptied them
+               // (resize lost every pin on the plane, every step/cliff height).
+               pins: (old.pins||[]).filter(p => inW(p.x, p.y)),
                objects: (old.objects||[]).filter(o => inW(o.x, o.y)),
                doors: (old.doors||[]).filter(d => inW(d.x, d.y) && (d.dir === "v" ? inW(d.x+1, d.y) : inW(d.x, d.y+1))) };
-  for (let y = 0; y < Math.min(h, old.h); y++) for (let x = 0; x < Math.min(w, old.w); x++)
+  gm.elev = new Array(w*h).fill(0);
+  for (let y = 0; y < Math.min(h, old.h); y++) for (let x = 0; x < Math.min(w, old.w); x++){
     gm.cells[y*w+x] = old.cells[y*old.w+x];
+    if (old.elev) gm.elev[y*w+x] = old.elev[y*old.w+x];   // row-wise carry (D70)
+  }
   state.editMap = gm;
 }

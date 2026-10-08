@@ -181,17 +181,22 @@ def target_cells(defn, mp, point, direction="E"):
     return [(x, y)]
 
 
-def tokens_in_cells(mp, room_id, cells, exclude_id=None):
+def tokens_in_cells(mp, room_id, cells, exclude_id=None, floor=None):
     """Tokens with ANY occupied footprint cell inside ``cells`` — the centralized
     footprint-aware targeting rule (a 1-cell overlap is enough; D61).
     ``cells`` accepts WORLD ``(x, y)`` pairs or flat STORAGE ``y*w+x`` indices
     (effects.py returns indices, footprint.py returns pairs — normalize once
-    HERE; flat indices are converted through mapmodel, D72)."""
+    HERE; flat indices are converted through mapmodel, D72).
+    SPRINT-20 / D86: with a floor given, tokens on OTHER planes are not even
+    candidates — a fireball on the tavern floor never cooks the crypt; a
+    cross-plane token is ELSEWHERE, so it is not hit and not counted."""
     w = mp["w"]
     hit = {c if isinstance(c, tuple) else mapmodel.world_of(mp, c % w, c // w) for c in cells}
     out = []
     for tok in db.q("SELECT * FROM tokens WHERE room_id=?", (room_id,)):
         if exclude_id is not None and tok["id"] == exclude_id:
+            continue
+        if floor is not None and (tok.get("floor") or "") != (floor or ""):
             continue
         if any(c in hit for c in footprint.occupied_cells(mp, tok)):
             out.append(tok)
@@ -346,8 +351,11 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
     else:
         consumed = None
 
-    st = db.q1("SELECT map_json FROM room_state WHERE room_id=?", (room_id,)) or {}
-    mp = mapmodel.load(st.get("map_json"))
+    # SPRINT-20 (closes the limitation documented in D88): EVERYTHING about a
+    # cast resolves on the CASTER's plane — its terrain, walls, doors, fog and
+    # footprint frames. The map seam (net.get_map) is the one plane switch.
+    fl = tok.get("floor") or ""
+    mp = net.get_map(room_id, fl)
     from_cell = origin_cell(mp, tok)
 
     # --- resolve target / cells -------------------------------------------
@@ -358,7 +366,10 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
         if defn["targeting"] == "single":
             tgt = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
                         (target_id, room_id))
-            if tgt is None:
+            # SPRINT-20: a token on another plane is ELSEWHERE (D86) — refused
+            # with the same message an unknown id gets, so the refusal never
+            # becomes an oracle for "a token exists on some other plane".
+            if tgt is None or (tgt.get("floor") or "") != fl:
                 return _fail("No target token")
             anchor, cells = origin_cell(mp, tgt), list(footprint.occupied_cells(mp, tgt))
             targets = [tgt]
@@ -373,7 +384,7 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
             if not cells:
                 return _fail("Target outside the map")
             anchor = (px, py)
-            targets = tokens_in_cells(mp, room_id, cells)
+            targets = tokens_in_cells(mp, room_id, cells, floor=fl)
         if not in_range(defn, from_cell, anchor):
             return _fail(f"Target out of range ({defn['range_ft']} ft)")
         if defn["los_required"]:
@@ -435,18 +446,18 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
             conds = C.add(C.load(t), defn["condition"]["key"], defn["condition"]["rounds"])
             db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), t["id"]))
             entry["condition"] = defn["condition"]["key"]
-            cond_bumps.append({"token_id": t["id"], "conds": conds})
+            cond_bumps.append({"tok": t, "conds": conds})
         entry["applied"] = apply and (damage > 0 or heal > 0 or "condition" in entry)
         entries.append(entry)
 
     if defn["concentration"]:                              # existing flag as state (D59)
         conds = C.add(C.load(tok), "concentrating", 0)
         db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), tok["id"]))
-        cond_bumps.append({"token_id": tok["id"], "conds": conds})
+        cond_bumps.append({"tok": tok, "conds": conds})
 
     # --- privacy + chronicle + events + broadcasts -------------------------
     if not is_dm and actor_user_id is not None:            # name only what actor can see
-        visible = ws.viewer_visible_cells(room_id, actor_user_id, mp)
+        visible = ws.viewer_visible_cells(room_id, actor_user_id, mp, floor=fl)
         for e in entries:
             t = db.q1("SELECT x, y FROM tokens WHERE id=?", (e["token_id"],))
             e["visible"] = (mapmodel.flat_idx(mp, origin_cell(mp, t)[0], origin_cell(mp, t)[1])
@@ -483,7 +494,9 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
         await gamelog.post_message(room_id, user, text, kind="system")
 
     for bump in cond_bumps:
-        await net.broadcast(room_id, "cond", bump)
+        # SPRINT-20: never name a hidden token on a room-wide channel.
+        from .room.visibility import send_cond_bump
+        await send_cond_bump(room_id, bump["tok"], bump["conds"])
     if changed or cond_bumps or consumed:
         await net.broadcast(room_id, "snapshot", None)
 
