@@ -144,6 +144,21 @@ manual movement and the DM map tools remain in the Tactical view.
   and a controlled token reveals no fog. Separately, a token can be marked as RIDING another
   token (acyclic, same room); a moving mount CARRIES its riders (D83) — riders spend no own
   movement and never block their mount, while mounted combat rules stay out of scope.
+- **Centre contract** (D84): the cell you click is where the token's CENTRE goes —
+  the server converts centre→anchor through ONE rule (`center_to_anchor`, same tie-break
+  as centred rotation), so big and rotated tokens land exactly where the dashed ring shows.
+  Drag-drop drops at the token's centre too; Escape deselects.
+- **Token artwork** (D85): upload a PNG (sheet "Artwork"); the server decodes, validates
+  and RE-ENCODES every byte (no metadata, no disguised formats, no bombs) under a random
+  opaque id and serves it authenticated, room-following, `nosniff`. The artwork turns with
+  the token — exactly once, aspect preserved. Players attach their own art; the DM may
+  attach any. Deleting art a token wears is refused until it is removed from the token.
+- **Floors** (D86): a DM curates named floors; tokens on different floors are ELSEWHERE —
+  never colliding, never visible to each other, terrain shared. Sheet "Floor" row moves a
+  token between planes (stairs/ladders/teleporters — no movement cost); riders ride along.
+- **Darkness** (D87): the DM candle turns a room dark — sight then comes ONLY from the
+  light your tokens carry (`token_light` radius, real wall shadows, the floor at your feet
+  always). The DM is never restricted; non-dark rooms are untouched.
 - **Movement modes** (D83, foundation): creatures can have walk/fly/swim/climb allowances
   (NPC stat blocks). One mode is active per move (sheet chips); each mode has its own per-turn
   budget in the SAME square units (a mode switch never refunds anything). Flying ignores

@@ -394,7 +394,8 @@ def sanitize(d):
            "origin": [ox, oy], "cells": cells, "elev": elev, "explored": explored,
            "traps": traps,
            "loot": loot, "doors": doors, "pins": pins, "objects": objects,
-           "fog_off": bool(d.get("fog_off"))}
+           "fog_off": bool(d.get("fog_off")),
+           "dark": bool(d.get("dark"))}          # D87: sight comes from LIGHT only
     if len(json.dumps(out)) > MAX_JSON:
         return None
     return out
@@ -482,7 +483,8 @@ def visible_map(mp, user_id, is_dm, visible_cells=()):
     return {"w": w, "h": h, "cell": mp["cell"], "origin": origin_of(mp),
             "cells": cells, "elev": elev,
             "explored": mp["explored"], "traps": traps, "loot": loot, "doors": doors,
-            "pins": pins, "objects": objects, "fog_off": bool(mp.get("fog_off"))}
+            "pins": pins, "objects": objects, "fog_off": bool(mp.get("fog_off")),
+            "dark": bool(mp.get("dark"))}
 
 
 # ---------- automatic world growth (D67) ----------

@@ -36,9 +36,13 @@ async def _announce_move(room_id, token_id, moving, reason=None):
     await broadcast(room_id, "move_state", payload)
 
 
-def _room_tokens(room_id, exclude_id=None):
-    return [t for t in db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens WHERE room_id=?",
-                            (room_id,)) if t["id"] != exclude_id]
+def _room_tokens(room_id, exclude_id=None, floor=None):
+    # D86: with a floor given, only tokens ON THAT PLANE collide — a token on
+    # the attic never blocks the dungeon below. None = every plane (DM views).
+    rows = db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id, "
+                "floor FROM tokens WHERE room_id=?", (room_id,))
+    return [t for t in rows if t["id"] != exclude_id
+            and (floor is None or (t.get("floor") or "") == floor)]
 
 
 def _reveal_player_token(mp, tok):
@@ -178,8 +182,12 @@ async def handle_move(ws, room_id, user, is_dm, msg):
     except (KeyError, ValueError, TypeError):
         return
     origin, side = footprint.occupied_origin(mp, tok)
+    # D84: the wire destination is the desired CENTER cell (pointer contract);
+    # the server converts it to the canonical integer footprint anchor here —
+    # the ONE place this happens for moves, teleports and previews alike.
+    tx, ty = footprint.center_to_anchor((tx, ty), side)
     tx, ty = footprint.clamp_origin(mp, (tx, ty), side)          # WORLD clamp (D72)
-    tokens = _room_tokens(room_id, tok["id"])
+    tokens = _room_tokens(room_id, tok["id"], tok.get("floor") or "")
 
     if msg.get("teleport") and is_dm:
         if origin == (tx, ty):
@@ -414,9 +422,13 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
         return
     mp = get_map(room_id)
     origin, side = footprint.occupied_origin(mp, tok)
+    # D84: clicked cell = desired CENTER; convert to the canonical anchor
+    # (same single rule as handle_move — preview and execution must agree).
+    goal_cx, goal_cy = tx, ty                       # the CENTER the player aimed at
+    tx, ty = footprint.center_to_anchor((goal_cx, goal_cy), side)
     tx, ty = footprint.clamp_origin(mp, (tx, ty), side)          # WORLD clamp (D72)
     allowed = _preview_allowed_cells(mp, room_id, user, is_dm)
-    if not footprint.valid_final_position(mp, tok, (tx, ty), _room_tokens(room_id, tok["id"]), allowed):
+    if not footprint.valid_final_position(mp, tok, (tx, ty), _room_tokens(room_id, tok["id"], tok.get("floor") or ""), allowed):
         await send_to(ws, "error", {"msg": "No path there"})
         return
     path = find_path(mp, origin, (tx, ty),
@@ -444,7 +456,8 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
         "size": tok["size"] or "Medium",
         "w": side[0], "h": side[1],                    # D81: authoritative preview shape
         "mode": mode,                                  # D83: the mode priced here
-        "goal": {"cx": tx, "cy": ty},
+        "goal": {"cx": goal_cx, "cy": goal_cy},        # D84: the aimed CENTER cell
+        "anchor": {"cx": tx, "cy": ty},                # D84: landing footprint anchor
         "path": [{"x": x, "y": y} for (x, y) in path],
         "cells": footprint.path_preview_cells(mp, side, [origin] + path),
         "cost": cost,

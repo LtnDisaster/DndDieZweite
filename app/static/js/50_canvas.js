@@ -4,11 +4,35 @@ function renderFogToggle(){
   const b = $("btn-fog-toggle"); if (!b) return;
   const on = !!(state.grid && state.grid.fog_off);
   b.classList.toggle("active", on);
+  const dk = $("btn-dark-toggle");                 // D87: candle shows the dark flag
+  if (dk) dk.classList.toggle("active", !!(state.grid && state.grid.dark));
   b.title = on ? "Fog is OFF — all terrain revealed. Click to restore fog of war."
                : "Show all terrain to every player. Hidden foes still need line of sight.";
 }
 const cv = $("map"), ctx = cv.getContext("2d");
 function cellSize(){ return state.grid ? state.grid.cell : 50; }
+/* D85 token artwork: t.image is ONLY ever a server-generated "/assets/<id>"
+   URL (never client-typed), drawn inside the token's own rotate frame — one
+   rotation, aspect preserved, clipped to the body ellipse. Loaded once per
+   url; the first paint kicks a re-render when it arrives. */
+const _artCache = {};
+function tokenArtwork(t, rx, ry){
+  if (!t.image) return false;
+  let img = _artCache[t.image];
+  if (img === undefined){
+    img = _artCache[t.image] = new Image();
+    img.onload = () => { if (typeof draw === "function") draw(); };
+    img.onerror = () => { _artCache[t.image] = null; };
+    img.src = t.image;
+    return false;
+  }
+  if (!img || !img.complete || !img.naturalWidth) return false;
+  const k = Math.min(2 * rx / img.naturalWidth, 2 * ry / img.naturalHeight);
+  const iw = img.naturalWidth * k, ih = img.naturalHeight * k;
+  ctx.save(); ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2); ctx.clip();
+  ctx.drawImage(img, -iw / 2, -ih / 2, iw, ih); ctx.restore();
+  return true;
+}
 /* worldW/H = the map ARRAY's pixel size; worldLeft/Top = where that array sits
    in WORLD pixel space (negative after west/north growth, D72). Entities draw
    at their world pixels; the array is drawn shifted by the origin. */
@@ -270,8 +294,10 @@ function drawTactical(){
     for (const pt of preview){
       const rx = pt.x*c + cam.ox, ry = pt.y*c + cam.oy;
       ctx.fillStyle = "rgba(212,160,23,0.22)"; ctx.fillRect(rx, ry, c, c); }
-    const gp = state.plan.goal, pw = state.plan.w || state.plan.side || 1,
+    const gp = state.plan.anchor || state.plan.goal, pw = state.plan.w || state.plan.side || 1,
           ph = state.plan.h || pw;
+    // D84: ring marks the landing FOOTPRINT box (anchor-based); the aim point
+    // (state.plan.goal) is the centre the player clicked — both in world cells.
     const gx = (gp.cx + (pw-1)/2)*c + c/2 + cam.ox, gy = (gp.cy + (ph-1)/2)*c + c/2 + cam.oy;
     ctx.strokeStyle = "#d4a017"; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.arc(gx, gy, c*.38*Math.max(pw, ph), 0, Math.PI*2); ctx.stroke();
@@ -282,6 +308,7 @@ function drawTactical(){
       ctx.fillRect(rx, ry, c, c); }
   }
   for (const gh of state.ghosts){
+    if (!onPlane(gh)) continue;                   // D86: fog memories of the wrong plane stay put
     const gx = gh.x + cam.ox, gy = gh.y + cam.oy;
     if (gx < -40 || gy < -40 || gx > w+40 || gy > h+40) continue;
     ctx.save(); ctx.globalAlpha = .32;
@@ -314,6 +341,7 @@ function drawTactical(){
     ctx.restore();
   }
   for (const t of state.tokens){
+    if (!onPlane(t)) continue;                    // D86: other planes are elsewhere
     // tw/th NEVER w/h: this loop's scope owns the viewport dimensions w/h —
     // shadowing them here made the culling check drop every token offscreen (15B).
     const [tw, th] = tokenSpan(t);
@@ -341,6 +369,7 @@ function drawTactical(){
     ctx.save(); ctx.translate(tx, ty); ctx.rotate(rotDeg * Math.PI / 180);
     ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI*2);
     ctx.fillStyle = t.color; ctx.fill();
+    const hasArt = tokenArtwork(t, rx, ry);       // D85: artwork rides the rotate frame
     ctx.lineWidth = t.id === state.sel ? 3 : 2;
     ctx.strokeStyle = isActive ? "#fff" : (t.id===state.sel ? "#d4a017" : "#0d0f14");
     ctx.stroke();
@@ -360,17 +389,24 @@ function drawTactical(){
       ctx.strokeStyle = "#c0392b"; ctx.lineWidth = 2; ctx.stroke(); }
     // D82 facing wedge: a rotated circle/square visual would otherwise be
     // indistinguishable — the gold nose shows where the creature faces.
+    if (state.grid && state.grid.dark && (t.light | 0) > 0 && !dth?.dead){
+      // D87: an operating light is visible even in the dark it fights
+      ctx.beginPath(); ctx.arc(0, 0, Math.min(r + 6, r + (t.light | 0) * 3), 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,214,102,.5)"; ctx.lineWidth = 2; ctx.stroke();
+    }
     if (rotDeg){ ctx.beginPath(); ctx.moveTo(0, -ry - 9); ctx.lineTo(-6, -ry - 1); ctx.lineTo(6, -ry - 1);
       ctx.closePath(); ctx.fillStyle = "#d4a017"; ctx.fill(); }
     ctx.restore();
-    // D82: the collision footprint outline shows when it is USEFUL (selected,
-    // map editing, ?debug) — not as a permanent translucent block. Gameplay
-    // occupancy is always the mechanical rect; visual bounds never change it.
+    // D82/D84: the collision footprint is shown when USEFUL (selected, map
+    // editing, ?debug) as a thin dashed OUTLINE — never the old translucent
+    // colour BLOCK, which read as a stuck debug rectangle in normal play.
     if ((tw > 1 || th > 1) && (t.id === state.sel || state.editing || DEBUG)){
-      ctx.save(); ctx.globalAlpha=.18; ctx.fillStyle=t.color;
-      ctx.fillRect(ox - c/2 + cam.ox, oy - c/2 + cam.oy, tw*c, th*c); ctx.restore(); }
+      ctx.save(); ctx.setLineDash([5,4]); ctx.globalAlpha = .9;
+      ctx.strokeStyle = "rgba(212,160,23,.8)"; ctx.lineWidth = 1.5;
+      ctx.strokeRect(ox - c/2 + cam.ox + .5, oy - c/2 + cam.oy + .5, tw*c - 1, th*c - 1);
+      ctx.setLineDash([]); ctx.restore(); }
     ctx.fillStyle = dth && dth.dead ? "#ff6b6b" : "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText(dth && dth.dead ? "☠" : t.label.slice(0, 2).toUpperCase(), tx, ty + 4);
+    ctx.fillText(dth && dth.dead ? "☠" : (hasArt ? "" : t.label.slice(0, 2).toUpperCase()), tx, ty + 4);
     ctx.font = "11px sans-serif";
     ctx.fillText(t.label, tx, ty + ey + 14);
     const m = state.room.members.find(x => x.user_id === t.owner_user_id);
@@ -409,6 +445,18 @@ function canMove(t){
   // the server's authz.controls() is the real authority).
   return state.room.role === "dm" || t.owner_user_id === state.me.id
       || t.controller_user_id === state.me.id;
+}
+/* D86 floors: the viewer stands on the plane of their own token. Tokens and
+   ghosts on other planes are elsewhere — not rendered, not clickable.
+   (The DM has no token and therefore sees every plane.) */
+function viewerPlane(){
+  if (state.room && state.room.role === "dm") return null;
+  const mine = (state.tokens || []).find(t => state.me && t.owner_user_id === state.me.id);
+  return (mine && mine.floor) || "";
+}
+function onPlane(t){
+  const p = viewerPlane();
+  return p === null || (t.floor || "") === p;
 }
 function tokenAt(x, y){
   const c = cellSize();
@@ -457,6 +505,11 @@ function gridAt(g, cx, cy){                 // WORLD cell lookup (D72)
 }
 let _planSeq = 0;
 function tokenCellXY(t){ const c = cellSize(); return { cx: Math.floor(t.x / c), cy: Math.floor(t.y / c) }; }
+/* D84: THE CENTER cell of a token — the destination cell in the wire contract
+   (the server converts to the canonical anchor via footprint.center_to_anchor;
+   the client never pre-converts). */
+function tokenCenterCell(t){ const c = cellSize(), [w, h] = tokenSpan(t);
+  return { cx: Math.floor(t.x / c) + ((w - 1) >> 1), cy: Math.floor(t.y / c) + ((h - 1) >> 1) }; }
 function planSpanForToken(t){ return tokenSpan(t || {}); }
 function requestPathPreview(cx, cy, confirmAfter=false){
   const t = ownToken(); if (!t){ toast("Select your token first"); return; }
@@ -470,7 +523,8 @@ function applyPathPreview(p){
   const dspan = planSpanForToken(state.tokens.find(t => t.id === p.token_id));
   const w = +p.w > 0 ? +p.w : dspan[0], h = +p.h > 0 ? +p.h : dspan[1];
   state.planRequest = null;
-  state.plan = { token_id:p.token_id, goal:p.goal, path:p.path||[], cells:p.cells||[],
+  state.plan = { token_id:p.token_id, goal:p.goal, anchor:p.anchor||p.goal,   // D84: goal=CENTER aimed, anchor=landing box
+                 path:p.path||[], cells:p.cells||[],
                  cost:p.cost||0, side:Math.max(w,h), w:w, h:h,
                  budget:(p.budget === undefined ? null : p.budget),
                  within:(p.within_budget === undefined ? true : !!p.within_budget) };
@@ -804,9 +858,13 @@ function onUp(e){
   const d = state.drag; state.drag = null; state.pan = null;
   if (!d) return;
   if (d.paint){ flushFogEdit(); return; }
-  const p = evtPos(e);
   if (!d.moved) return;
-  const { cx, cy } = toCell(p.x, p.y);
+  // D84: the destination is the CENTER cell — after a drag that is the cell
+  // under the token's OWN centre (not the pointer's cell: grabbing a big
+  // token's artwork used to drop its footprint anchor at the cursor,
+  // shifting the whole box down-right).
+  const t = state.tokens.find(x => x.id === d.id);
+  const { cx, cy } = t ? tokenCenterCell(t) : toCell(evtPos(e).x, evtPos(e).y);
   if (state.room.role === "dm") sendMoveTo(d.id, cx, cy, true);
   else planMove(cx, cy);
 }
@@ -854,7 +912,9 @@ window.addEventListener("keydown", e => {
   if (e.key === "Escape"){
     const h = $("help-overlay");
     if (h && !h.classList.contains("hidden")){ h.classList.add("hidden"); return; }
-    clearPlan(); state.ruler = null; draw();
+    // D84: Escape = explicit deselect (plan, ruler, selection+sheet) — the
+    // footprint outline is gone in normal gameplay without hunting a button.
+    clearPlan(); state.ruler = null; state.sel = null; renderSheet(null); draw();
   }
   state.keys.add(e.key);
 });

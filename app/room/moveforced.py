@@ -52,7 +52,9 @@ def _resolve(mp, tok, kind, dest):
     All cells are WORLD cells (D72); the clamp is the world window's."""
     origin, side = footprint.occupied_origin(mp, tok)
     tx, ty = footprint.clamp_origin(mp, dest, side)
-    others = db.q("SELECT * FROM tokens WHERE room_id=? AND id!=?", (mp["room_id"], tok["id"]))
+    others = [t for t in db.q("SELECT * FROM tokens WHERE room_id=? AND id!=?",
+                              (mp["room_id"], tok["id"]))
+              if (t.get("floor") or "") == (tok.get("floor") or "")]   # D86 plane
     candidates = [(tx, ty)] if kind == "teleport" else line_cells(origin, (tx, ty))[:MAX_DISTANCE]
     final, reached = origin, False
     for cell in candidates:

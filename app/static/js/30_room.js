@@ -4,6 +4,7 @@ async function openRoom(code){
   const s = await api(`/rooms/${code}/state`);
   state.room = s; state.roomDeleted = false;   // fresh visit — re-arms auto-reconnect
   state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || [];
+  state.floors = s.floors || [""];
   state.grid = s.grid; state.editing = false; state.editMap = null; state.sel = null;
   state.plan = null; state.planRequest = null; state.moving = new Set();
   state.pings = []; state.ruler = null; state.rulerArmed = false; state.pingArmed = false; state.aoe = null;
@@ -62,6 +63,7 @@ function applySideTab(){
 async function refreshRoom(){
   const s = await api(`/rooms/${state.room.code}/state`);
   state.room = s; state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || []; state.grid = s.grid;
+  state.floors = s.floors || [""];
   if (typeof renderFogToggle === "function") renderFogToggle();
   if (state.plan && !state.tokens.find(t => t.id === state.plan.token_id)) state.plan = null;
   updateMoveHud();
@@ -805,6 +807,92 @@ function wireVisualRow(tok){
   $("vis-w").onkeydown = e => { if (e.key === "Enter") send(); };
   $("vis-h").onkeydown = e => { if (e.key === "Enter") send(); };
 }
+function _artRowHtml(tok){
+  state.assets = state.assets === undefined ? null : state.assets;
+  const cur = tok.image || "";
+  const opts = (state.assets || []).filter(a => /^[0-9a-f]{16}$/.test(a.id))
+    .map(a => `<option value="${a.id}"${"/assets/" + a.id === cur ? " selected" : ""}>${esc(a.name)}</option>`).join("");
+  return `<div class="row" title="Token artwork (D85): a PNG from your library, validated and re-encoded by the server. Apply without a selection removes the artwork.">`
+    + `<span class="tiny"><b>Artwork</b></span>`
+    + `<select id="art-pick" style="max-width:130px"><option value="">— none —</option>${opts}</select>`
+    + `<input id="art-file" type="file" accept="image/png" style="display:none">`
+    + `<button id="art-upload" title="Upload a new PNG (max 1.5 MB)">PNG…</button>`
+    + `<button id="art-apply">Apply</button></div>`;
+}
+function _loadAssets(tok){
+  if (state.assetsLoading) return;
+  state.assetsLoading = true;
+  fetch(`/api/assets?room=${encodeURIComponent(state.room.code)}`)
+    .then(r => r.ok ? r.json() : {assets: []})
+    .then(j => { state.assets = (j.assets || []).filter(a => /^[0-9a-f]{16}$/.test(a.id)); })
+    .catch(() => { state.assets = []; })
+    .finally(() => { state.assetsLoading = false;
+                     if (state.sel === tok.id) renderSheet(tok); });
+}
+function _uploadAsset(file){
+  return file.arrayBuffer().then(buf =>
+    fetch(`/api/assets?name=${encodeURIComponent(String(file.name || "token").replace(/\.png$/i, ""))}`,
+          { method: "PUT", body: buf, headers: { "Content-Type": "image/png" } })
+      .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
+        .then(j => { throw new Error(j && j.detail || `Upload failed (${r.status})`); })));
+}
+function wireArtRow(tok){
+  const sel = $("art-pick"); if (!sel) return;
+  if (state.assets == null) _loadAssets(tok);
+  $("art-upload").onclick = () => $("art-file").click();
+  $("art-file").onchange = e => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    _uploadAsset(f).then(a => {
+      state.assets = null;                       // stale list — refetch on next paint
+      wsSend({ type: "token_image", token_id: tok.id, asset_id: a.id });
+    }).catch(err => toast(err.message || "Upload failed"));
+  };
+  $("art-apply").onclick = () => wsSend({ type: "token_image", token_id: tok.id,
+                                          asset_id: sel.value || null });
+}
+function _lightRowHtml(tok){
+  const lum = (tok.light | 0);
+  return `<div class="row" title="Light (D87): radius in cells this token emits. Only meaningful when the DM turned on darkness — in dark rooms sight comes from light alone.">`
+    + `<span class="tiny"><b>Light</b></span><input id="lt-r" type="number" min="0" max="30" value="${lum}" style="width:46px">`
+    + `<span class="tiny">cells</span><button id="lt-apply">Apply</button></div>`;
+}
+function wireLightRow(tok){
+  const b = $("lt-apply"); if (!b) return;
+  const send = () => {
+    const r = parseInt($("lt-r").value, 10);
+    if (!Number.isInteger(r) || r < 0 || r > 30){ toast("Light radius: 0 to 30 cells"); return; }
+    wsSend({ type: "token_light", token_id: tok.id, radius: r });
+  };
+  b.onclick = send;
+  $("lt-r").onkeydown = e => { if (e.key === "Enter") send(); };
+}
+function _floorRowHtml(tok){
+  const fls = state.floors && state.floors.length ? state.floors : [""];
+  const cur = tok.floor || "";
+  const isDM = state.room && state.room.role === "dm";
+  const opts = fls.map(f => `<option value="${esc(f)}"${f === cur ? " selected" : ""}>${f === "" ? "Ground (primary)" : esc(f)}</option>`).join("");
+  return `<div class="row" title="Floor (D86): planes are independent — different floors never collide and are not visible to each other. Changing floor is an explicit stair/ladder move, not a walked one.">`
+    + `<span class="tiny"><b>Floor</b></span><select id="fl-pick" style="max-width:120px">${opts}</select>`
+    + `<button id="fl-go">Go</button>`
+    + (isDM ? `<input id="fl-new" placeholder="new floor" maxlength="24" style="width:90px">`
+             + `<button id="fl-add" title="Add a floor to this room">＋</button>` : ``) + `</div>`;
+}
+function wireFloorRow(tok){
+  const go = $("fl-go"); if (!go) return;
+  go.onclick = () => wsSend({ type: "token_floor", token_id: tok.id,
+                              floor: $("fl-pick").value || null });
+  const add = $("fl-add");
+  if (add) add.onclick = () => {
+    const name = $("fl-new").value.trim(); if (!name) return;
+    fetch(`/api/rooms/${encodeURIComponent(state.room.code)}/floors`,
+          { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }) })
+      .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
+        .then(j => { throw new Error(j && j.detail || "Cannot add floor"); }))
+      .then(j => { state.floors = j.floors || state.floors; renderSheet(tok); })
+      .catch(err => toast(err.message || "Cannot add floor"));
+  };
+}
 function _rotRowHtml(tok){
   const rot = (((tok.rot | 0) % 360) + 360) % 360;
   return `<div class="row" title="Facing (D83): the entity turns — its mechanical footprint and visual bounds turn with it, re-centred on the same spot. An impossible turn is refused.">`
@@ -871,7 +959,7 @@ function renderSheet(tok){
   }
   const mod = v => { const m2 = Math.floor(((v||10)-10)/2); return (m2>=0?"+":"")+m2; };
   const isDM = state.room.role === "dm", own = tok.owner_user_id === state.me.id;
-  const spanRow = (isDM || own) ? _spanRowHtml(tok) + _visualRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) : "";
+  const spanRow = (isDM || own) ? _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) : "";
   const ac = ch.ac_total != null ? ch.ac_total : ch.ac;
   const inv = (ch.items || []);
   const invRows = inv.map(it => {
@@ -947,7 +1035,7 @@ function renderSheet(tok){
   wireHpStates(tok);
   wireDeath(tok);
   wireSpanRow(tok);
-  wireVisualRow(tok);
+  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireLightRow(tok);
   wireRotRow(tok); wireMoveModeRow(tok);
   $("hp-btns").classList.toggle("hidden", state.room.role !== "dm" || !tok.character_id);
   $("hp-adv").classList.toggle("hidden", state.room.role !== "dm");
@@ -991,7 +1079,7 @@ function renderNpcSheet(tok){
     const d = n.spell_slots[String(lv)] || n.spell_slots[lv] || {max:0};
     slotCells.push(`<label class="slotcell">L${lv}<input class="npc-slot" data-lv="${lv}" type="number" min="0" max="9" value="${d.max||0}" style="width:36px"></label>`);
   }
-  body.innerHTML = _spanRowHtml(tok) + _visualRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) + `
+  body.innerHTML = _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) + `
     <div class="row"><input id="npc-name" placeholder="NPC name" value="${esc(tok.label)}" maxlength="32">
       <select id="npc-size">${["Tiny","Small","Medium","Large","Huge","Gargantuan"].map(s => `<option value="${s}" ${(tok.size||"Medium")===s?"selected":""}>${s}</option>`).join("")}</select>
       <select id="npc-disp"><option value="">neutral</option>${["friend","neutral","hostile"].map(d => `<option value="${d}" ${(tok.disposition||"")===d?"selected":""}>${d}</option>`).join("")}</select>
@@ -1125,7 +1213,7 @@ function renderNpcSheet(tok){
                                          mount_id: (+mnt.value) || null });
   $("npc-to-best").onclick = () => saveNpcToBestiary(n, ($("npc-name").value || "NPC").slice(0,32), tok);
   wireSpanRow(tok);
-  wireVisualRow(tok);
+  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireLightRow(tok);
   wireRotRow(tok); wireMoveModeRow(tok);
   renderNpcSpells(tok);
   renderNpcAttacks(tok);

@@ -1300,3 +1300,79 @@ reference renderer.
 - Single uvicorn process, single event loop; `LOOP` captured in `main.py` for thread-safe broadcasts.
 - `VTT_DATA_DIR` isolates the SQLite/`secret.key`/uploads tree.
 - Public deploy expects a TLS reverse proxy in front (see README Notes).
+
+## D84 — The clicked cell is the token's CENTER; anchor conversion lives in exactly one place
+The wire contract for `move`/`path_preview` said goal cell, the client drew and
+hit-tested footprint CENTRES, and the server treated the goal as the top-left
+ANCHOR. For 1x1 tokens the two coincide — every bug hid there until big and
+rotated tokens made it obvious ("No path there" while the ring hovered free
+air; the companion arriving as 1x1; the DM drop shifting 3x7). D84 fixes the
+CONTRACT, not the symptom: the clicked/aimed cell is the desired centre of the
+ORIENTED box; `footprint.center_to_anchor(cell, span)` is the single rule
+converting it to the canonical landing anchor — the same floor tie-break the
+existing `anchor_for_center` uses (even spans bias lower-right), so a 1x1 is
+bit-identical to the old behaviour and nothing else had to change semantics.
+Both server entries (move + preview) convert; the preview response echoes
+`goal` (aimed centre) AND `anchor` (landing box) so the client can draw the
+truth it is being granted. Client-side: a drag-drop lands a token with its
+CENTRE on the drop cell (not the pointer cell), the plan ring draws at the
+server's anchor, Escape deselects, and the footprint overlay is a thin dashed
+OUTLINE — the old translucent colour block read as a stuck debug rectangle.
+Pointer→cell math is proven by a node-vm harness that runs the REAL
+10_core/50_canvas click path against a rotated 3x7 and checks the wire cell.
+**Clicked cell == intended footprint CENTRE, on the wire; the anchor is a
+server-derived implementation detail.**
+
+## D85 — Token artwork: server-cleaned PNG assets with opaque ids
+Token art is the one place where users feed BYTES into the renderer, so the
+pipeline is adversarial by design (`app/assets.py`): size cap → PNG magic →
+Pillow FORMAT check (a GIF wearing a .png name is a lie, refused 415) →
+dimension/pixel caps (decompression-bomb gate) → FULL decode (truncated or
+malicious pixels raise, 415) → metadata strip → clean re-encode → final size
+re-check → atomic write under DATA_DIR/assets/<uid>/<random-hex>.png → row.
+Display names are titles, never paths. Asset ids are 16 random hex chars;
+"not yours" and "does not exist" answer with the same 404 — no existence
+oracle. An asset may be served to its owner and to members of any room whose
+tokens wear it (`/assets/<id>` carries nosniff + image/png, auth per request,
+NOT a static mount). Assignment (`token_image`) trusts only the opaque id;
+players attach their OWN assets, the DM any; the token column stores nothing
+but the server-made `/assets/<id>` form — a client-typed URL is an error, not
+a feature. Delete is refused while a live token references the asset (a 409
+with a defined story beats a silently broken token). Hidden NPC tokens leak
+no artwork, parity with D81/D82 leak guards. The canvas draws the image
+inside the token's own rotate frame (ONE rotation — facing turns the artwork,
+the artwork never rotates twice), aspect-preserved, clipped to the body
+ellipse; colour remains the fallback while loading and for unlit tokens.
+
+## D86 — Floors are independent occupancy/visibility planes inside one map
+Multi-floor without a second map engine: a room keeps its single map and gains
+a DM-curated floor list. The PRIMARY floor ("") predates the feature, so no
+data migration exists — every token starts on the primary plane. Tokens on
+DIFFERENT floors never collide, never block pathfinding, and are not visible
+to a viewer who stands on another plane (planes are not fog — being elsewhere
+reveals nothing, not even which plane, so hidden tokens leak neither floor
+nor artwork). The collision feeds gained ONE parameter (the mover's floor) at
+their choke points (`_room_tokens`, `_room_token_rows`, forced movement) and
+visibility filters per viewer-plane sets computed from owned/operated tokens;
+a viewer without tokens (the DM) sees every plane. Changing floors is the
+explicit `token_floor` operation — stairs, ladders, teleporters; it costs no
+movement budget and re-evaluates every viewer through the same
+add/leave machinery the fog already uses. Mounted riders ride along.
+**FLOOR ≠ FOG: same map, different plane; collision and visibility are
+per-plane, terrain and the world window are not.**
+
+## D87 — Darkness: sight comes from carried light only
+A room may be dark (DM toggle, `grid.dark`, explicit `map_edit` field — stale
+editor snapshots must not flip it, fog_off precedent). In a dark room a
+player's vision is exactly the union of the LOS-limited light radii of the
+tokens they own or operate (`token_light`, 0-30 cells, owner/DM-set) plus
+each such token's own footprint cells — light 0 means you feel the floor you
+stand on and nothing more. Walls cast real shadows (same LOS engine, same
+blocked edges); the DM is never restricted; non-dark rooms behave EXACTLY as
+before (single branch in `viewer_visible_cells` — the choke point every
+visibility consumer already shared, which is why lighting needed no new
+transport). Changing any light re-evaluates every viewer: newly seen tokens
+arrive via the standard `token_add` path, lost ones via `token_leave`, and a
+`grid_reveal` nudge refreshes terrain. Hidden tokens leak neither radius nor
+plane. **IN A DARK ROOM, LIGHT IS VISION — and every light you carry is a
+window into your position.**

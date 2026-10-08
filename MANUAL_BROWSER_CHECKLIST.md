@@ -225,8 +225,51 @@ No Diorama verification anywhere (out of scope by decision).
   server/WS. `known>0, painted=0` → camera/framing. `known=0` without own
   token → legitimate fog (Bring first). Never expose hidden data.
 
+## Sprint 18 — geometry centre (D84), artwork (D85), floors (D86), darkness (D87)
+
+Geometry (needs a big token — make one 3x7 with footprint W=3 H=7 and rotate 90°):
+- Click a FREE cell far away with the big token selected → the dashed ring sits
+  exactly where the token's CENTRE will land; the token walks and its centre
+  box covers the clicked cell. No "No path there" while the ring is on free air.
+- Drag-drop a token: it lands with its CENTRE under the pointer, not shifted.
+- Press Escape → sheet closes, selection ring gone.
+- The collision footprint appears only while selected / editing / `?debug` and
+  is a thin dashed OUTLINE (never a filled colour block).
+- Companion view: a player OPERATING a 3x7 token (DM set controller) sees it
+  as 3x7 (rotated 90° → 7x3) — never as a small circle; refresh (/state path)
+  keeps the same shape.
+
+Artwork (sheet row "Artwork", DM row on NPC tokens too):
+- Upload a PNG (<1.5 MB) → the token immediately wears it inside its body
+  ellipse, artwork turns WITH rotation (exactly one turn — no double rotation),
+  aspect preserved.
+- Non-PNG (rename a JPG to .png and try) → clean error toast, no broken token.
+- Another account cannot load the asset URL (404); deleting an asset a token
+  wears is refused until removed from the token ("— none —" + Apply removes).
+- Players can attach only their OWN uploads; DM can attach any (403-less: the
+  error toast "Not your asset").
+
+Floors (sheet row "Floor"; DM adds floors via the ＋ field):
+- DM adds floor "crypt", moves an NPC there → for the player on the primary
+  floor the NPC VANISHES (token_leave, fog-memory ghost stays at the stairs).
+- Move the player's own token to "crypt" → the NPC reappears there; they can
+  occupy the SAME map cells as tokens on the other floor without blocking.
+- Refreshing the page (player) shows only their own plane; the DM sees all.
+- Floor name fields refuse path-like junk (`../x`).
+
+Darkness (DM candle button 🕯 in the brush bar):
+- Toggle dark ON as DM: for players WITHOUT light only their own token and its
+  immediate footprint remain — terrain goes dark beyond that.
+- Player sets Light (sheet row) to 6 + Apply → world opens an LOS-limited
+  bubble; cells behind walls stay dark (real shadows); set back to 0 → the
+  bubble closes again (seen tokens vanish via normal leave).
+- DM view is never darkened. Toggle OFF restores classic vision.
+- Toggling unrelated map edits (draw a wall) does not silently flip darkness.
+
 ## History
 
+- Sprint 18: D84–D87 section added (centre contract, artwork pipeline, floor
+  planes, darkness/light). Canonical run at close: 474 passed + 15 skipped.
 - Sprint 17: D83 section (rotation orients the footprint, carrying riders,
   movement modes, forced layer, knock-prone). D82 rotation step adjusted.
 - Sprint 16: D82 section added (visual size / rotation / world objects /

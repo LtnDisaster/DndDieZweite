@@ -246,13 +246,19 @@ function wire(){
   if (hOverlay) hOverlay.onclick = e => { if (e.target === hOverlay) setHelp(false); };
   for (const b of document.querySelectorAll("#side-tabs button"))
     b.onclick = () => { localStorage.setItem(sideTabKey(), b.dataset.tab); applySideTab(); };
+  const dt = $("btn-dark-toggle");
+  if (dt) dt.onclick = () => {                     // D87: DM darkness switch
+    if (!state.grid || state.room.role !== "dm") return;
+    const dark = !state.grid.dark;
+    wsSend({ type: "map_edit", map: { ...state.grid, dark }, dark });
+  };
   const ft = $("btn-fog-toggle");
   if (ft) ft.onclick = () => {
     if (!state.room || state.room.role !== "dm") return;
     wsSend({ type: "fog_toggle", on: !(state.grid && state.grid.fog_off) });
   };
   for (const b of document.querySelectorAll(".brush")) {
-    if (b.id === "btn-fog-toggle") continue;
+    if (b.id === "btn-fog-toggle" || b.id === "btn-dark-toggle") continue;
     b.onclick = () => { state.brush = b.dataset.b;
       document.querySelectorAll(".brush").forEach(x => x.classList.toggle("active", x === b));
       $("trap-fields").classList.toggle("hidden", b.dataset.b !== "trap");

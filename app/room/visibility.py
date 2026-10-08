@@ -27,7 +27,35 @@ def viewer_source_cells(room_id, user_id, mp):
 
 
 def viewer_visible_cells(room_id, user_id, mp):
+    if mp.get("dark"):
+        return _lit_cells(room_id, user_id, mp)
     return los.visible_cells(mp, viewer_source_cells(room_id, user_id, mp), radius=VISION_R)
+
+
+def _lit_cells(room_id, user_id, mp):
+    """D87 — sight in a DARK room comes only from the light the viewer owns
+    or operates: the LOS-limited radius of each of their tokens' light, plus
+    the tokens' own footprint cells (you always feel the floor you stand on).
+    No token, no light — but the DM branch never calls this way. Rooms that
+    are not dark keep the classic personal-vision behaviour untouched."""
+    rows = db.q("SELECT * FROM tokens WHERE room_id=? "
+                "AND (owner_user_id=? OR controller_user_id=?)", (room_id, user_id, user_id))
+    out = set()
+    for r in rows:
+        wc = _token_cells(mp, r)                       # WORLD cells as sources
+        out |= {i for (x, y) in wc if (i := mapmodel.flat_idx(mp, x, y)) is not None}
+        rad = int(r.get("light") or 0)
+        if rad > 0 and wc:
+            out |= los.visible_cells(mp, wc, radius=rad)   # -> STORAGE indices
+    return out
+
+
+def _viewer_planes(room_id, uid):
+    """D86: the floor planes a viewer stands on — the floors of the tokens
+    they own or operate. No token at all (DM, observer) = every plane."""
+    rows = db.q("SELECT floor FROM tokens WHERE room_id=? "
+                "AND (owner_user_id=? OR controller_user_id=?)", (room_id, uid, uid))
+    return {(r.get("floor") or "") for r in rows}
 
 
 def _token_cells(mp, token):
@@ -44,8 +72,15 @@ def _token_index_cells(mp, token):
 
 def _snapshot(tok, viewer_id=None):
     snap = {k: tok.get(k) for k in ("id", "label", "color", "x", "y", "owner_user_id",
-                                    "character_id", "controller_user_id", "mount_token_id")}
-    if tok.get("owner_user_id") == viewer_id:
+                                    "character_id", "controller_user_id", "mount_token_id",
+                                    "image", "floor", "light")}
+    # D83 duty, delivery channel: a token you CONTROL is operated through —
+    # wrong geometry silently un-rotates/un-centres it for you (the companion
+    # 3x7-as-1x1 bug). Owner AND controller carry the shape; the hidden-token
+    # leak guard (unowned NPC tokens) is unchanged — it never reaches here for
+    # anyone but a legitimately-delivered DM view.
+    if viewer_id is not None and (tok.get("owner_user_id") == viewer_id
+                                  or tok.get("controller_user_id") == viewer_id):
         snap["size"] = tok.get("size", "Medium")
         snap["fw"], snap["fh"] = tok.get("fw"), tok.get("fh")
         snap["vw"], snap["vh"] = tok.get("vw"), tok.get("vh")
@@ -53,6 +88,17 @@ def _snapshot(tok, viewer_id=None):
     snap["conds"] = _conds.load(tok)
     snap["death"] = _death.load(tok)
     return snap
+
+
+def _player_add_for(token, add_player, uid):
+    """D83 duty on the token_add channel: a token you CONTROL is operated
+    through — you carry its shape (the companion 3x7-as-1x1 delivery bug).
+    The hidden-token strip above stands for every other viewer."""
+    if token.get("controller_user_id") == uid and token.get("owner_user_id") != uid:
+        return {**add_player, **{k: token.get(k) for k in
+                                 ("size", "fw", "fh", "vw", "vh", "rot")
+                                 if k in token and token[k] is not None}}
+    return add_player
 
 
 async def send_token_event(room_id, token, kind="token_add", extra=None):
@@ -79,13 +125,27 @@ async def send_token_event(room_id, token, kind="token_add", extra=None):
             add_player.pop("vh", None)
             add_player.pop("rot", None)
             add_player.pop("controller_user_id", None)   # D82: who leads it is not world data
+            add_player.pop("image", None)            # D85: hidden tokens leak no artwork
+            add_player.pop("floor", None)            # D86: nor which plane it stands on
+            add_player.pop("light", None)            # D87: nor how brightly it burns
     seen_cache = {}
+    plane_cache = {}
     for uid, socks in list(clients(room_id).items()):
         is_dm = roles.get(uid) == "dm"
         if is_dm:
             seen = None
             visible = True
         else:
+            if uid not in plane_cache:
+                plane_cache[uid] = _viewer_planes(room_id, uid)
+            # D86: other planes are not fogged, they are ELSEWHERE — a token
+            # on the attic is invisible below, without revealing anything.
+            if (token.get("floor") or "") not in plane_cache[uid]:
+                vls = _last_seen.setdefault(room_id, {}).setdefault(uid, {})
+                if token["id"] in vls:
+                    for ws in list(socks):
+                        await send_to(ws, "token_leave", {"token_id": token["id"]})
+                continue
             if uid not in seen_cache:
                 seen_cache[uid] = viewer_visible_cells(room_id, uid, mp)
             seen = seen_cache[uid]
@@ -102,12 +162,25 @@ async def send_token_event(room_id, token, kind="token_add", extra=None):
                 if kind == "step" and first_time and token.get("owner_user_id") != uid:
                     await send_to(ws, "token_add", _snapshot(token, uid))
                 if kind == "token_add":
-                    await send_to(ws, kind, add_dm if is_dm else add_player)
+                    await send_to(ws, kind, add_dm if is_dm
+                                  else _player_add_for(token, add_player, uid))
                 else:
                     await send_to(ws, kind, payload)
         elif token["id"] in vls:
             for ws in list(socks):
                 await send_to(ws, "token_leave", {"token_id": token["id"]})
+
+
+async def reevaluate_visibility(room_id):
+    """D87/D86 helper: re-run the per-viewer token visibility decision for
+    every token of a room (at their CURRENT positions — broadcast_token_step
+    with unchanged coordinates delivers token_add to viewers who now see the
+    token and token_leave to those who lost it, and changes nothing for
+    everyone else)."""
+    mp = get_map(room_id)
+    for tok in db.q("SELECT * FROM tokens WHERE room_id=?", (room_id,)):
+        origin, _side = footprint.occupied_origin(mp, tok)
+        await broadcast_token_step(room_id, tok, tok["x"], tok["y"], *origin)
 
 
 async def broadcast_token_add(room_id, token):

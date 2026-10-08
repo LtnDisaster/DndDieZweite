@@ -1,11 +1,11 @@
 """DM token management (add / remove NPC tokens + edit NPC stat blocks)."""
 import re
 
-from .. import db, footprint, mapmodel, npc
+from .. import assets, db, footprint, floors, mapmodel, npc
 from . import movement
 from .net import broadcast, get_map, map_lock, send_to, sys_msg
 from .visibility import (broadcast_token_add, broadcast_token_step,
-                         forget_token)
+                         forget_token, reevaluate_visibility)
 
 WALL = "#95a5a6"
 
@@ -60,9 +60,12 @@ def _place_token(mp, token, x, y):
     return footprint.origin_pixels(origin, side, mp["cell"])
 
 
-def _room_token_rows(room_id):
-    return db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens WHERE room_id=?",
-                (room_id,))
+def _room_token_rows(room_id, floor=None):
+    # D86: with a floor given, placement/turn/resize only collide with tokens on
+    # the SAME plane — floors are independent occupancy layers.
+    rows = db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id, "
+                "floor FROM tokens WHERE room_id=?", (room_id,))
+    return [r for r in rows if floor is None or (r.get("floor") or "") == floor]
 
 
 async def handle_token_span(ws, room_id, user, is_dm, msg):
@@ -88,7 +91,7 @@ async def handle_token_span(ws, room_id, user, is_dm, msg):
     mp = get_map(room_id)
     origin, _ = footprint.occupied_origin(mp, tok)   # current anchor, WORLD space
     if not footprint.valid_final_position(mp, candidate, origin,
-                                          _room_token_rows(room_id)):
+                                          _room_token_rows(room_id, tok.get("floor") or "")):
         await send_to(ws, "error",
                       {"msg": "That footprint does not fit here — move the token or "
                               "choose smaller dimensions"})
@@ -119,6 +122,98 @@ async def handle_token_visual(ws, room_id, user, is_dm, msg):
         return                                   # idempotent, no broadcast storm
     db.x("UPDATE tokens SET vw=?, vh=? WHERE id=?", (vw, vh, tok["id"]))
     await broadcast(room_id, "token_visual", {"token_id": tok["id"], "vw": vw, "vh": vh})
+
+
+async def handle_token_image(ws, room_id, user, is_dm, msg):
+    """D85 — server-side artwork assignment. The ONLY trusted input is an
+    opaque asset id; the token field stores nothing but the canonical
+    "/assets/<id>" form this server generated — never a client-typed path or
+    URL. Players attach their own assets only; a DM may attach any. Removal
+    is asset_id null/empty. Broadcasting is the token_visual precedent: the
+    id is public world noise, and a viewer without the token ignores it."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    if not (is_dm or tok["owner_user_id"] == user["id"]):
+        await send_to(ws, "error", {"msg": "Not your token"})
+        return
+    aid = msg.get("asset_id")
+    if aid in (None, "", False):
+        image = ""
+    else:
+        aid = str(aid)
+        row = db.q1("SELECT * FROM assets WHERE id=?", (aid,)) \
+            if assets.ID_RE.fullmatch(aid) else None
+        if row is None:
+            return await send_to(ws, "error", {"msg": "Unknown asset"})
+        if not is_dm and row["user_id"] != user["id"]:
+            return await send_to(ws, "error", {"msg": "Not your asset"})
+        image = f"/assets/{aid}"
+    if (tok.get("image") or "") == image:
+        return                                   # idempotent, no broadcast storm
+    db.x("UPDATE tokens SET image=? WHERE id=?", (image, tok["id"]))
+    await broadcast(room_id, "token_image", {"token_id": tok["id"], "image": image})
+
+
+async def handle_token_floor(ws, room_id, user, is_dm, msg):
+    """D86 — change a token's floor plane (stairs, ladders, teleporters).
+    Explicit vertical move: no pathfinding, no cost — the positioning games
+    happen WITHIN a floor. A mount's riders ride along. The visibility plane
+    recomputes itself: viewers on the old plane receive token_leave, viewers
+    on the new plane receive token_add (the re-broadcast step does that)."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    if not (is_dm or tok["owner_user_id"] == user["id"]
+            or tok.get("controller_user_id") == user["id"]):
+        await send_to(ws, "error", {"msg": "Not your token"})
+        return
+    name = str(msg.get("floor") or "")
+    if not floors.exists(room_id, name):
+        return await send_to(ws, "error", {"msg": "No such floor"})
+    if (tok.get("floor") or "") == name:
+        return                                   # idempotent, no broadcast storm
+    async with map_lock(room_id):
+        db.x("UPDATE tokens SET floor=? WHERE id=?", (name, tok["id"]))
+        tok["floor"] = name
+        await broadcast(room_id, "token_floor", {"token_id": tok["id"], "floor": name})
+        for r in db.q("SELECT * FROM tokens WHERE room_id=? AND mount_token_id=?",
+                      (room_id, tok["id"])):
+            db.x("UPDATE tokens SET floor=? WHERE id=?", (name, r["id"]))
+            await broadcast(room_id, "token_floor", {"token_id": r["id"], "floor": name})
+        mp = get_map(room_id)
+        origin, _side = footprint.occupied_origin(mp, tok)
+        cx, cy = origin
+        await broadcast_token_step(room_id, tok, tok["x"], tok["y"], cx, cy)
+
+
+async def handle_token_light(ws, room_id, user, is_dm, msg):
+    """D87 — set a token's light radius (cells, 0 = unlit). Meaningful only
+    in DARK rooms, where sight comes from light alone. Changing any viewer's
+    own light changes what THEY see — so after the change every token on the
+    plane is re-evaluated, which is exactly the token_floor re-broadcast
+    trick (add for newly seen, leave for newly lost)."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    if not (is_dm or tok["owner_user_id"] == user["id"]):
+        await send_to(ws, "error", {"msg": "Not your token"})
+        return
+    try:
+        rad = int(msg.get("radius", msg.get("light", 0)))
+    except (TypeError, ValueError):
+        return await send_to(ws, "error", {"msg": "Light radius must be a number"})
+    rad = max(0, min(rad, 30))
+    if (tok.get("light") or 0) == rad:
+        return                                   # idempotent, no broadcast storm
+    db.x("UPDATE tokens SET light=? WHERE id=?", (rad, tok["id"]))
+    tok["light"] = rad
+    await broadcast(room_id, "token_light", {"token_id": tok["id"], "radius": rad})
+    await reevaluate_visibility(room_id)
+    await broadcast(room_id, "grid_reveal", None)   # re-lit terrain for viewers
 
 
 async def handle_token_rotate(ws, room_id, user, is_dm, msg):
@@ -152,7 +247,7 @@ async def handle_token_rotate(ws, room_id, user, is_dm, msg):
         new_origin = footprint.anchor_for_center(old_origin, old_span,
                                                  footprint.oriented_span(candidate))
         if not footprint.valid_final_position(mp, candidate, new_origin,
-                                              _room_token_rows(room_id)):
+                                              _room_token_rows(room_id, tok.get("floor") or "")):
             return await send_to(ws, "error", {"msg": "No room to turn there — the "
                                                       "oriented footprint would collide"})
         x, y = footprint.origin_pixels(new_origin, footprint.token_span(candidate),
@@ -256,9 +351,9 @@ async def handle_token_mount(ws, room_id, user, is_dm, msg):
             tok = {**tok, "mount_token_id": None}       # validate as UNMOUNTED
             origin, span = footprint.occupied_origin(mp, tok)
             if not footprint.valid_final_position(mp, tok, origin,
-                                                  _room_token_rows(room_id)):
+                                                  _room_token_rows(room_id, tok.get("floor") or "")):
                 good = footprint.find_valid_origin(mp, tok, origin,
-                                                   _room_token_rows(room_id))
+                                                   _room_token_rows(room_id, tok.get("floor") or ""))
                 if good is not None:
                     x, y = footprint.origin_pixels(good, span, mp["cell"])
                     db.x("UPDATE tokens SET x=?, y=? WHERE id=?", (x, y, tok["id"]))
@@ -293,9 +388,12 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
         await send_to(ws, "error", {"msg": "No valid placement for that footprint"})
         return
     x, y = placed
-    tid = db.x("INSERT INTO tokens (room_id,label,color,x,y,npc,size,disposition,fw,fh) "
-               "VALUES (?,?,?,?,?,?,?,?,?,?)",
-               (room_id, label, color, x, y, db.json_dumps(block), size, disposition, fw, fh))
+    fl = str(msg.get("floor") or "")        # D86: optional plane for new tokens
+    if fl and not floors.exists(room_id, fl):
+        return await send_to(ws, "error", {"msg": "No such floor"})
+    tid = db.x("INSERT INTO tokens (room_id,label,color,x,y,npc,size,disposition,fw,fh,floor) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (room_id, label, color, x, y, db.json_dumps(block), size, disposition, fw, fh, fl))
     tok = db.q1("SELECT * FROM tokens WHERE id=?", (tid,))
     sys_msg(room_id, f"DM added token '{label}'.")
     await broadcast_token_add(room_id, tok)
@@ -324,7 +422,7 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
     disposition = _clean_disposition(msg.get("disposition", tok.get("disposition", "")))
     candidate = {**tok, "size": size, "fw": fw, "fh": fh}
     mp = get_map(room_id)
-    existing = _room_token_rows(room_id)
+    existing = _room_token_rows(room_id, tok.get("floor") or "")
     desired = footprint.origin_from_pixel(tok["x"], tok["y"], mp["cell"], mp)
     if (fw, fh) != (tok.get("fw"), tok.get("fh")) or size != tok.get("size"):
         # D81/15B: a footprint CHANGE must fit at the CURRENT anchor — no

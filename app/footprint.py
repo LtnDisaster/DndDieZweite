@@ -108,6 +108,24 @@ def anchor_for_center(origin, outer, inner):
     return (ox + (ow - iw) // 2, oy + (oh - ih) // 2)
 
 
+def center_to_anchor(cell, span):
+    """(D84) THE pointer-destination rule. A clicked WORLD cell names where the
+    player wants the entity CENTRE; return the canonical integer footprint
+    ANCHOR (top-left cell) the oriented ``span`` must occupy so its centre
+    lands on that cell. Exact for odd extents; even extents bias the centre to
+    the lower-right half-cell — the same documented floor tie-break as
+    ``anchor_for_center`` (placing a 1x1 inner box in an even outer box also
+    shifts it (d-1)//2 down-right), so the two rules are one convention.
+    Integer-only, deterministic, inverse of the centre a span projects to:
+    ``span_at(anchor).centre`` rounds back onto ``cell``.
+    This is THE conversion for every client-supplied destination
+    (path_preview goal, move goal, DM teleport goal); nothing else may
+    re-derive it, and the client must never pre-convert."""
+    cx, cy = cell
+    w, h = wh(span)
+    return (cx - (w - 1) // 2, cy - (h - 1) // 2)
+
+
 def visual_span(token):
     """THE authoritative VISUAL shape (D82, oriented by D83): explicit vw/vh
     win (turned by the same facing rule), otherwise the EFFECTIVE collision

@@ -1,3 +1,37 @@
+# Sprint 18 — Geometry truth, artwork, floors, darkness (2026-10-08) — DECISIONS D84–D87
+
+- **D84 centre contract:** the browser draws/hit-tests CENTRES while the wire
+  goal was an ANCHOR — invisible for 1x1, obvious for a rotated 3x7 ("No path
+  there" with the ring on free air; the companion arriving as 1x1 because
+  controller snapshots dropped geometry; the DM drop shifting the box). Fixed
+  once, server-side: `footprint.center_to_anchor()` converts aimed centre →
+  canonical anchor (same tie-break as `anchor_for_center`; 1x1 bit-identical).
+  Preview echoes goal+anchor; ring draws the anchor; Escape deselects; the
+  footprint overlay is now a dashed OUTLINE (the old filled block read as a
+  debug rectangle left on screen). Pointer→cell proven by a node-vm harness
+  running the REAL 10_core/50_canvas click path on a rotated 3x7.
+- **D85 artwork:** every uploaded byte passes magic→Pillow FORMAT→dimension
+  caps→FULL decode→metadata strip→clean re-encode→atomic write. Random
+  16-hex ids; 404 is both "no" and "not yours" (no oracle); serving follows
+  the token's room membership; `token_image` accepts ONLY an opaque id and
+  stores the server-made `/assets/<id>` form; delete refused while worn.
+  The canvas draws the art inside the token's rotate frame — exactly ONE
+  rotation, aspect kept, ellipse-clipped, colour fallback while loading.
+- **D86 floors:** one map, independent planes. Collision feeds gained a
+  floor parameter at their choke points; visibility gates per viewer-plane
+  (own/operated tokens' floors; DM sees all); `token_floor` is the explicit
+  stairs op and reuses the fog add/leave machinery — riders ride along.
+  Hidden tokens leak neither plane nor artwork.
+- **D87 darkness:** `grid.dark` is explicit-map_edit-only (stale editor
+  snapshots cannot flip it); in dark rooms vision = union of own lights'
+  LOS-limited radii + own footprints; light 0 = blind but the floor beneath
+  you; `token_light` 0-30 re-evaluates every viewer + `grid_reveal`; DM
+  never restricted; classic behaviour outside dark rooms byte-identical.
+- In-process lesson learned the hard way: a helper branch that referenced a
+  `token_add`-only variable inside the general send loop made EVERY step
+  broadcast die with UnboundLocalError inside the walk task — the walk then
+  sat "moving" forever client-side. Extracted helpers beat inline merges.
+
 # Sprint 17 — Spatial foundation (2026-10-07) — rotation orients footprints, carrying riders, movement modes, forced layer
 
 DECISIONS **D83** (supersedes D82's facing clause; the visual≠mechanical

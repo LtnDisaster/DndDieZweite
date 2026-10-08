@@ -39,7 +39,9 @@ def _canvas():
 def test_render_loop_never_shadows_the_viewport_dimensions():
     src = _canvas()
     start = src.index("for (const t of state.tokens){")
-    culled = src.index("continue;", start)
+    # D86 adds a floor-plane skip with its own continue BEFORE the viewport
+    # culling; this pin is about the CULLING continue (the shadowing class).
+    culled = src.index("continue;", src.index("tx > w + r + 40", start))
     loop_head = src[start:culled]
     assert "tokenSpan(t)" in loop_head                  # the fix is in place
     assert "const [w, h]" not in loop_head              # viewport w/h must not be shadowed

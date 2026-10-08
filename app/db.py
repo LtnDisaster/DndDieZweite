@@ -145,9 +145,20 @@ CREATE TABLE IF NOT EXISTS quests (
     description TEXT DEFAULT '',
     status TEXT NOT NULL DEFAULT 'active',
     objectives TEXT DEFAULT '[]',
-    visibility TEXT NOT NULL DEFAULT 'party',
+    visibility TEXT DEFAULT 'party',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS assets (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    file TEXT NOT NULL,
+    w INTEGER NOT NULL,
+    h INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    sha TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
 );
 """
 
@@ -220,6 +231,17 @@ def init_db():
     # token in the same room. Acyclic by construction; NOT the controller
     # relationship; carrying movement is a separate, later mechanic.
     migrate("tokens", "mount_token_id", "mount_token_id INTEGER REFERENCES tokens(id)")
+    # D85: token artwork — server-generated "/assets/<id>" reference only
+    # (see app/assets.py); never a client-supplied path or URL.
+    migrate("tokens", "image", "image TEXT DEFAULT ''")
+    # D86: floor of residence — '' = the primary (legacy) floor, so every
+    # existing token lives on the default level with no data migration.
+    migrate("tokens", "floor", "floor TEXT DEFAULT ''")
+    # D87: light radius in grid cells a token EMITS (0 = none). Only matters
+    # in DARK rooms (grid.dark); the DM branch never restricts.
+    migrate("tokens", "light", "light INTEGER DEFAULT 0")
+    # D86: the room's floor list — JSON [{name}], '' = primary (legacy) floor.
+    migrate("rooms", "floors", "floors TEXT DEFAULT '[]'")
     migrate("messages", "visibility", "visibility TEXT NOT NULL DEFAULT 'public'")
     migrate("messages", "recipient_user_id", "recipient_user_id INTEGER REFERENCES users(id)")
     migrate("messages", "meta", "meta TEXT DEFAULT '{}'")

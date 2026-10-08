@@ -30,7 +30,8 @@ from .secret_events import handle_secret_event
 from .status import handle_exhaustion, handle_inspiration, handle_temp_hp
 from .tokens import (handle_add_token, handle_del_token, handle_token_controller,
                      handle_token_mount, handle_token_rotate, handle_token_span,
-                     handle_token_visual, handle_update_npc)
+                     handle_token_visual, handle_update_npc, handle_token_image,
+                     handle_token_floor, handle_token_light)
 
 
 async def handle_map_edit(ws, room_id, user, is_dm, msg):
@@ -47,6 +48,11 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
         # The fog-off flag is owned by fog_toggle only; editor snapshots
         # never carry it and must not reset an active reveal.
         mp_new["fog_off"] = bool(old.get("fog_off"))
+        # D87: darkness is toggled EXPLICITLY via the map_edit "dark" field —
+        # a stale editor snapshot must not silently flip it (fog_off precedent).
+        if "dark" not in msg:
+            mp_new["dark"] = bool(old.get("dark"))
+        dark_changed = bool(old.get("dark")) != bool(mp_new.get("dark"))
         if msg.get("reset_fog"):
             mp_new["explored"] = [0] * (mp_new["w"] * mp_new["h"])
         elif same_size:
@@ -87,6 +93,11 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
         set_map(room_id, mp_new)
     sys_msg(room_id, "DM updated the map.")
     await broadcast(room_id, "map_changed", None)
+    if dark_changed:
+        # Who can see what depends entirely on the light now — re-run the
+        # per-viewer token visibility decision for the whole room.
+        from .visibility import reevaluate_visibility
+        await reevaluate_visibility(room_id)
 
 
 HANDLERS = {
@@ -111,6 +122,9 @@ HANDLERS = {
     "knock_prone": handle_knock_prone,
     "token_span": handle_token_span,
     "token_visual": handle_token_visual,      # D82: presentation bounds only
+    "token_image": handle_token_image,        # D85: server-validated artwork asset only
+    "token_floor": handle_token_floor,        # D86: change the occupancy/visibility plane
+    "token_light": handle_token_light,        # D87: light radius in cells (dark rooms)
     "token_rotate": handle_token_rotate,      # D82: visual facing only, never the footprint
     "token_controller": handle_token_controller,   # D82: DM assigns a generic controller
     "token_mount": handle_token_mount,             # D82: acyclic rider→mount relationship

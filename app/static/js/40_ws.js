@@ -89,6 +89,18 @@ function connectWS(code){
       case "token_visual": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.vw = p.vw; t.vh = p.vh;          // D82: presentation bounds only
                        if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "token_light": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t){ t.light = p.radius | 0;
+                       if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "grid_reveal": refreshRoom(); break;   // D87: light changes re-lit the world
+      case "token_floor": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t){ t.floor = p.floor || "";           // D86: plane change; add/leave follow
+                       if (state.sel === p.token_id) renderSheet(t); } break; }
+      case "floors_changed": { state.floors = p.floors || [""];  // D86: DM curated floor list
+                     if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel)); } break;
+      case "token_image": { const t = state.tokens.find(t => t.id === p.token_id);
+                     if (t){ t.image = p.image || "";           // D85: server-made /assets/ ref
+                       if (state.sel === p.token_id) renderSheet(t); } break; }
       case "token_rot": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.rot = p.rot;                     // D83: the entity turns —
                        if (p.x !== undefined){ t.x = p.x; t.y = p.y; }   // re-centred anchor rides along

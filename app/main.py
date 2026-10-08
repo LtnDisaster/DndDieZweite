@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import buildinfo, db, rooms, ws
+from . import assets, buildinfo, db, rooms, ws
 from .room import net
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -53,6 +53,7 @@ async def unhandled_exception(request: Request, exc: Exception):
 
 
 app.include_router(rooms.router)
+app.include_router(assets.router)
 app.include_router(ws.router)
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

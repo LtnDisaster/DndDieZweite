@@ -4,7 +4,7 @@ Living checklist. "Done" = shipped and covered by an in-repo test.
 Verify state with:
 
 ```bash
-docker compose run --rm test                     # CANONICAL: pinned py3.12 image — Sprint 17 close: 442 passed + 14 skipped (run with --build if the image predates the tests!)
+docker compose run --rm test                     # CANONICAL: pinned py3.12 image — Sprint 18 close: 474 passed + 15 skipped (run with --build if the image predates the tests!)
 ./.venv/bin/python -m pytest                     # dev-host run (py3.14 venv) — GREEN at Sprint 16 close (431 collected)
 ./.venv/bin/python -m compileall -q app          # byte-compile check
 for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
@@ -27,6 +27,17 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [x] Mount carrying: riders follow walk/teleport/forced/rotation, no own budget, collision-exempt pair, dismount re-home (D83)
 - [x] Movement modes walk/fly/swim/climb: per-mode turn ledgers, fly = no difficult/cliff, swim/climb data-only foundation (D83)
 - [x] Forced movement extracted to one server-side layer + riders carried; knock_prone op on the existing prone condition (D83)
+- [x] Clicked cell = footprint CENTRE end-to-end; `center_to_anchor` single conversion rule (D84)
+- [x] Secure PNG token artwork: re-encoded, opaque ids, no oracle, DM-curated assignment (D85)
+- [x] Floors: independent occupancy/visibility planes; `token_floor` stairs; riders ride along (D86)
+- [x] Darkness + per-token light radius: LOS-lit vision, real shadows, DM unrestricted (D87)
+
+## Done — Sprint 18: geometry truth, artwork, floors, darkness (2026-10-08)
+- [x] **D84 centre-contract**: move/preview convert aimed-centre→anchor in one place (`footprint.center_to_anchor`, same tie-break as `anchor_for_center`, 1x1 bit-identical); preview echoes `goal`+`anchor`; DM drag drops at token centre; plan ring uses the server anchor; Escape deselects; footprint overlay is a dashed outline, not a colour block; controller/`/state`/`token_add` all carry the real geometry (the companion 3x7-as-1x1 bug); pointer math pinned by a node-vm harness running the REAL click path (`tests/test_geometry_contract.py`)
+- [x] **D85 assets**: `app/assets.py` — magic+format+decode+re-encode gate (Pillow, pinned), size/pixel caps, metadata strip, random ids, per-user dedupe+quotas, 404-no-oracle serving with room-follows-token authz, `token_image` assignment stores only server-made refs, delete guarded while worn; artwork renders inside the rotate frame, aspect-kept, ellipse-clipped (`tests/test_assets.py`)
+- [x] **D86 floors**: `tokens.floor` + DM floor list (REST + `floors_changed`); collision/preview/rotate/resize/forced-move filters per plane; per-viewer plane gating with add/leave re-evaluation; `token_floor` carries riders; sheet Floor row; canvas plane filter (`tests/test_floors.py`)
+- [x] **D87 darkness**: `grid.dark` (explicit map_edit toggle, stale-snapshot-safe); `token_light` radius 0-30; dark vision = union of own lights' LOS-limited radii + own footprints; DM unrestricted; light changes re-evaluate every viewer + `grid_reveal`; light ring on lit tokens (`tests/test_lighting.py`)
+- [x] Pillow pinned into requirements.txt (secure decode gate is the only image path); canonical py3.12 run green: **474 passed, 15 skipped**
 
 ## Done — maintainability / security / testing refactor (2026-09-29)
 - [x] Backend split `app/room/*` behind a thin `ws.py` + re-export shim (D16); live suites unchanged

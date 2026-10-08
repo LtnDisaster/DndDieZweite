@@ -6,7 +6,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import db, footprint, gear, los, mapmodel, progression, ratelimit, ws
+from . import db, footprint, floors as FLOOR, gear, los, mapmodel, progression, ratelimit, ws
 from . import quests as questlog
 from . import conditions as C
 from . import npc
@@ -574,7 +574,15 @@ def room_state(code: str, request: Request):
             t["npc"] = db.j(t.get("npc"), None) or None
     else:
         visible = ws.viewer_visible_cells(room["id"], user["id"], mp)
+        # D86: which planes this viewer stands on (floors of own/operated
+        # tokens). Tokens on other planes are ELSEWHERE, not hidden — they
+        # must not even be listed, so their plane leaks nothing either.
+        planes = {(t.get("floor") or "") for t in tokens_all
+                  if t["owner_user_id"] == user["id"]
+                  or t.get("controller_user_id") == user["id"]}
         def _visible_token(t):
+            if (t.get("floor") or "") not in planes:
+                return False                      # D86: different plane = elsewhere
             if t["owner_user_id"] == user["id"] or t.get("controller_user_id") == user["id"]:
                 return True                       # D82: controllers always see their token
             origin, side = footprint.occupied_origin(mp, t)
@@ -583,7 +591,8 @@ def room_state(code: str, request: Request):
         tokens = [t for t in tokens_all if _visible_token(t)]
         for t in tokens:                                   # NPC stat blocks are DM-only
             t["npc"] = None
-            if t.get("character_id") is None and t.get("owner_user_id") is None:
+            if (t.get("character_id") is None and t.get("owner_user_id") is None
+                    and t.get("controller_user_id") != user["id"]):   # D83 duty: controllers keep the shape
                 t.pop("disposition", None)
                 t.pop("size", None)
                 t.pop("fw", None)                    # D81: hidden tokens leak no footprint
@@ -592,6 +601,9 @@ def room_state(code: str, request: Request):
                 t.pop("vh", None)
                 t.pop("rot", None)
                 t.pop("controller_user_id", None)    # D82: nor who leads it
+                t.pop("image", None)                 # D85: nor what artwork it wears
+                t.pop("floor", None)                 # D86: nor which plane it stands on
+                t.pop("light", None)                 # D87: nor how brightly it burns
         last = ws._last_seen.get(room["id"], {}).get(user["id"], {})
         vis_ids = {t["id"] for t in tokens}
         ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]
@@ -604,7 +616,7 @@ def room_state(code: str, request: Request):
     chat_msgs = chat.chat_history_for_viewer(room["id"], user["id"], room["_role"] == "dm", 200)
     return {
         "code": room["code"], "name": room["name"], "map": room["map_image"],
-        "role": room["_role"], "me": user["id"],
+        "role": room["_role"], "me": user["id"], "floors": [""] + FLOOR.parse(room),
         "members": members, "tokens": tokens, "ghosts": ghosts, "messages": msgs,
         "chat": chat_msgs,
         "audio": audio.load_state(st.get("audio_json")),
@@ -613,6 +625,30 @@ def room_state(code: str, request: Request):
         "quests": questlog.visible_for(room["id"], room["_role"] == "dm"),
         "characters": [_char_row(c) for c in db.q("SELECT * FROM characters WHERE user_id=?", (user["id"],))],
     }
+
+
+class FloorIn(BaseModel):
+    name: str = Field(min_length=1, max_length=24)
+
+
+@router.post("/rooms/{code}/floors")
+async def add_floor_route(code: str, body: FloorIn, request: Request):
+    user, room = _room_dm(request, code)
+    ok, res = FLOOR.add(room["id"], body.name)
+    if not ok:
+        raise HTTPException(400, res)
+    await room_net.broadcast(room["id"], "floors_changed", {"floors": [""] + res})
+    return {"floors": [""] + res}
+
+
+@router.delete("/rooms/{code}/floors/{name}")
+async def remove_floor_route(code: str, name: str, request: Request):
+    user, room = _room_dm(request, code)
+    ok, res = FLOOR.remove(room["id"], name)
+    if not ok:
+        raise HTTPException(400, res)
+    await room_net.broadcast(room["id"], "floors_changed", {"floors": [""] + res})
+    return {"floors": [""] + res}
 
 
 @router.post("/rooms/{code}/assign")

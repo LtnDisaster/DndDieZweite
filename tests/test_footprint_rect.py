@@ -49,6 +49,14 @@ def px_cell(px, cell=50):
     return int(px // cell)
 
 
+def center_cell(anchor, w=1, h=1):
+    """(D84) Wire-contract mirror: the client sends the CENTER cell that lands
+    a w x h box with its anchor at ``anchor`` (inverse of
+    footprint.center_to_anchor). Tests keep stating their landing ANCHOR
+    intent; this converts to what the wire now carries."""
+    return (anchor[0] + (w - 1) // 2, anchor[1] + (h - 1) // 2)
+
+
 # ---------- the ONE rectangle derivation (pure geometry) ----------
 
 def _tok(x, y, fw=None, fh=None, size="Medium", tok_id=1, owner=None):
@@ -127,7 +135,8 @@ def test_narrow_corridor_blocks_a_3x7_walk(client):
         big = npc_token(client, dm, code, ws, "Ogre", 10, 8, width=3, height=7)
         row = tok_row(big)
         assert (px_cell(row["x"]), px_cell(row["y"])) != (10, 8) or True   # placed somewhere west
-        ws.send_json({"type": "move", "token_id": big, "tx": 20, "ty": 9, "teleport": False})
+        cx, cy = center_cell((20, 9), 3, 7)                       # D84: centre on the wire
+        ws.send_json({"type": "move", "token_id": big, "tx": cx, "ty": cy, "teleport": False})
         ev = recv_until(ws, "error", fail_on_error=False)
         assert "path" in ev["payload"]["msg"].lower()
         # the corridor itself is fine — a plain token gets through
@@ -146,11 +155,14 @@ def test_3x7_walks_the_large_gate_and_preview_matches(client):
     with ws_connect(client, dm, code) as ws:
         big = npc_token(client, dm, code, ws, "Ogre", 10, 8, width=3, height=7)
         assert (tok_row(big)["fw"], tok_row(big)["fh"]) == (3, 7)
-        ws.send_json({"type": "path_preview", "token_id": big, "tx": 24, "ty": 8})
+        cx, cy = center_cell((24, 8), 3, 7)                        # D84 wire carries the CENTRE
+        ws.send_json({"type": "path_preview", "token_id": big, "tx": cx, "ty": cy})
         pv = recv_until(ws, "path_preview")["payload"]
         assert pv["w"] == 3 and pv["h"] == 7
+        assert pv["goal"] == {"cx": cx, "cy": cy}                  # echoes the aimed CENTRE cell
+        assert pv["anchor"] == {"cx": 24, "cy": 8}                 # the landing box position
         assert {"x": 24, "y": 10} in pv["cells"]                   # far footprint row previewed
-        ws.send_json({"type": "move", "token_id": big, "tx": 24, "ty": 8, "teleport": False})
+        ws.send_json({"type": "move", "token_id": big, "tx": cx, "ty": cy, "teleport": False})
         for _ in range(40):
             e = ws.receive_json()
             if e.get("kind") == "step" and e["payload"].get("cx") == 24 \
@@ -169,10 +181,11 @@ def test_preview_and_execution_agree_on_a_blocked_goal(client):
     dm, player, code = _corridor_room(client, {12, 13})
     with ws_connect(client, dm, code) as ws:
         big = npc_token(client, dm, code, ws, "Ogre", 10, 8, width=3, height=7)
-        ws.send_json({"type": "path_preview", "token_id": big, "tx": 20, "ty": 9})
+        cx, cy = center_cell((20, 9), 3, 7)                        # D84: centre on the wire
+        ws.send_json({"type": "path_preview", "token_id": big, "tx": cx, "ty": cy})
         err = recv_until(ws, "error", fail_on_error=False)
         assert err["payload"]
-        ws.send_json({"type": "move", "token_id": big, "tx": 20, "ty": 9, "teleport": False})
+        ws.send_json({"type": "move", "token_id": big, "tx": cx, "ty": cy, "teleport": False})
         err = recv_until(ws, "error", fail_on_error=False)
         assert "path" in err["payload"]["msg"].lower()            # same verdict, no drift
 
@@ -189,7 +202,8 @@ def test_collision_uses_the_full_rectangle(client):
         # teleport B onto A's far (non-anchor) cell — rejected although the
         # anchor of the destination itself would be free
         ax, ay = px_cell(ra["x"]), px_cell(ra["y"])
-        ws.send_json({"type": "move", "token_id": b, "tx": ax + 1, "ty": ay + 3,
+        tcx, tcy = center_cell((ax + 1, ay + 3), 3, 7)             # D84: centre for the same landing
+        ws.send_json({"type": "move", "token_id": b, "tx": tcx, "ty": tcy,
                       "teleport": True})
         err = recv_until(ws, "error", fail_on_error=False)
         assert "footprint" in err["payload"]["msg"].lower()
@@ -207,7 +221,8 @@ def test_trap_trigger_and_ability_intersection_on_a_rectangle(client):
     seen = []
     with ws_connect(client, dm, code) as ws:
         big = npc_token(client, dm, code, ws, "Ogre", 20, 8, width=3, height=7)
-        ws.send_json({"type": "move", "token_id": big, "tx": 26, "ty": 8, "teleport": False})
+        mcx, mcy = center_cell((26, 8), 3, 7)                      # D84: centre for that landing
+        ws.send_json({"type": "move", "token_id": big, "tx": mcx, "ty": mcy, "teleport": False})
         # The trap may legitimately INTERRUPT the walk (that is the point) —
         # drain events until either arrival, a step beyond the trap, or the
         # walk's closing move_state, instead of demanding arrival.
