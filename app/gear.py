@@ -4,7 +4,7 @@ import re
 from . import db
 
 KINDS = ("armor", "shield", "potion", "scroll", "wand", "staff", "ring",
-         "tool", "wondrous", "spellbook", "other")
+         "tool", "wondrous", "spellbook", "weapon", "other")
 RECHARGES = (None, "long")
 HEAL_RE = re.compile(r"^\d{0,3}d\d+([+-]\d+)?$", re.I)
 ATUNE_MAX = 3
@@ -58,6 +58,15 @@ def clean_items(items):
         charges_max = charges if charges >= 0 else 1
         if recharge and charges < 0:
             charges = charges_max
+        weight = it.get("weight", 0)
+        try:
+            weight = max(0.0, min(9999.0, round(float(weight), 1)))
+        except (TypeError, ValueError):
+            weight = 0.0
+        try:
+            qty = max(1, min(9999, int(it.get("qty", 1))))
+        except (TypeError, ValueError):
+            qty = 1
         out.append({
             "id": str(it.get("id", ""))[:16],
             "name": name,
@@ -74,10 +83,157 @@ def clean_items(items):
             "attuned": bool(it.get("attunable")) and bool(it.get("attuned")),
             "identified": bool(it.get("identified", True)) or not bool(it.get("magic")),
             "desc": str(it.get("desc", ""))[:200],
+            # D92: inventory fields. qty defaults to 1 → every pre-sprint entry
+            # IS a one-item stack; behaviour byte-identical for old rows.
+            "qty": qty,
+            "weight": weight,
+            "stackable": bool(it.get("stackable")),
+            "def_id": str(it.get("def_id", ""))[:24],
+            "props": clean_props(it.get("props")),
         })
         if not out[-1]["id"]:
             out[-1]["id"] = f"it{len(out)}"
     return out
+
+
+# D93: the named keys combat integration (gear.weapon_profiles, the attack
+# path) reads. Typed validation ONLY for these — every other key keeps D92's
+# generic scalar semantics. A wrongly-typed combat key is DROPPED, never
+# coerced: a corrupted prop must not manufacture an attack bonus.
+_DMG_DICE_RE = re.compile(r"^\d{1,3}d\d+([+-]\d{1,3})?$", re.I)
+_PROP_BOOLS = ("proficient", "mod_to_damage")          # two_handed also bool, used by D92 rules
+_PROP_INTS = {"attack_bonus": 10, "damage_bonus": 10, "range_ft": 600, "reach_ft": 60}
+
+
+def clean_props(props):
+    """D92: generic mechanical properties — DATA, never rules. Keys map to
+    scalars (bool / number / short string); the named combat keys (D93) are
+    type-validated. Anything structured, oversized or wrongly typed is dropped."""
+    out = {}
+    if not isinstance(props, dict):
+        return out
+    for k, v in list(props.items())[:20]:
+        k = str(k).strip()[:24]
+        if not k:
+            continue
+        if k == "damage_dice":
+            d = str(v).strip().lower()[:16]
+            if _DMG_DICE_RE.match(d):
+                out[k] = d
+            continue
+        if k == "damage_type":
+            if isinstance(v, str) and v.lower() in DAMAGE_TYPES:
+                out[k] = v.lower()
+            continue
+        if k == "ability":
+            if isinstance(v, str) and v.lower() in ABILITIES:
+                out[k] = v.lower()
+            continue
+        if k == "two_handed" or (k in _PROP_BOOLS and isinstance(v, bool)):
+            out[k] = bool(v)
+            continue
+        if k in _PROP_INTS:
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                out[k] = _clampi(v, -_PROP_INTS[k] if k.endswith("bonus") else 0,
+                                 _PROP_INTS[k])
+            continue
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, (int, float)):
+            out[k] = max(-10000, min(10000, v))
+        elif isinstance(v, str):
+            out[k] = v[:48]
+    return out
+
+
+def weapon_profiles(ch):
+    """D93: SERVER-derived attack profiles — equipped items (main/off hand)
+    carrying a valid props.damage_dice. THE single source for sheet display
+    AND the attack path; clients render these numbers and attack by item_id,
+    they never carry a bonus of their own. to_hit adds each modifier exactly
+    once: ability mod + proficiency (if props.proficient) + props.attack_bonus."""
+    equip = clean_equipment(ch.get("equipment"), ch.get("items"))
+    by_id = {i.get("id"): i for i in ch.get("items") or [] if isinstance(i, dict)}
+    out = []
+    for slot in ("main_hand", "off_hand"):
+        it = by_id.get(equip.get(slot))
+        if not it:
+            continue
+        p = it.get("props") or {}
+        dice = str(p.get("damage_dice") or "")
+        if not _DMG_DICE_RE.match(dice):
+            continue
+        ability = p.get("ability") if p.get("ability") in ABILITIES else "str"
+        to_hit = (stat_mod(ch, ability)
+                  + (prof_bonus(ch) if p.get("proficient") else 0)
+                  + _clampi(p.get("attack_bonus", 0), -10, 10))
+        dmg_bonus = _clampi(p.get("damage_bonus", 0), -10, 10)
+        if p.get("mod_to_damage"):
+            dmg_bonus += stat_mod(ch, ability)
+        out.append({"slot": slot, "item_id": it.get("id"),
+                    "name": str(it.get("name", "Weapon"))[:48],
+                    "ability": ability, "proficient": bool(p.get("proficient")),
+                    "to_hit": to_hit, "dmg": dice.lower(), "dmg_bonus": dmg_bonus,
+                    "dmg_type": p.get("damage_type") or "",
+                    "range_ft": _clampi(p.get("range_ft", 0), 0, 600),
+                    "reach_ft": _clampi(p.get("reach_ft", 0), 0, 60),
+                    "two_handed": bool(p.get("two_handed"))})
+    return out
+
+
+# ---------- equipment (D92) ----------
+
+SLOTS = ("main_hand", "off_hand", "armor", "acc1", "acc2", "acc3")
+# Generic kind→slot admission — a DELIBERATELY coarse table; props.slot is the
+# per-item override so no complex D&D slotting rules are hardcoded here.
+SLOT_KINDS = {
+    "main_hand": ("weapon", "wand", "staff", "tool", "wondrous", "other"),
+    "off_hand": ("shield", "wand", "staff", "tool", "wondrous", "other"),
+    "armor": ("armor",),
+    "acc1": ("ring", "wondrous", "other"),
+    "acc2": ("ring", "wondrous", "other"),
+    "acc3": ("ring", "wondrous", "other"),
+}
+SLOT_LABELS = {"main_hand": "Main hand", "off_hand": "Off hand", "armor": "Armor",
+               "acc1": "Accessory 1", "acc2": "Accessory 2", "acc3": "Accessory 3"}
+
+
+def clean_equipment(equip, items):
+    """Normalise {slot: item_id} to exactly SLOTS; references to items the
+    character does not (or no longer) own are dropped. THE consistency filter —
+    every read and every mutation of equipment runs it."""
+    ids = {i.get("id") for i in items if isinstance(i, dict)}
+    src = equip if isinstance(equip, dict) else {}
+    out = {}
+    for s in SLOTS:
+        v = src.get(s)
+        out[s] = v if isinstance(v, str) and v in ids else None
+    return out
+
+
+def can_equip(item, slot, equipment=None, items=None):
+    """May THIS item occupy THIS slot? props.slot overrides the generic table
+    (a string must match; false/empty bans equipping entirely). props.two_handed
+    is the only cross-slot rule: a two-hander leaves the off hand empty."""
+    if slot not in SLOTS or not isinstance(item, dict):
+        return False
+    ps = (item.get("props") or {}).get("slot")
+    if ps is not None:
+        if ps is True:
+            return True                          # explicit: fits any slot
+        if ps is False or ps in ("", 0):
+            return False                         # explicit: never equippable
+        return str(ps) == slot                   # explicit: exactly this slot
+    if item.get("kind") not in SLOT_KINDS.get(slot, ()):
+        return False
+    if (item.get("props") or {}).get("two_handed") and slot == "off_hand":
+        for s, iid in (equipment or {}).items():
+            other = next((i for i in (items or []) if i.get("id") == iid), None)
+            if s == "main_hand" and other and (other.get("props") or {}).get("two_handed"):
+                return False
+    return True
 
 
 def dex_mod(char):
@@ -88,12 +244,43 @@ def compute_ac(char, items=None):
     items = items if items is not None else char.get("items", [])
     if not isinstance(items, list):
         items = []
+    # D92 EQUIPPED MODE: once a character occupies any slot, ONLY equipped items
+    # count. No slot filled (every pre-sprint sheet) → the legacy auto-derivation
+    # below runs byte-identical — existing sheets and tests are untouched.
+    equip = char.get("equipment") if isinstance(char.get("equipment"), dict) else {}
+    worn = [v for v in equip.values() if v]
+    if worn:
+        by_id, active, seen = {i.get("id"): i for i in items if isinstance(i, dict)}, [], set()
+        for v in worn:
+            i = by_id.get(v)
+            if i is not None and v not in seen:
+                seen.add(v)
+                active.append(i)
+        return _ac_from_set(char, active)
     armor = next((i for i in items if i.get("kind") == "armor" and i.get("ac")), None)
     if armor:
         total = armor["ac"] + (max(0, dex_mod(char)) if armor.get("light") else 0)
     else:
         total = _clampi(char.get("ac", 10), 1, 40, 10)
     for i in items:
+        if not i.get("identified", True):
+            continue
+        if i.get("kind") == "shield" and i.get("ac"):
+            total += _clampi(i["ac"], 0, 10)
+        elif i.get("acBonus"):
+            total += i["acBonus"]
+    return max(1, min(40, total))
+
+
+def _ac_from_set(char, active):
+    """AC from ONE authoritative item set (equipped mode). Same arithmetic as
+    the legacy path — one formula, two admission rules."""
+    armor = next((i for i in active if i.get("kind") == "armor" and i.get("ac")), None)
+    if armor:
+        total = armor["ac"] + (max(0, dex_mod(char)) if armor.get("light") else 0)
+    else:
+        total = _clampi(char.get("ac", 10), 1, 40, 10)
+    for i in active:
         if not i.get("identified", True):
             continue
         if i.get("kind") == "shield" and i.get("ac"):
@@ -116,7 +303,9 @@ def mask_items(items, mask):
                         "magic": True, "identified": False, "unidentified": True,
                         "attunable": i.get("attunable", False), "attuned": False,
                         "ac": 0, "light": False, "acBonus": 0, "heal": "",
-                        "charges": -1, "recharge": None, "desc": "A mysterious item."})
+                        "charges": -1, "recharge": None, "desc": "A mysterious item.",
+                        "qty": i.get("qty", 1), "weight": i.get("weight", 0),
+                        "stackable": False, "def_id": "", "props": {}})
         else:
             out.append(dict(i))
     return out
@@ -149,7 +338,7 @@ def stat_mod(char, ability):
 # strings, and _stat_mod correctly treats a non-dict as missing, which is how
 # "ability modifier is silently 0" production bugs are born (2026-10 sprint).
 _JSON_COLUMNS = ("stats", "skills", "saves", "items", "spells", "spell_slots",
-                 "defenses", "resources", "abilities", "class_levels")
+                 "defenses", "resources", "abilities", "class_levels", "equipment")
 _JSON_LIST_DEFAULTS = ("items", "spells", "resources", "abilities")
 
 

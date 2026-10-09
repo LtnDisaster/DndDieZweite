@@ -1490,3 +1490,143 @@ Audited-and-kept by convention: the `initiative` payload lists every combatant's
 id/label (DM adding a monster to the tracker is a table-visible act; per-viewer
 initiative would fork the turn UI = rewrite, not hardening); chronicle `sys_msg`
 lines name conditions by design (public table record, D90).
+
+## D92 — Inventory is the character sheet extended, never a second system; containers are D82 objects with SQLite contents
+
+- **Context:** Sprint 22 (persistent inventory + quantities/stacks, equipment
+  slots, world loot). `characters.items` already held magic items as one-entry-
+  per-instance JSON; `gear.compute_ac` derived AC implicitly from owned armor;
+  map `loot` entities were step-on-CELL notes, not containers; the interactable
+  framework (D82) owned object authoring, fog, dm_only and reach.
+- **Decision:**
+  - OWNERSHIP MODEL: items stay on `characters.items` (tokens act through the
+    linked character). Sheet authority = owner or DM, exactly the attune
+    precedent — a D82 CONTROLLER never gains inventory rights. No parallel
+    inventory table, no competing character system.
+  - Item entries gain `qty` (default 1 ⇒ every old row IS a one-item stack),
+    `weight`, `stackable`, `def_id`, generic `props` (sanitised scalars;
+    combat integration reads them later — no D&D rules hardcoded).
+    `item_defs` is a DM TEMPLATE library only; grants snapshot the def into
+    the sheet (def edits never mutate granted items).
+  - `app/inventory.py` is the ONLY mutation site: every op re-reads its rows
+    inside `db.tx()` (BEGIN IMMEDIATE) — concurrent mutations serialise on the
+    database, quantities can never duplicate, go negative or half-apply.
+    Client `op_id`s claim a row in `inv_ops` inside the same transaction:
+    a replayed request is a no-op (rows expire after a day).
+  - EQUIPMENT: `characters.equipment {slot: item_id}` for
+    main_hand/off_hand/armor/acc1..acc3; admission via a generic kind→slot
+    table with `props.slot` per-item override; `props.two_handed` is the only
+    cross-slot rule. AC switches to equipped mode ONLY once a slot is worn —
+    empty `{}` keeps the legacy derivation byte-identical (old sheets, old
+    tests untouched). Every mutation and read runs `clean_equipment`: a slot
+    pointing at a vanished/lost item is dropped in the same breath.
+  - CONTAINERS reuse the D82 object framework (editor, fog/dm_only
+    transmission, same-plane adjacency) as op kind `container`; CONTENTS live
+    ONLY in SQLite (`containers (room_id, object_id, items)`) so a
+    character↔chest move is ONE database transaction, and contents never
+    travel in map JSON, `/state` or broadcasts — an authorised
+    `inv_container inspect` is the only carrier (requester socket only).
+    Legacy map `loot` entities are unchanged (documented supersession only).
+  - Transfers are member↔member of the SAME room, atomic debit+credit;
+    a full or non-member target rolls the whole operation back.
+- **Consequences:** `/state` carries own sheet + equipment + (DM-only)
+  `item_defs`; a payload-less `inv_changed` drives refetch; the client
+  refreshes on WS `onopen` so no reconnect ever renders stale quantities;
+  the equip kind-table is mirrored client-side for BUTTONS ONLY (the server
+  decides — forged slot claims answer with an error, not with state).
+
+## D93 — Weapons are equipped items with typed props; attacks derive server-side and feed the ONE action ledger; peer sheet rows are an allow-list
+
+- **Context:** Sprint 22 reserved item `props` as "combat integration reads
+  these later" (D92). PC attacks existed only as a name-lookup posting a
+  client-trusted `+to_hit` with no target and no AC verdict (dice.py), while
+  the NPC path already did full HIT/MISS (`_target_ac`); `combat.spend_slot`
+  existed but no game action consumed it; `/state` shipped EVERY member's
+  full character row to every other member (only notes + unidentified magic
+  were redacted); cast/resource/use_item had no replay guard.
+- **Decision:**
+  - ITEM WEAPONS ARE DATA: `kind "weapon"` (main_hand via the coarse slot
+    table; `props.slot` still overrides). The attack profile lives in the
+    SAME D92 props bag, now type-validated for the named combat keys
+    (`damage_dice` regex, `damage_type` from `gear.DAMAGE_TYPES`,
+    `ability` from `gear.ABILITIES`, `attack_bonus`/`damage_bonus` −10..10,
+    `range_ft` 0-600, `reach_ft` 0-60, `proficient`/`two_handed`/
+    `mod_to_damage` bool). A wrongly-typed key is dropped — a corrupt prop
+    must never manufacture a bonus. No rules catalogue is hardcoded.
+  - ONE DERIVATION: `gear.weapon_profiles(sheet)` computes
+    `to_hit = stat_mod + prof_bonus·props.proficient + attack_bonus`
+    (each modifier exactly once; damage may add the ability mod once via
+    `mod_to_damage`). The sheet DISPLAYS these numbers and attacks by
+    `item_id` only — client-supplied to_hit/dmg fields are not read. The
+    legacy `characters.weapons` name path is untouched for legacy sheets.
+  - ATTACK = the existing `roll kind:"attack"` engine with an `item_id`
+    branch: item must sit in `characters.equipment`, target AC resolves via
+    `_target_ac`, crit/fumble semantics mirror the ability engine, damage
+    is ROLLED (crit doubles dice count, like every existing path) but
+    APPLIED by the DM through the existing `hp` flow — same table flow as
+    `npc_attack` today, no new HP writers.
+  - ACTION ECONOMY: `combat.spend_slot` gets its first callers. During an
+    ACTIVE initiative the attack consumes the attacker's action (or bonus
+    via `slot:"bonus"`), refuses when used, refuses off-turn; outside a
+    combat nothing is consumed — exactly the movement gate's established
+    "table discretion" semantics. The consumption broadcasts the updated
+    `initiative` so trackers stay honest.
+  - REPLAY: `inv_ops` is now the project-wide op ledger (D92 pattern,
+    unchanged table). Attack, cast, resource and use_item accept an
+    optional `op_id`; the claim rides the same `db.tx()` as the mutation
+    (cast now re-reads slots INSIDE the tx). No op_id = old behaviour —
+    fully backward compatible clients.
+  - SHEET PRIVACY: `/state` member rows for unrelated players are the
+    tactical allow-list `{id,name,race,char_class,level,total_level,hp,
+    max_hp,temp_hp,ac,ac_total,speed}`. Identity + the numbers the DM
+    narrates anyway stay; stats/skills/saves/spells/slots/items/equipment/
+    resources/defenses/derived/notes are sheet-private. DM and owner keep
+    the full row; the room client renders peer tokens as a compact public
+    card (the server field being absent is the marker — UI cannot leak
+    what never ships).
+  - SHEET NUMBERS ARE SERVER NUMBERS: `_char_row` ships a read-time
+    `derived` block (stat mods, save/skill bonuses for the full skill
+    list, prof bonus, initiative, attack profiles, attune cap). The client
+    renders it; its own copies of the formulas (which used legacy `level`
+    and drifted on multiclass) are gone from the sheet path.
+- **Consequences:** unequip/remove instantly invalidates profiles and AC
+  (both recomputed at read, `inv_changed` refetch); an attack against a
+  removed item answers "No equipped weapon…"; hidden NPC data never rode
+  the sheet path anyway (`t.npc` is DM-only) and now peers' sheets don't
+  either. `abilities.execute` still has no turn-slot coupling (documented
+  gap — the engine's cost model is slots/resources, economy can attach to
+  the same `spend_slot` seam later).
+
+## D94 — Sprint 24 audit: op claims re-read the acting row in-tx, hidden targets are invisible to attackers, client op_ids are namespaced
+
+- **Context:** read-only audit of the Sprint 22/23 dispatch paths found three
+  confirmed defects. (1) `_item_attack` derived its weapon profile from a
+  character row read BEFORE the replay-guard transaction — an interleaved
+  unequip/remove could make an attack roll on a stale profile. (2) the
+  attack's target lookup accepted ANY token id in the room; hidden monsters
+  were hittable by guessing integer ids and the dice line printed their
+  label+AC (a probing oracle). (3) `inv_ops` keyed only on the client-chosen
+  `op_id` — one player could pre-claim guessable op_ids and silently swallow
+  other players' operations.
+- **Decision:**
+  - SELECT-THEN-EXECUTE IS ONE TRANSACTION: the attack re-reads its
+    character row and the acting token INSIDE the claim transaction
+    (`gear.weapon_profiles` on the fresh row). A removed/unequipped item
+    can never arm a roll; WAL semantics make the tx snapshot the attack's
+    well-defined "now".
+  - AN ATTACK MAY ONLY HIT WHAT THE MEMBER COULD SEE: `_visible_to_member`
+    mirrors the /state token filter (planes, fog sight, own/controlled).
+    A hidden target answers with the BYTE-IDENTICAL "No target token" error
+    a nonexistent id gets — attacks are not probes. DM path unrestricted
+    (verified via state, not attack UI). Legacy by-name and npc_attack
+    paths are DM-restricted upstream and were confirmed unaffected.
+  - OP_CLAIM NAMESPACING: `_claim` stores `f"{ns}|{op_id}"` where ns is the
+    acting character/object id. Client op_ids stay freely choosable but are
+    only authoritative inside their own namespace; legacy un-namespaced rows
+    keep working until expiry (no schema change).
+- **Consequences:** cross-player op_id lockout closed without a migration;
+  the ledger now guards (namespace, op_id) — same op_id reused for another
+  payload by the SAME character is still silently ignored (operation-level
+  guard, documented in `test_duplicate_op_id_changed_payload_is_silent`).
+  DM-side damage dice caps remain DM-trust territory (a DM can author any
+  NPC bonus anyway — D92 doctrine).

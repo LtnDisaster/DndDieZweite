@@ -203,4 +203,4 @@ def test_no_executable_code_path_anywhere():
         # (?<![.\w]) lets legit `re.compile(` pass but catches bare eval/exec/
         # compile/__import__ calls — the execution paths this feature forbids.
         assert not re.search(r"(?<![.\w])(eval|exec|compile|__import__)\s*\(", src), rel
-    assert mapmodel.INTERACT_OPS == ("toggle", "door")
+    assert mapmodel.INTERACT_OPS == ("toggle", "door", "stair", "lamp", "container")  # D88/89 + D92

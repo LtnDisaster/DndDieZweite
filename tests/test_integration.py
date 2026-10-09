@@ -157,13 +157,12 @@ def test_hidden_info_masking(client):
     assert a_self["notes"] == secret
     assert a_self["items"][0]["name"] == "Ring of Feather Fall"
 
-    # B sees A masked: notes stripped + magic item masked
+    # B sees A as the D93 tactical allow-list: no notes, no items, no stats —
+    # the whole private half of the row is gone, not just the masked fields.
     b_state = state_of(client, b, code)
     a_for_b = next(m["char"] for m in b_state["members"] if m["char"] and m["char"]["name"] == "Aria")
-    assert a_for_b["notes"] == ""
-    assert a_for_b["items"][0]["name"] == "Unidentified item"
-    assert a_for_b["items"][0]["desc"] == "A mysterious item."
-    assert a_for_b["items"][0]["unidentified"] is True
+    assert "notes" not in a_for_b and "items" not in a_for_b and "stats" not in a_for_b
+    assert a_for_b["name"] == "Aria" and "ac_total" in a_for_b and "hp" in a_for_b
 
     # DM is NOT masked (sees the real item), even though it is still unidentified.
     dm_state = state_of(client, dm, code)

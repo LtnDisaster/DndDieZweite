@@ -357,3 +357,8 @@ details.group > .group-body { padding: .35rem .5rem .5rem; }
 /* a11y + medium widths */
 button:focus-visible, summary:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
 @media (max-width: 1150px) { :root { --side-w: 300px; } }
+
+/* D92 inventory window */
+.eq-row{display:flex;align-items:center;gap:6px;margin:2px 0}
+.eq-lab{min-width:88px;opacity:.7;font-size:12px}
+.inv-eq{border-bottom:1px solid var(--line,#444);padding-bottom:4px;margin-bottom:4px}

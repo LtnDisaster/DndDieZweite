@@ -307,3 +307,11 @@ Darkness (DM candle button 🕯 in the brush bar):
 - [ ] DM edits map with resize (e.g. 40→30 wide) on a plane that has pins and elevation steps: pins that still fit are where they were (same titles/visibility), elevation heights survive; pins outside the new window drop (by design).
 - [ ] Lamp toggled off on a plane → refresh the page (F5): still off. A DM with an OLD editor tab saves the map: lamp stays off.
 - [ ] Tactical smoke (mirrors tests/test_browser_flow.py — automated there in a Node vm, NEVER in a real browser so far): open Tactical → own token visible → click a rectangular (≥2 wide) token: it selects → click a valid destination: gold preview appears within budget → confirm → token walks to the anchored final cell → F5 refresh: token still in place and still selectable at that spot.
+
+## Sprint 23 — sheet & combat (D93)
+- [ ] DM → Inv tab: name „Langschwert", kind weapon, dmg `1d8`, type slashing, abil STR, ☑ prof → **+ Def** → grant ×1 to a player. Player: 🎒 Inv → Equip into Main hand → sheet opens on the token: Attack section shows `⚔️ Langschwert +7` (STR3+Prof2+… verify vs your sheet), Initiative/Prof chips above the HP bar.
+- [ ] Player attacks Dummy token (target select → Attack, Action): dice line names the target AC + HIT/MISS; HIT posts damage `1d8+3`. DM applies via existing HP buttons. Unequip → Attack section empty, attacking errors „No equipped weapon".
+- [ ] Combat: DM starts initiative → on player's turn first attack OK, second same turn refused „No action left"; slot=Bonus attacks once more; off-turn attack refused; end combat → attacks free again. Reload (F5) mid-combat: tracker + slots intact.
+- [ ] Privacy: second player logs in → clicks first player's token: compact public card (HP/AC/Speed), no items/spells/stats. DM sees the full sheet.
+- [ ] Legacy: a character with a classic `weapons` entry still attacks by name exactly like before (no AC verdict).
+- [ ] D94: DM hides a monster (out of your vision) → you attack it by id (devtools): error is exactly „No target token" — same as a wrong id. DM still sees/attacks it normally.

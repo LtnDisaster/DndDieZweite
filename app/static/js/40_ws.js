@@ -7,6 +7,9 @@ function connectWS(code){
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/${code}`);
   state.ws = ws;
+  // D92: the first thing a (re-)connected socket does is refetch authoritative
+  // state — inventories/equipment never ride a reconnect stale.
+  ws.onopen = () => { if (typeof refreshRoom === "function") refreshRoom().catch(() => {}); };
   ws.onmessage = ev => {
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if (m.type !== "event") return;
@@ -24,6 +27,8 @@ function connectWS(code){
       case "system": appendGameLogMessage({ id:p.id, username:p.username, body:p.text ?? p.body,
                                             type:"system", visibility:p.visibility }); break;
       case "quests_changed": refreshRoom(); break;
+      case "inv_changed": refreshRoom(); break;         // D92: inventory/equipment refetch
+      case "inv_contents": showInvContents(p); break;   // D92: authorised container view (requester only)
       case "whisper": appendGameLogMessage({ type:"whisper", body:p.text }); break;
       case "ambience": applyAudioState(p); break;
       case "sound": playSoundEvent(p); break;

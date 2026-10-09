@@ -159,6 +159,7 @@ window.addEventListener("unhandledrejection", function(ev){
       <div class="row side-tabs" id="side-tabs" role="tablist" title="Group sidebar panels">
         <button data-tab="game" class="ghost" role="tab" aria-selected="false">⚔ Game</button>
         <button data-tab="chars" class="ghost" role="tab" aria-selected="false">👤 Chars</button>
+        <button data-tab="inv" class="ghost" role="tab" aria-selected="false">🎒 Inv</button>
         <button data-tab="story" class="ghost" role="tab" aria-selected="false">📜 Story</button>
         <button data-tab="dm" class="ghost dm-only" role="tab" aria-selected="false">🎲 DM</button>
       </div>
@@ -256,6 +257,31 @@ window.addEventListener("unhandledrejection", function(ev){
       <div class="panel hidden" id="mychars" data-tab="chars">
         <h2>My Characters</h2>
         <div id="my-chars"></div>
+      </div>
+      <div class="panel hidden" id="inv" data-tab="inv">
+        <h2>🎒 Inventory <span id="inv-who" class="meta"></span></h2>
+        <div class="row hidden" id="inv-charrow"><select id="inv-char"></select></div>
+        <div id="inv-equip"></div>
+        <div id="inv-items"></div>
+        <div id="inv-dm" class="hidden">
+          <div class="row">
+            <select id="inv-def" title="DM item definition"></select>
+            <input id="inv-qty" type="number" min="1" max="9999" value="1" style="width:64px">
+            <button id="inv-grant">Grant</button>
+          </div>
+          <div class="row">
+            <input id="inv-newname" placeholder="new item name" maxlength="48" style="flex:1">
+            <select id="inv-newkind" title="category"></select>
+            <label class="tiny" title="stacks as one entry"><input id="inv-newstack" type="checkbox">stk</label>
+            <input id="inv-newweight" type="number" min="0" max="9999" step="0.1" value="0" style="width:64px" title="weight">
+            <input id="inv-newdmg" type="text" maxlength="10" placeholder="dmg e.g. 1d8" style="width:88px" title="attack properties (only for kind weapon): damage dice — leave empty for a plain item">
+            <select id="inv-newdtype" style="width:96px" title="damage type"><option value="">type…</option><option>slashing</option><option>piercing</option><option>bludgeoning</option><option>fire</option><option>cold</option><option>lightning</option><option>poison</option><option>necrotic</option><option>radiant</option></select>
+            <select id="inv-newatab" style="width:88px" title="attack/damage ability"><option value="">abil…</option><option value="str">STR</option><option value="dex">DEX</option><option value="int">INT</option><option value="cha">CHA</option></select>
+            <label style="font-size:.72rem" title="adds the proficiency bonus to the attack roll"><input id="inv-newprof" type="checkbox"> prof</label>
+            <button id="inv-mkdef" title="save as reusable definition, then it can be granted and put into containers">+ Def</button>
+          </div>
+        </div>
+        <div id="inv-chest" class="hidden"></div>
       </div>
       <div class="panel" data-tab="game">
         <h2>Party</h2>
@@ -448,6 +474,7 @@ window.addEventListener("unhandledrejection", function(ev){
               <option value="door">door: open/close nearest (≤3)</option>
               <option value="stair">stair: move user to plane</option>
               <option value="lamp">lamp: static light (interact to toggle)</option>
+              <option value="container">container: chest/sack (contents stay server-side)</option>
             </select>
             <span id="obj-stair-fields" class="hidden" title="D88: destination cell on the target plane — validated at use time; occupied or walled is refused">
               <input id="obj-tfl" placeholder="to floor" maxlength="24" style="width:76px">

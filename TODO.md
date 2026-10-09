@@ -34,6 +34,38 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 
 # Sprint 21 (privacy audit D91): canonical run with the NEW code DEFERRED at the hard stop
 # (the prebuilt image was stale); host py3.14: 6/6 privacy + 110-suite regression + compileall green. Canonical: docker compose run --build --rm test
+# → RETRO-VALIDATED 2026-10-09: Sprint 22's pre-change baseline canonical was GREEN (505 passed + 17 skipped).
+
+## Done — Sprint 23: sheet → combat integration (2026-10-09)
+- [x] **Item weapons are equipped data**: kind `weapon` + type-validated combat props (D93);
+      one derivation `gear.weapon_profiles` feeds sheet AND attack path — client bonuses/dice are not read
+- [x] **Server-side attack vs AC** in the existing roll engine: HIT/MISS + damage roll (DM applies
+      via the existing hp flow, like npc_attack); range/plane gate; legacy by-name path untouched
+- [x] **Action economy gets consumers**: `combat.spend_slot` first callers (attack action/bonus,
+      only during active initiative; off-turn/used-slot refused; out of combat free — movement-gate semantics)
+- [x] **Replay guards everywhere money moves**: inv_ops is the project-wide op ledger —
+      attack/cast/resource/use_item op_id claims ride their mutation tx (cast re-reads slots in-tx)
+- [x] **Peer sheet privacy**: /state member rows reduced to the tactical allow-list (D93);
+      stats/items/spells/derived never ship to unrelated members; client renders a public card
+- [x] **Server-derived sheet numbers** (`derived` block: mods, all skills, saves, initiative,
+      profiles, attune cap) — client formula copies (legacy-level multiclass drift) removed
+- [x] Canonical close: see git-less TODO footer run log (baseline 534+17 → +16 new tests)
+
+# Sprint 23 (D93): canonical close run logged in this session; abilities.execute intentionally
+# still WITHOUT turn-slot coupling (cost model = slots/resources; economy can attach later).
+
+## Done — Sprint 22: inventory, equipment & loot (2026-10-08/09)
+- [x] **Persistent quantities/stacks on the ONE item system**: `characters.items` entries gained
+      `qty`/`weight`/`stackable`/`props`; split/combine/grant/remove in `app/inventory.py`, every
+      mutation inside `db.tx()` with `inv_ops` op_id replay guard (D92)
+- [x] **DM item definitions** (`item_defs`, `/state` DM-only) + grant/remove; ad-hoc items too
+- [x] **Equipment slots** main/off/armor/acc1–3 (`characters.equipment`); legacy AC derivation
+      untouched until a slot is worn; slots self-heal when an item vanishes (D92)
+- [x] **World containers** as D82 objects (editor `container` op): contents ONLY in SQLite,
+      reach+plane-gated inspect/take/put, atomic loot, dm_only/fog never leak, concurrent-safe (D92)
+- [x] **Tactical UI**: 🎒 Inv tab (slots, stacks, equip, DM grant/def/remove), chest click opens
+      contents with Take/Put/Fill; WS onopen refetch = fresh inventory after every reconnect
+- [x] Canonical close: **534 passed + 17 skipped** (was 505+17; +29 new adversarial tests)
 
 ## Done — Sprint 20: cross-floor truth, security regression, browser foundation (2026-10-08)
 - [x] **P0 cross-floor AoE/ping correctness** (closes D88's limitation, D90):
@@ -447,3 +479,11 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [ ] No build step introduced on purpose (D1) — don't add a bundler/module loader without
       revisiting D1 and D20.
 - [ ] Auth is single-tenant local; no OAuth/2FA planned.
+
+## Done — Sprint 24: hardening audit (2026-10-09, D94)
+- [x] F1 TOCTOU: attack profile+token re-read inside the claim tx (dice.py)
+- [x] F2 hidden-target probing oracle closed; error byte-identical to nonexistent
+- [x] F3 inv_ops namespaced per acting char/object (no migration)
+- [x] tests/test_sprint24_hardening.py (7 live-dispatch adversarial tests)
+- [ ] DEFERRED: live range/reach pin (harness grant-of-2nd-def flaky — server
+      gate itself implemented; skip marker carries the reason)

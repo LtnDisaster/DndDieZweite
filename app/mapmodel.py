@@ -261,7 +261,7 @@ def _entity(e, w, h, ox=0, oy=0):
     return out
 
 
-INTERACT_OPS = ("toggle", "door")   # the ONLY operations a world object may drive
+INTERACT_OPS = ("toggle", "door", "stair", "lamp", "container")  # the ONLY ops a world object may drive (D82/88/89, D92)
 
 
 def _clean_object(o, w, h, ox=0, oy=0):
@@ -325,6 +325,12 @@ def _clean_object(o, w, h, ox=0, oy=0):
                 bright = 5
             out["interact"] = {"label": label,
                                "op": {"kind": "lamp", "bright": bright}}
+        elif kind == "container":
+            # D92: world container (chest, sack, locker). The op carries NO
+            # payload — contents live server-side in the containers table and
+            # travel ONLY through authorised inv_container exchanges, never in
+            # map JSON, /state or broadcasts.
+            out["interact"] = {"label": label, "op": {"kind": "container"}}
         # any other kind: silently dropped — DATA never carries code
     return out
 

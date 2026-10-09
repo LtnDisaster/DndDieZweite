@@ -1,7 +1,7 @@
 """Inventory / items: use, attune, DM identify + recharge."""
 import json
 
-from .. import db, gear
+from .. import db, gear, inventory as INV
 from . import death as D
 from .dice import do_roll
 from .net import broadcast, send_to, send_user, sys_msg
@@ -33,16 +33,23 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
     healed = res["total"] if res else 0
     hp = min(ch["max_hp"], ch["hp"] + healed)
     death = D.load(tok)
+    # D93: op_id replay guard rides the write transaction — a re-sent use
+    # heals once, never twice (and never heals without its charge debit).
+    op_id = str(msg.get("op_id", ""))[:40]
     if it["charges"] > 0:
         it["charges"] -= 1
         # Single UPDATE so HP and charge decrement are atomic (never one without the other).
         with db.tx() as c:
+            if op_id and not INV._claim(c, op_id, room_id, "use_item", ch["id"]):
+                return
             c.execute("UPDATE characters SET hp=?, temp_hp=?, items=? WHERE id=?",
                       (hp, ch.get("temp_hp") or 0, json.dumps(items), ch["id"]))
             if hp > 0 and death is not None:
                 c.execute("UPDATE tokens SET death=NULL WHERE id=?", (tok["id"],))
     else:
         with db.tx() as c:
+            if op_id and not INV._claim(c, op_id, room_id, "use_item", ch["id"]):
+                return
             c.execute("UPDATE characters SET hp=?, temp_hp=? WHERE id=?",
                       (hp, ch.get("temp_hp") or 0, ch["id"]))
             if hp > 0 and death is not None:

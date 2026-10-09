@@ -2,8 +2,8 @@
 import random
 import re
 
-from .. import db, gear, npc
-from . import gamelog
+from .. import db, gear, inventory as INV, npc
+from . import authz, gamelog
 from .net import broadcast, send_to, sys_msg
 
 ROLL_RE = re.compile(r"^(\d*)d(\d+)([+-]\d+)?(?:(kh|kl)(\d+))?$", re.I)
@@ -256,6 +256,174 @@ def _target_ac(room_id, target_id):
     return (blk.get("ac", 10) if blk else None), t["label"]
 
 
+def _roll_dmg(expr, bonus, crit):
+    parsed = parse_roll(expr)
+    if parsed is None:
+        return None
+    n, sides, mod = parsed
+    n = min(200, n * 2) if crit else n
+    rolls = [random.randint(1, sides) for _ in range(n)]
+    mod += bonus
+    return rolls, mod, sum(rolls) + mod
+
+
+def _visible_to_member(user_id, room_id, tok):
+    """D94: may a member even TARGET this token? Mirrors the /state token
+    filter (rooms.py D82/D86/D72): same plane, fog sight, own/controlled
+    always. A hidden target must be indistinguishable from no target."""
+    from .. import footprint, mapmodel
+    from .. import ws as _ws
+    from . import net as room_net
+    fl = tok["floor"] or ""
+    planes = {(t["floor"] or "") for t in db.q(
+        "SELECT * FROM tokens WHERE room_id=?", (room_id,))
+        if t["owner_user_id"] == user_id or t["controller_user_id"] == user_id}
+    if fl not in planes:
+        return False
+    if tok["owner_user_id"] == user_id or tok["controller_user_id"] == user_id:
+        return True
+    mp = room_net.get_map(room_id, fl)
+    if mp is None:
+        return False
+    vis = _ws.viewer_visible_cells(room_id, user_id, mp, floor=fl)
+    origin, side = footprint.occupied_origin(mp, tok)
+    return any((i := mapmodel.flat_idx(mp, x, y)) is not None and i in vis
+               for (x, y) in footprint.origin_cells(mp, origin, side))
+
+
+async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
+    """D93: attack with an EQUIPPED item. The profile (bonus/dice/range) is
+    derived from server-side equipment+props (gear.weapon_profiles); the
+    client claims an item_id and nothing else. AC verdict mirrors the NPC/
+    ability engines; damage is ROLLED here but APPLIED by the DM through the
+    existing hp flow — same table flow as npc_attack today. During an active
+    initiative the attack consumes the attacker's action/bonus slot."""
+    from . import combat as C                      # late import: combat imports dice
+    item_id = str(msg.get("item_id", ""))[:16]
+    op_id = str(msg.get("op_id", ""))[:40]
+
+    # D94: the profile and the attacking token are RE-READ inside the claim
+    # transaction — an interleaved unequip/remove can never make this attack
+    # roll with a stale profile (select-then-execute was Sprint 23's hole).
+    with db.tx() as c:
+        row = c.execute("SELECT * FROM characters WHERE id=?", (ch["id"],)).fetchone()
+        fresh = gear.as_sheet(dict(row) if row else None)
+        prof = next((p for p in gear.weapon_profiles(fresh or ch)
+                     if p["item_id"] == item_id), None)
+        if prof is None:
+            await send_to(ws, "error", {"msg": "No equipped weapon with attack properties on this character"})
+            return
+        tok = None
+        if msg.get("token_id") is not None:
+            row = c.execute("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                            (msg["token_id"], room_id)).fetchone()
+            tok = dict(row) if row else None
+            if tok is None or not authz.controls(tok, user["id"], is_dm) \
+                    or tok["character_id"] != ch["id"]:
+                await send_to(ws, "error", {"msg": "That token is not yours to attack with"})
+                return
+        if op_id and not INV._claim(c, op_id, room_id, "attack", ch["id"]):
+            return
+
+    init = C.get_init(room_id)
+    slot = "bonus" if str(msg.get("slot", "")) == "bonus" else "action"
+    if init.get("combat") and not is_dm:
+        if tok is None:
+            await send_to(ws, "error", {"msg": "Pick your token during combat (token_id)"})
+            return
+        listed = any(o.get("token_id") == tok["id"] for o in init.get("order", []))
+        if listed:
+            turn = init.get("turn") or {}
+            if turn.get("token_id") != tok["id"]:
+                await send_to(ws, "error", {"msg": "It is not your turn"})
+                return
+            if turn.get(slot) == "used":
+                await send_to(ws, "error", {"msg": f"No {slot} left this turn"})
+                return
+            new_init = C.spend_slot(room_id, tok["id"], slot)
+            if new_init is None:
+                await send_to(ws, "error", {"msg": "It is not your turn"})
+                return
+            await broadcast(room_id, "initiative", new_init)
+
+    target = None
+    if msg.get("target_id") is not None:
+        target = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                       (msg["target_id"], room_id))
+        if target is None or (not is_dm and not _visible_to_member(user["id"], room_id, target)):
+            # D94: hidden targets answer EXACTLY like nonexistent ones —
+            # an attack must not be a probe for invisible monsters' names/AC.
+            await send_to(ws, "error", {"msg": "No target token"})
+            return
+        if tok is not None:                      # reach is plane+distance truth
+            if (tok.get("floor") or "") != (target.get("floor") or ""):
+                await send_to(ws, "error", {"msg": "Target is out of reach"})
+                return
+            reach = prof["range_ft"] if prof["range_ft"] > 0 else 5 + prof["reach_ft"]
+            dist = max(abs((tok["x"] or 0) - (target["x"] or 0)),
+                       abs((tok["y"] or 0) - (target["y"] or 0))) * 5
+            if dist > reach:
+                await send_to(ws, "error", {"msg": "Target is out of range"})
+                return
+
+    tlabel = target["label"] if target else None
+    dtxt = f" {prof['dmg_type']}" if prof["dmg_type"] else ""
+
+    def _dmg_line(crit):
+        d = _roll_dmg(prof["dmg"], prof["dmg_bonus"], crit)
+        if d is None:
+            return None
+        rolls, mod, total = d
+        return (f"💥 {ch['name']} — {prof['name']} damage{' (crit!)' if crit else ''}{dtxt}: "
+                f"[{', '.join(map(str, rolls))}] {mod:+d} = {total}"), total
+
+    if kind == "damage":                         # manual damage die, no d20
+        line = _dmg_line(bool(msg.get("crit")))
+        if line is None:
+            await send_to(ws, "error", {"msg": "Weapon damage dice invalid"})
+            return
+        await dice_post(room_id, user, line[0], line[1], visibility=vis, is_dm=is_dm,
+                        meta={"mode": "crit" if msg.get("crit") else "normal", "item": item_id})
+        return
+
+    cover = str(msg.get("cover") or "").lower()
+    if cover == "total":
+        await dice_post(room_id, user, f"🛡 {ch['name']} — target is behind total cover and can't be targeted.",
+                        None, visibility=vis, is_dm=is_dm, meta={"mode": "total-cover"})
+        return
+    cover_mod = _cover_bonus(cover)
+    res = do_roll("1d20", adv)
+    nat = res["kept"]
+    crit = nat == 20
+    total = nat + prof["to_hit"] - cover_mod
+    advtxt = {"adv": " adv", "dis": " dis"}.get(res["adv"] or "", "")
+    covtxt = {"half": " vs half cover", "three_quarters": " vs 3/4 cover"}.get(cover, "")
+
+    if target is None:                           # no AC claim without a target
+        text = (f"⚔️ {ch['name']} — {prof['name']} attack{advtxt}{covtxt}: d20({nat}) "
+                f"{prof['to_hit']:+d} = {total}" + (" — CRITICAL!" if crit else ""))
+        await dice_post(room_id, user, text, total, visibility=vis, is_dm=is_dm,
+                        meta={"mode": res["adv"] or "normal", "item": item_id})
+        return
+
+    ac, alabel = _target_ac(room_id, target["id"])
+    ac = 10 if ac is None else ac
+    hit = crit or (nat != 1 and total >= ac)
+    verdict = "— HIT!" if hit else "— MISS"
+    text = (f"⚔️ {ch['name']} — {prof['name']} attack{advtxt}{covtxt} vs {alabel} "
+            f"(AC {ac}): d20({nat}) {prof['to_hit']:+d}"
+            + (f" {-cover_mod:+d} cover" if cover_mod else "")
+            + f" = {total} {verdict}" + (" — CRITICAL!" if crit else ""))
+    await dice_post(room_id, user, text, total, visibility=vis, is_dm=is_dm,
+                    meta={"mode": res["adv"] or "normal", "item": item_id,
+                          "hit": bool(hit), "ac": ac})
+    if hit:
+        line = _dmg_line(crit)
+        if line:
+            await dice_post(room_id, user, line[0], line[1], visibility=vis, is_dm=is_dm,
+                            meta={"mode": "crit" if crit else "normal", "item": item_id})
+
+
 async def _roll_npc_damage(room_id, user, label, atk):
     res = do_roll(atk["dmg"], None) if atk.get("dmg") else None
     if res is None:
@@ -401,6 +569,13 @@ async def handle_roll(ws, room_id, user, is_dm, msg):
         await dice_post(room_id, user, res[0], res[1], visibility=vis, is_dm=is_dm)
         return
 
+    # ---- D93: item attack. Everything derives SERVER-side: the profile from
+    # equipped props, the bonus from gear, the AC verdict from the target.
+    # Client fields like to_hit/dmg are not read — item_id is the claim.
+    if msg.get("item_id") and kind in ("attack", "damage"):
+        await _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis)
+        return
+
     weapons = db.j(ch["weapons"], []) or []
     w = next((x for x in weapons if x.get("name") == msg.get("weapon")), None)
     if w is None:
@@ -466,13 +641,30 @@ async def handle_cast(ws, room_id, user, is_dm, msg):
         return
     lvl = int(sp.get("level", 0))
     if lvl > 0:
-        slots = gear.clean_slots(db.j(ch["spell_slots"], {}))
-        s = slots.get(lvl, {"max": 0, "used": 0})
-        if s["used"] >= s["max"]:
-            await send_to(ws, "error", {"msg": f"No {lvl}-level spell slots left"})
+        # D93: replay guard and consumption share ONE transaction, and the
+        # slot is re-read inside it — a racing double-send consumes exactly
+        # one slot (or nothing), never two, never negative.
+        op_id = str(msg.get("op_id", ""))[:40]
+        err = None
+        with db.tx() as c:
+            if op_id and not INV._claim(c, op_id, room_id, "cast", ch["id"]):
+                err = "replay"
+            else:
+                fresh = c.execute("SELECT spell_slots FROM characters WHERE id=?",
+                                  (ch["id"],)).fetchone()
+                slots = gear.clean_slots(db.j(fresh["spell_slots"], {}))
+                s = slots.get(lvl, {"max": 0, "used": 0})
+                if s["used"] >= s["max"]:
+                    err = f"No {lvl}-level spell slots left"
+                else:
+                    s["used"] += 1
+                    c.execute("UPDATE characters SET spell_slots=? WHERE id=?",
+                              (db.json_dumps(slots), ch["id"]))
+        if err == "replay":
             return
-        s["used"] += 1
-        db.x("UPDATE characters SET spell_slots=? WHERE id=?", (db.json_dumps(slots), ch["id"]))
+        if err:
+            await send_to(ws, "error", {"msg": err})
+            return
         await broadcast(room_id, "snapshot", None)
     crit = bool(msg.get("crit"))
     posts = []
@@ -628,5 +820,11 @@ async def handle_resource(ws, room_id, user, is_dm, msg):
             return
     else:
         return
-    db.x("UPDATE characters SET resources=? WHERE id=?", (db.json_dumps(resources), ch["id"]))
+    # D93: op_id replay guard rides the write transaction (claim+store atomic).
+    op_id = str(msg.get("op_id", ""))[:40]
+    with db.tx() as c:
+        if op_id and not INV._claim(c, op_id, room_id, "resource", ch["id"]):
+            return
+        c.execute("UPDATE characters SET resources=? WHERE id=?",
+                  (db.json_dumps(resources), ch["id"]))
     await broadcast(room_id, "snapshot", None)

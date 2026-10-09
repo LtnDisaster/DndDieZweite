@@ -624,6 +624,8 @@ function paint(cx, cy){
       o.interact = { label: act,
                      op: { kind:"stair", floor: to,
                            x: +$("obj-tx").value || 0, y: +$("obj-ty").value || 0 } };
+    } else if ($("obj-op").value === "container"){      // D92: contents live server-side only
+      o.interact = { label: act, op: { kind:"container" } };
     } else {
       const d = nearestDoor(gm, cx, cy);
       if (!d){ toast("Link a door first — none within 3 cells"); return; }
@@ -846,8 +848,12 @@ function onDown(e){
     // without an interact field are decoration — clicks pass through to move.
     if (!state.editing){
       const ob = objectAt(wx, wy);
-      if (ob && ob.interact){ wsSend({ type:"interact", object_id: ob.id,
-                                       floor: state.viewFloor || "" }); return; }  // D88
+      if (ob && ob.interact){
+        if (ob.interact.kind === "container"){          // D92: chest opens the window
+          if (typeof openInvContainer === "function") openInvContainer(ob);
+          return; }
+        wsSend({ type:"interact", object_id: ob.id,
+                 floor: state.viewFloor || "" }); return; }  // D88
     }
     // Keep the selected movable token while clicking an empty destination.
     // Clearing the sheet here used to clear state.sel before ownToken(), which

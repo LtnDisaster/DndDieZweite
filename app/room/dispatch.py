@@ -18,6 +18,9 @@ from .dice import (handle_cast, handle_long_rest, handle_npc_attack, handle_reso
 from .items import handle_attune, handle_identify, handle_recharge, handle_use_item
 from .fog import handle_fog_edit, handle_fog_toggle
 from .interact import handle_interact
+from .inv import (handle_inv_adjust, handle_inv_container, handle_inv_equip,
+                  handle_inv_grant, handle_inv_remove, handle_inv_transfer,
+                  handle_item_def)
 from .movement import handle_move, handle_path_preview, handle_stop_move
 from .moveforced import handle_forced_move
 from .net import broadcast, get_map, map_lock, send_to, set_map, sys_msg
@@ -186,6 +189,13 @@ HANDLERS = {
     "quest_delete": handle_quest_delete,
     "class_levels": handle_class_levels,
     "ability_cast": handle_ability_cast,
+    "item_def": handle_item_def,               # D92: DM item-definition library
+    "inv_grant": handle_inv_grant,             # D92: DM grants items
+    "inv_remove": handle_inv_remove,           # D92: DM removes items
+    "inv_adjust": handle_inv_adjust,           # D92: split/combine (owner)
+    "inv_transfer": handle_inv_transfer,       # D92: member→member hand-off
+    "inv_equip": handle_inv_equip,             # D92: (un)equip a slot
+    "inv_container": handle_inv_container,     # D92: world container inspect/move
 }
 
 

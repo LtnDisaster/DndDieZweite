@@ -521,7 +521,7 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `chat` | `room.chat.handle_chat` | any member | maybe | supports global, dm, whisper, personas |
 | `narrative` | `room.chat.handle_narrative` | DM only | maybe | public/private narrative overlay/history |
 | `secret_event` | `room.secret_events.handle_secret_event` | DM only | maybe | narrative + optional targeted sound |
-| `roll` | `room.dice.handle_roll` | member | maybe | visibility public/self/dm/blind |
+| `roll` | `room.dice.handle_roll` | member | maybe | visibility public/self/dm/blind. D93: `kind:"attack"` + `item_id` = item attack — profile, AC verdict, damage dice ALL server-derived; optional `token_id`/`target_id`/`slot` (action|bonus, consumed only during active initiative)/`op_id` (replay). No item_id = legacy by-name weapon path |
 | `hp` | `room.combat.handle_hp` | DM | maybe | routed through health reducer |
 | `move` | `room.movement.handle_move` | own token or DM teleport | no | with `path`: revalidates and refuses silently-different routes (`route_invalid`, D60); without: recomputes authoritative footprint-aware path. `mode` (walk/fly/swim/climb, D83): one active mode, missing speed refused; carried riders follow automatically |
 | `stop_move` | `room.movement.handle_stop_move` | DM | no | cancels active `_walks` task |
@@ -544,6 +544,12 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `quest_add/update/obj_add/obj_done/complete/fail/delete` | `room.quests.*` | DM | no | thin transport over `app/quests.py` ops |
 | `class_levels` | `room.progression.handle_class_levels` | owner or DM (room members) | no | multiclass entries; legacy `level` kept in sync |
 | `ability_cast` | `room.abilities.handle_ability_cast` | owner (own token) or DM | no | thin transport over `abilities.execute` (D55) |
+| `item_def` | `room.inv.handle_item_def` | DM | no | D92: item-definition library (create/update/delete); defs travel via `/state` DM-only |
+| `inv_grant` / `inv_remove` | `room.inv.*` | DM | no | D92: grant (def or ad-hoc) / take; target = character of a member of THIS room |
+| `inv_adjust` | `room.inv.handle_inv_adjust` | sheet owner or DM | no | D92: split/combine stacks |
+| `inv_transfer` | `room.inv.handle_inv_transfer` | sheet owner or DM | no | D92: member→member hand-off, ONE atomic transaction, slots stripped |
+| `inv_equip` | `room.inv.handle_inv_equip` | sheet owner or DM | no | D92: (un)equip {slot, item_id|null}; generic kind table + props.slot/two_handed |
+| `inv_container` | `room.inv.handle_inv_container` | reach-gated like `interact` (D82) | inspect private | D92: inspect/move/fill/remove on container objects; dm_only/cross-plane refuse without leaking |
 
 ## Important outbound event kinds
 
@@ -572,6 +578,8 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `quests_changed` | room quests | room | no | payload-less; clients refetch filtered `/state` |
 | `ability_result` | caster socket | private | yes | entries privacy-filtered; hidden targets counted, never named |
 | `system` | gamelog notices (incl. quest notices) | per visibility | maybe | chronicle line, never reconstruction source |
+| `inv_changed` | room.inv | room | no | D92 payload-less refetch (quests_changed pattern) — inventory/equipment/defs ride `/state` |
+| `inv_contents` | room.inv | requester socket | yes | D92 authorised container inspect/move answer; contents exist in NO other channel |
 | `error` | various | sender socket | private |
 | `room_deleted` | rooms.delete_room → net.purge | room, then sockets close | no | room permanently deleted (D76); clients leave to lobby and must not reconnect |
 
@@ -589,6 +597,12 @@ These must remain server-side:
 - Typed damage/resistance/vulnerability/immunity.
 - Death-save state.
 - Inventory/item effects and charges.
+- Item quantities, stacking, transfers, equipment slots, container contents
+  and the replay ledger (D92) — `app/inventory.py` inside `db.tx()` only.
+- Attack bonuses, damage dice, range and the action-slot verdict (D93):
+  server derives from equipped props + `gear` math; the client claims
+  `item_id` only. Peer character rows are the tactical allow-list (`_peer_view`),
+  full sheets ship to owner and DM only.
 - Attunement cap.
 - Spell slots.
 - Movement legality, path previews and stop transitions.
@@ -697,6 +711,33 @@ Frontend filtering may improve presentation but may not be the security boundary
 - `app/room/visibility.py::send_token_event()`
 - `app/room/visibility.py::broadcast_token_add()`
 
+## Inventory, equipment and containers (Sprint 22)
+
+- `app/inventory.py` — THE only mutation site for item quantities, stacks
+  (split/combine/stack_add), grants, removals, transfers, equipment slots and
+  container moves; every op re-reads its rows INSIDE `db.tx()` and claims the
+  client `op_id` in `inv_ops` in the same transaction. `InvError` rolls back.
+- `inv_ops` is the PROJECT-WIDE op ledger (D93): attack/cast/resource/use_item
+  claim through `inventory._claim` in their mutation transaction; no op_id
+  sent keeps the pre-D93 behaviour. One-day expiry applies to all kinds.
+- Combat props (D93) are typed in `gear.clean_props` (`damage_dice`,
+  `damage_type`, `ability`, `attack_bonus`, `damage_bonus`, `range_ft`,
+  `reach_ft`, `proficient`, `two_handed`, `mod_to_damage`); everything else
+  stays the D92 generic scalar bag. `gear.weapon_profiles(sheet)` is the ONLY
+  attack-profile derivation (sheet display AND the attack path read it);
+  clients render its numbers and claim `item_id` — never a bonus.
+- `rooms.py::_peer_view` — unrelated members receive ONLY the tactical
+  allow-list of a peer's character (identity, level, HP/AC/speed). The sheet
+  itself (`_char_row` with `derived`) ships to the owner and the DM only.
+- `app/gear.py::clean_items()` — item-entry sanitizer incl. D92 `qty`/`weight`/
+  `stackable`/`def_id`/`props`; `clean_props()`/`clean_equipment()`/
+  `can_equip()` — D92 property/slot normalisation (slot table is generic DATA,
+  `props.slot` is the per-item override, `props.two_handed` the only cross-slot rule).
+- `app/gear.py::compute_ac()` — equipped mode (any slot occupied → only worn
+  items count) with untouched legacy fallback for sheets without equipment.
+- `app/room/authz.py` — unchanged: CONTROLLER ≠ sheet authority; inventory
+  rights are owner-or-DM like attune.
+
 ## Audio source safety
 
 - `app/room/audio.py::parse_audio_source()`
@@ -729,6 +770,17 @@ Important tables:
 - `characters.abilities` — JSON list of granted ability ids (access model only;
   no prep/spellbook rules — D55). NPC equivalents live in the token's npc block.
 - `soundboard` — private reusable DM sound effects.
+- `item_defs` — D92 room-scoped DM item definitions (id TEXT PK, name, desc,
+  kind, weight, stackable, `props` JSON). Templates only: granting snapshots
+  them into `characters.items` (def edits never mutate granted items).
+- `containers` — D92 container CONTENTS keyed `(room_id, object_id)`; the
+  world object itself lives in the map (D82), the contents live here and in
+  NO other place — never in map JSON, `/state` or broadcasts.
+- `inv_ops` — D92 replay ledger: first claim of a client `op_id` wins, a
+  replayed claim answers as a no-op. Rows expire after one day.
+- `characters.equipment` — D92 JSON `{slot: item_id}` for
+  main_hand/off_hand/armor/acc1..acc3; `'{}'` = no explicit rig, which keeps
+  the legacy auto-derivation in `gear.compute_ac` byte-identical.
 
 Migrations are append-only. Add columns with `db.py::init_db()`'s `migrate()` helper and add new tables to `SCHEMA`.
 

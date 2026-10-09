@@ -165,6 +165,31 @@ CREATE TABLE IF NOT EXISTS assets (
     sha TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS item_defs (
+    id TEXT PRIMARY KEY,
+    room_id INTEGER NOT NULL REFERENCES rooms(id),
+    name TEXT NOT NULL,
+    desc TEXT DEFAULT '',
+    kind TEXT DEFAULT 'other',
+    weight REAL DEFAULT 0,
+    stackable INTEGER DEFAULT 0,
+    props TEXT DEFAULT '{}',
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS containers (
+    room_id INTEGER NOT NULL REFERENCES rooms(id),
+    object_id TEXT NOT NULL,
+    items TEXT DEFAULT '[]',
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (room_id, object_id)
+);
+CREATE TABLE IF NOT EXISTS inv_ops (
+    op_id TEXT PRIMARY KEY,
+    room_id INTEGER,
+    kind TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -275,6 +300,9 @@ def init_db():
     migrate("room_state", "audio_json", "audio_json TEXT DEFAULT '{}'")
     migrate("characters", "class_levels", "class_levels TEXT DEFAULT ''")
     migrate("characters", "abilities", "abilities TEXT DEFAULT '[]'")
+    # D92: explicit EQUIPMENT slots (main_hand/off_hand/armor/acc1..acc3 → item id).
+    # '{}' = no explicit rig ⇒ gear.compute_ac keeps the legacy auto-derivation.
+    migrate("characters", "equipment", "equipment TEXT DEFAULT '{}'")
     c.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_type_created "
               "ON messages (room_id, type, created_at)")
     c.commit()

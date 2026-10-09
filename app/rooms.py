@@ -118,13 +118,41 @@ def _char_row(r, mask_items=False):
     r["class_levels"] = progression.load(r)
     r["total_level"] = progression.total_character_level(r)
     r["abilities"] = [str(a) for a in (db.j(r.get("abilities"), []) or [])][:60]
+    # D92: parsed BEFORE ac_total — compute_ac switches to equipped mode off
+    # this column; clean_equipment drops dangling refs at READ time too.
+    r["equipment"] = gear.clean_equipment(db.j(r.get("equipment"), {}), r["items"])
     r["hit_dice_max"] = gear.hit_dice_max(r)
     r["hit_dice_spent"] = max(0, min(gear.hit_dice_max(r), int(r.get("hit_dice_spent") or 0)))
     r["has_spellbook"] = gear.has_spellbook(r["items"])
     r["ac_total"] = gear.compute_ac(r)
     if mask_items:
         r["items"] = gear.mask_items(r["items"], True)
+    # D93: server-derived numbers ride the sheet — the client RENDERS these
+    # and never recomputes bonuses (client copies of the formulas drifted on
+    # multiclass level before; that class of bug is now structurally gone).
+    r["derived"] = {
+        "stat_mods": {a: gear.stat_mod(r, a) for a in gear.ABILITIES},
+        "save_bonuses": {a: gear.save_bonus(r, r["saves"], a) for a in gear.ABILITIES},
+        "skill_bonuses": {s: gear.skill_bonus(r, r["skills"], s)[0] for s in gear.SKILLS},
+        "skill_prof": {s: gear.skill_bonus(r, r["skills"], s)[1] for s in gear.SKILLS},
+        "prof_bonus": gear.prof_bonus(r),
+        "initiative": gear.dex_mod(r),
+        "attack_profiles": gear.weapon_profiles(r),
+        "attune_max": gear.ATUNE_MAX,
+    }
     return r
+
+
+# D93: what an UNRELATED room member may see of someone else's character —
+# the table-visible tactical layer only (identity, level, HP/AC as narrated
+# in the chronicle anyway, speed). Everything else (stats, skills, saves,
+# spells/slots, items/equipment, resources, defenses, notes) is sheet-private.
+_PEER_FIELDS = ("id", "name", "race", "char_class", "level", "total_level",
+                "hp", "max_hp", "temp_hp", "ac", "ac_total", "speed")
+
+
+def _peer_view(c):
+    return {k: c.get(k) for k in _PEER_FIELDS} if c else c
 
 
 class SoundIn(BaseModel):
@@ -561,9 +589,10 @@ def room_state(code: str, request: Request):
         m["char"] = _char_row(
             db.q1("SELECT * FROM characters WHERE id=?", (m["character_id"],)),
             mask_items=masked) if m["character_id"] else None
-        # Other players must not read a peer's private notes (loot is appended to notes).
-        if m["char"] and masked:
-            m["char"]["notes"] = ""
+        # D93: a peer row is now the tactical allow-list — the old notes/
+        # unidentified-magic redaction was the tip of a much bigger row.
+        if masked:
+            m["char"] = _peer_view(m["char"])
     tokens_all = db.q("SELECT * FROM tokens WHERE room_id=? ORDER BY id", (room["id"],))
     st = db.q1("SELECT initiative, map_json, audio_json FROM room_state WHERE room_id=?", (room["id"],)) or {}
     # D88: WHICH plane's map is this snapshot about? The DM may pass ?floor=
@@ -652,6 +681,14 @@ def room_state(code: str, request: Request):
         "initiative": db.j(st.get("initiative"), {"combat": False, "order": [], "active": -1}),
         "quests": questlog.visible_for(room["id"], room["_role"] == "dm"),
         "characters": [_char_row(c) for c in db.q("SELECT * FROM characters WHERE user_id=?", (user["id"],))],
+        # D92: the DM's item-definition library travels to the DM only; players
+        # receive [] (defs are authoring templates — no player has a use for a
+        # peer's future loot). Container CONTENTS never appear here at all —
+        # they travel exclusively through an authorised inv_container inspect.
+        "item_defs": ([{**d, "props": db.j(d.get("props"), {}), "stackable": bool(d["stackable"])}
+                       for d in db.q("SELECT * FROM item_defs WHERE room_id=? ORDER BY name",
+                                     (room["id"],))]
+                      if room["_role"] == "dm" else []),
     }
 
 

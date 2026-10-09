@@ -85,6 +85,7 @@ async function refreshRoom(){
   updateMoveHud();
   renderParty(); renderInit(); renderMyChars();
   state.quests = s.quests || []; renderQuests();
+  state.itemDefs = s.item_defs || []; renderInv();   // D92: inventory window
   state.messages = s.messages || []; state.chat = s.chat || [];
   applyAudioState(s.audio || {}); renderChatTargets(); renderVoiceTargets(); renderAudio();
   renderFeed(); applySideTab(); applyFeedPanels();
@@ -970,6 +971,15 @@ function renderSheet(tok){
   panel.classList.remove("hidden");
   const m = state.room.members.find(x => x.user_id === tok.owner_user_id);
   const ch = m && m.char;
+  // D93: peers only ever receive the tactical allow-list (items/stats/spells
+  // are sheet-private) — such a row renders as a compact public card.
+  if (ch && ch.items === undefined && state.room.role !== "dm"){
+    $("sheet-body").innerHTML = `<div class="hpbar"><div style="width:${Math.max(0,(ch.hp||0)/Math.max(1,ch.max_hp)*100)}%"></div></div>` +
+      `<b>HP ${ch.hp}/${ch.max_hp}</b>${ch.temp_hp ? ` (+${ch.temp_hp} temp)` : ""} · AC ${ch.ac_total != null ? ch.ac_total : ch.ac} · Speed ${ch.speed} ft` +
+      `<div class="meta">Private sheet — ask ${esc(ch.name)} at the table.</div>`;
+    $("hp-btns").classList.add("hidden"); $("hp-adv").classList.add("hidden");
+    return;
+  }
   const clsTxt = ch && ch.class_levels && ch.class_levels.length
     ? ch.class_levels.map(e => e.class_id[0].toUpperCase() + e.class_id.slice(1) + " " + e.level).join(" / ")
     : ((ch && ch.char_class) || "");
@@ -1000,7 +1010,7 @@ function renderSheet(tok){
       if (it.attunable) btns.push(`<button data-a="attune" data-id="${it.id}">${it.attuned ? "Untune" : "Attune"}</button>`); }
     if (isDM && it.magic && !it.identified) btns.push(`<button data-a="identify" data-id="${it.id}">Identify</button>`);
     if (isDM && it.recharge) btns.push(`<button data-a="recharge" data-id="${it.id}">Recharge</button>`);
-    return `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind]||"🎒"} ${esc(it.name)}</span> <small>${chips}</small>
+    return `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind]||"🎒"} ${esc(it.name)}${it.qty > 1 ? " ×" + it.qty : ""}</span> <small>${chips}</small>
       <small style="opacity:.6">${it.kind==="armor" ? ("AC "+(it.ac||(it.acBonus?("+"+it.acBonus):""))) : (it.heal?("+HP "+it.heal):"")}</small>
       ${it.unidentified ? "" : `<small style="opacity:.55"> ${esc(it.desc||"")}</small>`}<span class="inv-btns">${btns.join("")}</span></div>`;
   }).join("");
@@ -1009,13 +1019,40 @@ function renderSheet(tok){
   const spells = ch.spells || [];
   const slots = ch.spell_slots || {};
   const _ab = a => (ch.stats && ch.stats[a] != null) ? ch.stats[a] : 10;
-  const profSkills = Object.keys(skills).filter(k => skills[k] > 0);
-  const skillBlock = profSkills.length ? `<details class="sheet-sec" open><summary><h3>Skills</h3></summary>` +
-    profSkills.map(k => {
-      const meta = SKILLS[k] || [k, ""], bonus = _smod(_ab(meta[1])) + _pb(lvlv) * skills[k];
-      return `<div class="skrow"><span>${meta[0]} <small>${skills[k]===2?"★":"✓"}</small> <b>${bonus>=0?"+":""}${bonus}</b></span>` +
-             (own ? `<button class="sk-roll" data-skill="${k}">Roll</button>` : "") + `</div>`;
-    }).join("") + `</details>` : "";
+  const der = ch.derived || {};
+  const sgn = n => (n >= 0 ? "+" : "") + n;
+  // D93: bonuses are SERVER numbers (derived) — the client renders, never recomputes.
+  const skillBlock = (() => {
+    const keys = der.skill_bonuses ? Object.keys(der.skill_bonuses)
+                                   : Object.keys(skills).filter(k => skills[k] > 0);
+    if (!keys.length) return "";
+    return `<details class="sheet-sec" open><summary><h3>Skills</h3></summary>` +
+      keys.map(k => {
+        const meta = SKILLS[k] || [k, ""];
+        const bonus = der.skill_bonuses ? der.skill_bonuses[k]
+                                        : _smod(_ab(meta[1])) + _pb(lvlv) * (skills[k] || 0);
+        const tag = der.skill_prof ? (der.skill_prof[k] ? (skills[k] === 2 ? "★" : "✓") : "")
+                                   : (skills[k] === 2 ? "★" : "✓");
+        return `<div class="skrow"><span>${meta[0]} <small>${tag}</small> <b>${sgn(bonus)}</b></span>` +
+               (own ? `<button class="sk-roll" data-skill="${k}">Roll</button>` : "") + `</div>`;
+      }).join("") + `</details>`;
+  })();
+  const saveBlock = (own && der.save_bonuses) ? `<details class="sheet-sec"><summary><h3>Saving Throws</h3></summary>` +
+    ["str","dex","con","int","wis","cha"].map(a =>
+      `<div class="skrow"><span>${a.toUpperCase()} <b>${sgn(der.save_bonuses[a])}</b>${(ch.saves||{})[a]?" ✓":""}</span>` +
+      `<button class="sv-roll" data-ab="${a}">Roll</button></div>`).join("") + `</details>` : "";
+  const attackBlock = ((own || isDM) && (der.attack_profiles || []).length) ?
+    (() => { const tg = state.tokens.filter(t => t.id !== tok.id);
+      return `<details class="sheet-sec" open><summary><h3>Attacks <small style="opacity:.6">server-derived</small></h3></summary>` +
+      der.attack_profiles.map(p =>
+        `<div class="skrow"><span>⚔️ ${esc(p.name)} <b>${sgn(p.to_hit)}</b> ` +
+        `<small style="opacity:.6">${p.dmg}${p.dmg_bonus ? (p.dmg_bonus >= 0 ? "+" : "") + p.dmg_bonus : ""}${p.dmg_type ? " " + p.dmg_type : ""}` +
+        `${p.range_ft ? " · " + p.range_ft + " ft" : (p.reach_ft ? " · reach " + p.reach_ft + " ft" : "")}</small></span>` +
+        (own ? `<select class="atk-adv"><option value="">—</option><option value="adv">adv</option><option value="dis">dis</option></select>` +
+               `<select class="atk-slot"><option value="action">Action</option><option value="bonus">Bonus</option></select>` +
+               `<select class="atk-tgt"><option value="">no target</option>${tg.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("")}</select>` +
+               `<button class="atk-go primary" data-id="${p.item_id}">Attack</button>` : "") + `</div>`).join("") +
+      `</details>`; })() : "";
   let bookBlock = "";
   if (ch.has_spellbook){
     const slotLine = [];
@@ -1039,19 +1076,20 @@ function renderSheet(tok){
   }
   body.innerHTML = spanRow + `
     <div class="hpbar"><div style="width:${Math.max(0,ch.hp/ch.max_hp*100)}%;${ch.hp/ch.max_hp<=.25?"background:var(--red)":""}"></div></div>
-    <b>HP ${ch.hp}/${ch.max_hp}</b> · AC ${ac} · Speed ${ch.speed} ft
+    <b>HP ${ch.hp}/${ch.max_hp}</b>${ch.temp_hp ? ` (+${ch.temp_hp} temp)` : ""} · AC ${ac} · Speed ${ch.speed} ft
+    ${der.prof_bonus != null ? `<div class="meta" style="opacity:.75">Initiative ${sgn(der.initiative)} · Proficiency ${sgn(der.prof_bonus)} · Hit dice ${Math.max(0,(ch.hit_dice_max||0)-(ch.hit_dice_spent||0))}/${ch.hit_dice_max||0}</div>` : ""}
     ${deathHtml(tok)}
     ${hpStatesHtml(tok, ch, own || isDM)}
     <div class="statline">${STATS.map(([k,l]) =>
-      `<div class="stat"><small>${l}</small>${v(ch.stats,k)} <small>${mod(v(ch.stats,k))}</small></div>`).join("")}</div>
+      `<div class="stat"><small>${l}</small>${v(ch.stats,k)} <small>${der.stat_mods ? sgn(der.stat_mods[k]) : mod(v(ch.stats,k))}</small></div>`).join("")}</div>
     ${conditionsHtml(tok)}
     ${defenseHtml(ch.defenses)}
-    ${inv.length ? `<div class="inv"><div class="wlabel">Inventory <small style="opacity:.6">(attuned ${(ch.items||[]).filter(x=>x.attunable&&x.attuned).length}/3)</small></div>${invRows}</div>` : ""}
-    ${skillBlock}${bookBlock}
+    ${inv.length ? `<div class="inv"><div class="wlabel">Inventory <small style="opacity:.6">(attuned ${(ch.items||[]).filter(x=>x.attunable&&x.attuned).length}/${der.attune_max || 3})</small></div>${invRows}</div>` : ""}
+    ${attackBlock}${skillBlock}${saveBlock}${bookBlock}
     <details><summary style="cursor:pointer;font-size:.8rem;opacity:.7">Notes</summary><div style="white-space:pre-wrap;font-size:.82rem">${esc(ch.notes)}</div></details>`;
   for (const b of body.querySelectorAll(".inv-btns button")) b.onclick = () => {
     const id = b.dataset.id;
-    if (b.dataset.a === "use") wsSend({ type:"use_item", token_id: tok.id, item_id: id });
+    if (b.dataset.a === "use") wsSend({ type:"use_item", token_id: tok.id, item_id: id, op_id: invOpId() });
     else if (b.dataset.a === "attune") wsSend({ type:"attune", char_id: ch.id, item_id: id });
     else if (b.dataset.a === "identify") wsSend({ type:"identify", char_id: ch.id, item_id: id });
     else if (b.dataset.a === "recharge") wsSend({ type:"recharge", char_id: ch.id, item_id: id });
@@ -1059,7 +1097,16 @@ function renderSheet(tok){
   const _vis = () => ($("sr-vis") && $("sr-vis").value) || "public";
   for (const b of body.querySelectorAll(".sk-roll")) b.onclick = () => wsSend({ type:"roll", kind:"skill", skill: b.dataset.skill, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
   for (const b of body.querySelectorAll(".roll-sp")) b.onclick = () => wsSend({ type:"roll", kind: b.dataset.k, spell_id: b.dataset.id, crit: b.dataset.crit === "1", visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
-  for (const b of body.querySelectorAll(".cast-sp")) b.onclick = () => wsSend({ type:"cast", spell_id: b.dataset.id, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
+  for (const b of body.querySelectorAll(".cast-sp")) b.onclick = () => wsSend({ type:"cast", spell_id: b.dataset.id, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null, op_id: invOpId() });
+  for (const b of body.querySelectorAll(".sv-roll")) b.onclick = () => wsSend({ type:"roll", kind:"save", ability: b.dataset.ab, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
+  for (const b of body.querySelectorAll(".atk-go")) b.onclick = () => {
+    const row = b.closest(".skrow");
+    wsSend({ type:"roll", kind:"attack", item_id: b.dataset.id, token_id: tok.id,
+             target_id: row.querySelector(".atk-tgt").value || null,
+             adv: row.querySelector(".atk-adv").value || null,
+             slot: row.querySelector(".atk-slot").value,
+             visibility:_vis(), op_id: invOpId() });
+  };
   wireConditions(tok);
   wireHpStates(tok);
   wireDeath(tok);
@@ -1453,7 +1500,7 @@ function wireHpStates(tok){
   if ($("btn-insp")) $("btn-insp").onclick = () => wsSend({ type:"inspiration", token_id: tok.id, action:"toggle" });
   if ($("btn-short")) $("btn-short").onclick = () => wsSend({ type:"short_rest", token_id: tok.id, hit_dice_count: +$("hd-count").value || 0 });
   for (const b of body.querySelectorAll(".exh-btn")) b.onclick = () => wsSend({ type:"exhaustion", token_id: tok.id, action:b.dataset.a });
-  for (const b of body.querySelectorAll(".res-btn")) b.onclick = () => wsSend({ type:"resource", token_id: tok.id, resource_id:b.dataset.id, action:b.dataset.a });
+  for (const b of body.querySelectorAll(".res-btn")) b.onclick = () => wsSend({ type:"resource", token_id: tok.id, resource_id:b.dataset.id, action:b.dataset.a, op_id: invOpId() });
 }
 
 /* ---------- death saving throws (character sheet) ---------- */
@@ -1527,5 +1574,220 @@ function wireQuestUI(){
     const t = $("q-title"); if (!t || !t.value.trim()) return;
     wsSend({ type: "quest_add", title: t.value.trim(), visibility: "party" });
     t.value = "";
+  };
+}
+
+/* ---------- inventory / equipment / containers (D92) ---------- */
+const INV_SLOTS = [["main_hand","Main hand"],["off_hand","Off hand"],["armor","Armor"],
+                   ["acc1","Accessory 1"],["acc2","Accessory 2"],["acc3","Accessory 3"]];
+const INV_KINDS = ["other","weapon","armor","shield","potion","scroll","wand","staff","ring",
+                   "tool","wondrous","spellbook"];
+
+function invOpId(){ return "op" + Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
+
+function setSideTab(tab){
+  localStorage.setItem(sideTabKey(), tab); applySideTab();
+}
+
+function invTargetChar(){
+  const isDM = state.room && state.room.role === "dm";
+  if (isDM){
+    const sel = $("inv-char");
+    if (!sel) return null;
+    const m = state.room.members.find(x => x.char && String(x.char.id) === sel.value);
+    return m ? m.char : null;
+  }
+  const m = state.room.members.find(x => x.user_id === state.me.id);
+  return m && m.char;
+}
+
+function renderInv(){
+  const box = $("inv");
+  if (!box || !state.room) return;
+  const isDM = state.room.role === "dm";
+  const row = $("inv-charrow");
+  if (row) row.classList.toggle("hidden", !isDM);
+  if (isDM){
+    const sel = $("inv-char"), pool = state.room.members.filter(x => x.char);
+    if (sel){
+      const keep = sel.value;
+      sel.innerHTML = pool.map(m => `<option value="${m.char.id}">${esc(m.char.name)} (${esc(m.username)})</option>`).join("")
+                     || "<option value=''>no characters</option>";
+      if (pool.some(m => String(m.char.id) === keep)) sel.value = keep;
+      sel.onchange = renderInv;
+    }
+  }
+  const ch = invTargetChar();
+  const dmBox = $("inv-dm");
+  if (dmBox) dmBox.classList.toggle("hidden", !isDM || !ch);
+  const who = $("inv-who");
+  if (who) who.textContent = ch ? "— " + ch.name : "";
+  const eq = $("inv-equip"), items = $("inv-items");
+  if (!ch){
+    if (eq) eq.innerHTML = "";
+    if (items) items.innerHTML = `<div class="meta">${isDM ? "Pick a character to manage." : "No character yet."}</div>`;
+    renderInvChest(); wireInvStatic(); return;
+  }
+  const inv = ch.items || [], equip = ch.equipment || {};
+  const slotOpt = sel => INV_SLOTS.map(s => `<option value="${s[0]}">${sel && s[1] ? "" : ""}${s[1]}</option>`).join("");
+  if (eq){
+    eq.innerHTML = `<div class="inv-eq">${INV_SLOTS.map(s => {
+      const it = inv.find(i => i.id === equip[s[0]]);
+      return `<div class="row eq-row"><span class="eq-lab">${s[1]}</span>` +
+        (it ? `<span>${ITEM_ICONS[it.kind] || "🎒"} ${esc(it.name)}</span>` +
+              `<button data-uneq="${s[0]}">Unequip</button>` : `<span class="meta">—</span>`) + `</div>`;
+    }).join("")}</div>`;
+    eq.querySelectorAll("button[data-uneq]").forEach(b => b.onclick = () =>
+      wsSend({ type: "inv_equip", char_id: ch.id, slot: b.dataset.uneq, item_id: null,
+               op_id: invOpId() }));
+  }
+  if (items){
+    items.innerHTML = inv.map(it => {
+      const known = !it.unidentified;
+      const btns = [];
+      btns.push(`<select data-slot="${it.id}" title="equip into">${slotOpt(true)}</select>` +
+                `<button data-a="equip" data-id="${it.id}">Equip</button>`);
+      if (it.stackable && it.qty > 1 && state.invSplit !== it.id)
+        btns.push(`<button data-a="split" data-id="${it.id}">Split</button>`);
+      if (it.stackable && it.qty > 1 && state.invSplit === it.id)
+        btns.push(`<input id="split-q" type="number" min="1" max="${it.qty - 1}" value="1" style="width:52px">` +
+                  `<button data-a="splitgo" data-id="${it.id}">Go</button>` +
+                  `<button data-a="splitcancel">✕</button>`);
+      if (it.stackable)
+        btns.push(`<button data-a="combine" data-id="${it.id}" ${state.invCombine === it.id ? "class='active'" : ""}>${state.invCombine === it.id ? "pick other" : "Combine"}</button>`);
+      if (isDM) btns.push(`<button data-a="remove" data-id="${it.id}" style="color:var(--red)">Remove</button>`);
+      const sub = [known ? esc(it.desc || "") : "unidentified",
+                   it.weight ? it.weight + " lb" : ""].filter(Boolean).join(" · ");
+      return `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind] || "🎒"} ${esc(it.name)}${it.qty > 1 ? " ×" + it.qty : ""}</span>` +
+        `<small style="opacity:.55"> ${sub}</small><span class="inv-btns">${btns.join("")}</span></div>`;
+    }).join("") || `<div class="meta">Empty.</div>`;
+    items.querySelectorAll("button[data-a]").forEach(b => b.onclick = () => {
+      const id = b.dataset.id, a = b.dataset.a;
+      if (a === "equip"){
+        const slot = items.querySelector(`select[data-slot="${id}"]`)?.value || "main_hand";
+        wsSend({ type: "inv_equip", char_id: ch.id, slot, item_id: id, op_id: invOpId() });
+      } else if (a === "split"){ state.invSplit = id; renderInv(); }
+      else if (a === "splitcancel"){ state.invSplit = null; renderInv(); }
+      else if (a === "splitgo"){
+        const q = +(($("split-q") || {}).value || 1);
+        state.invSplit = null;
+        wsSend({ type: "inv_adjust", char_id: ch.id, action: "split", item_id: id, qty: q, op_id: invOpId() });
+      } else if (a === "combine"){
+        if (!state.invCombine || state.invCombine === id){ state.invCombine = id; renderInv(); return; }
+        const other = state.invCombine; state.invCombine = null;
+        wsSend({ type: "inv_adjust", char_id: ch.id, action: "combine", item_id: id, other_id: other, op_id: invOpId() });
+      } else if (a === "remove"){
+        const it = inv.find(i => i.id === id);
+        const q = window.confirm(`Remove ALL ${it ? it.qty : ""} × ${it ? it.name : ""}?`) ? (it ? it.qty : 1) : 0;
+        if (q > 0) wsSend({ type: "inv_remove", char_id: ch.id, item_id: id, qty: q, op_id: invOpId() });
+      }
+    });
+  }
+  renderInvChest(); wireInvStatic();
+}
+
+function wireInvStatic(){
+  const isDM = state.room && state.room.role === "dm";
+  if (!isDM) return;
+  const defs = state.itemDefs || [];
+  const ds = $("inv-def");
+  if (ds){
+    const keep = ds.value;
+    ds.innerHTML = defs.map(d => `<option value="${d.id}">${esc(d.name)} (${d.qty ? "" : d.stackable ? "stk" : "one"})</option>`).join("")
+                   || "<option value=''>no definitions — create below</option>";
+    if (defs.some(d => d.id === keep)) ds.value = keep;
+  }
+  const ks = $("inv-newkind");
+  if (ks && !ks.options.length) ks.innerHTML = INV_KINDS.map(k => `<option>${k}</option>`).join("");
+  const grant = $("inv-grant");
+  if (grant) grant.onclick = () => {
+    const ch = invTargetChar(); if (!ch) return;
+    const qty = +(($("inv-qty") || {}).value || 1);
+    const defId = (($("inv-def") || {}).value || "");
+    if (!defId) { toast("Create an item definition first."); return; }
+    wsSend({ type: "inv_grant", char_id: ch.id, def_id: defId, qty, op_id: invOpId() });
+  };
+  const mk = $("inv-mkdef");
+  if (mk) mk.onclick = () => {
+    const name = (($("inv-newname") || {}).value || "").trim();
+    if (!name){ toast("Name it first."); return; }
+    // D93: attack properties ride the definition — the server validates
+    // every one of them (gear.clean_props); the client just collects.
+    const props = {};
+    const dmg = (($("inv-newdmg") || {}).value || "").trim();
+    if (dmg) props.damage_dice = dmg;
+    const dt = (($("inv-newdtype") || {}).value || ""); if (dt) props.damage_type = dt;
+    const ab = (($("inv-newatab") || {}).value || ""); if (ab) { props.ability = ab; props.mod_to_damage = true; }
+    if (($("inv-newprof") || {}).checked) props.proficient = true;
+    wsSend({ type: "item_def", action: "create", defn: {
+      name, kind: (($("inv-newkind") || {}).value || "other"),
+      stackable: !!($("inv-newstack") || {}).checked,
+      weight: +(($("inv-newweight") || {}).value || 0),
+      props }, op_id: invOpId() });
+    $("inv-newname").value = "";
+  };
+}
+
+function openInvContainer(ob){
+  state.invChest = { object_id: ob.id, label: ob.label || "Container",
+                     floor: state.viewFloor || "", items: [], loading: true };
+  setSideTab("inv"); renderInvChest();
+  wsSend({ type: "inv_container", action: "inspect", object_id: ob.id, floor: state.viewFloor || "" });
+}
+
+function showInvContents(p){
+  state.invChest = { object_id: p.object_id, label: p.label || "Container",
+                     floor: p.floor || "", items: p.items || [] };
+  setSideTab("inv"); renderInvChest();
+}
+
+function renderInvChest(){
+  const box = $("inv-chest");
+  if (!box) return;
+  const cs = state.invChest;
+  if (!cs){ box.classList.add("hidden"); box.innerHTML = ""; return; }
+  box.classList.remove("hidden");
+  const isDM = state.room && state.room.role === "dm";
+  const ch = invTargetChar();
+  const rows = (cs.items || []).map(it =>
+    `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind] || "🎒"} ${esc(it.name)} ×${it.qty}</span>` +
+    `<small style="opacity:.55"> ${esc(it.desc || "")}</small><span class="inv-btns">` +
+    `<input id="tk-q-${it.id}" type="number" min="1" max="${it.qty}" value="1" style="width:52px">` +
+    `<button data-tk="${it.id}" ${ch ? "" : "disabled"}>Take</button>` +
+    (isDM ? `<button data-rm="${it.id}" style="color:var(--red)">Remove</button>` : "") +
+    `</span></div>`).join("") || `<div class="meta">${cs.loading ? "opening…" : "Empty."}</div>`;
+  const own = (ch && ch.items || []).filter(i => !i.unidentified);
+  box.innerHTML = `<h3>📦 ${esc(cs.label)} <button id="chest-close" class="ghost" title="close">✕</button></h3>` +
+    rows +
+    (cs.loading ? "" : `<div class="row"><select id="put-item" title="take from this character's inventory">` +
+      (own.map(i => `<option value="${i.id}">${esc(i.name)} ×${i.qty}</option>`).join("") || "<option value=''>nothing to put</option>") +
+      `</select><input id="put-q" type="number" min="1" value="1" style="width:52px">` +
+      `<button id="chest-put" ${ch && own.length ? "" : "disabled"}>Put</button>` +
+      (isDM ? `<select id="fill-def" title="definition to put in">` +
+        ((state.itemDefs || []).map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("") || "<option value=''>no defs</option>") +
+        `</select><input id="fill-q" type="number" min="1" value="1" style="width:52px"><button id="chest-fill">Fill</button>` : "") +
+      `</div>`);
+  const cl = $("chest-close");
+  if (cl) cl.onclick = () => { state.invChest = null; renderInvChest(); };
+  box.querySelectorAll("button[data-tk]").forEach(b => b.onclick = () => {
+    const q = +(($("tk-q-" + b.dataset.tk) || {}).value || 1);
+    wsSend({ type: "inv_container", action: "move", object_id: cs.object_id, floor: cs.floor,
+             char_id: ch.id, item_id: b.dataset.tk, qty: q, op_id: invOpId() });
+  });
+  box.querySelectorAll("button[data-rm]").forEach(b => b.onclick = () => {
+    wsSend({ type: "inv_container", action: "remove", object_id: cs.object_id, floor: cs.floor,
+             item_id: b.dataset.rm, qty: 9999, op_id: invOpId() });
+  });
+  const put = $("chest-put");
+  if (put) put.onclick = () => {
+    const id = (($("put-item") || {}).value || ""); if (!id) return;
+    wsSend({ type: "inv_container", action: "move", object_id: cs.object_id, floor: cs.floor,
+             char_id: ch.id, item_id: id, qty: +(($("put-q") || {}).value || 1), op_id: invOpId() });
+  };
+  const fill = $("chest-fill");
+  if (fill) fill.onclick = () => {
+    const id = (($("fill-def") || {}).value || ""); if (!id) return;
+    wsSend({ type: "inv_container", action: "fill", object_id: cs.object_id, floor: cs.floor,
+             def_id: id, qty: +(($("fill-q") || {}).value || 1), op_id: invOpId() });
   };
 }
