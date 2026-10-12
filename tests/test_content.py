@@ -11,6 +11,7 @@ across all eight kinds and re-imports byte-idempotently.
 """
 import io
 import re
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -177,15 +178,25 @@ def test_import_reports_row_error_and_refuses_to_write_that_file(client):
 def test_items_project_into_dm_library_with_typed_combat_props(client):
     dm, _p, code, _ch = base_room(client)
     rid = db.q1("SELECT id FROM rooms WHERE code=?", (code,))["id"]
-    items = (PACK / "items.csv").read_text(encoding="utf-8")
+    # item_defs.id is GLOBAL (per-room keys need a destructive rebuild — see D100),
+    # so the SAME shipped id imported by an earlier test's room would make THIS
+    # room's projection conflict-and-skip by design. Give the imported rows
+    # run-unique ids so THIS room reliably owns its DM-library rows; the shipped
+    # typed columns are still exercised verbatim.
+    uid = uuid.uuid4().hex[:6]
+    sp, bl = f"sword_plus1_{uid}", f"bow_long_{uid}"
+    items = ((PACK / "items.csv").read_text(encoding="utf-8")
+             .replace("sword_plus1", sp).replace("bow_long", bl))
     assert _post(client, dm, code, items.encode(), name="items.csv").json()["ok"]
     # the content row is stored scoped to THIS room
-    assert db.q1("SELECT 1 FROM content WHERE kind='item' AND room_id=? AND id='sword_plus1'", (rid,))
-    # item_defs is keyed by a GLOBAL id (best-effort DM-library projection), so we
-    # read it back by id and assert the TYPED combat props carried over.
-    props = db.j(db.q1("SELECT props FROM item_defs WHERE id='sword_plus1'")["props"], {})
+    assert db.q1("SELECT 1 FROM content WHERE kind='item' AND room_id=? AND id=?", (rid, sp))
+    # item_defs carries a room-scoped owner (D100): read it back BY ROOM + id so a
+    # same-named definition from another room in the shared test DB cannot leak in.
+    props = db.j(db.q1("SELECT props FROM item_defs WHERE room_id=? AND id=?",
+                       (rid, sp))["props"], {})
     assert props["damage_dice"] == "1d8" and props["attack_bonus"] == 1 and props["damage_bonus"] == 1
-    bow = db.j(db.q1("SELECT props FROM item_defs WHERE id='bow_long'")["props"], {})
+    bow = db.j(db.q1("SELECT props FROM item_defs WHERE room_id=? AND id=?",
+                     (rid, bl))["props"], {})
     assert bow["range_ft"] == 150 and bow["range_long_ft"] == 600
     assert C.valid_dice(bow["damage_dice"]) and bow["two_handed"] is True
 

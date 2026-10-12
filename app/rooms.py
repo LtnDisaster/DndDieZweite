@@ -278,15 +278,21 @@ def create_char(ch: CharIn, user=Depends(require_user)):
 
 @router.put("/characters/{cid}")
 def update_char(cid: int, ch: CharIn, user=Depends(require_user)):
-    _load_char(cid, user["id"])
+    cur = _load_char(cid, user["id"])
+    # D100 autonomy lock: the raw character-editor PUT may no longer rewrite the
+    # SERVER-AUTHORISED progression fields. `level`, `spells` and `spell_slots` are
+    # kept EXACTLY as stored — a sheet owner cannot refill consumed slots, self-grant
+    # a spell list, or set their own level by hand. Authorised writers are untouched:
+    # the validated build/level-up (`charbuild.apply`), the DM `class_levels` transport,
+    # and the WS rest/ability/progression handlers. DMs never hit this endpoint at all
+    # (_load_char is owner-scoped). Everything else on the sheet stays editable.
     db.x(
-        "UPDATE characters SET name=?,race=?,char_class=?,level=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,"
-        "weapons=?,items=?,skills=?,spells=?,spell_slots=?,saves=?,defenses=?,resources=?,hit_die=? WHERE id=?",
-        (ch.name, ch.race, ch.char_class, ch.level, db.json_dumps(ch.stats),
+        "UPDATE characters SET name=?,race=?,char_class=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,"
+        "weapons=?,items=?,skills=?,saves=?,defenses=?,resources=?,hit_die=? WHERE id=?",
+        (ch.name, ch.race, ch.char_class, db.json_dumps(ch.stats),
          ch.hp, ch.max_hp, ch.ac, ch.speed, ch.notes,
          db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(gear.clean_items(ch.items)),
-         db.json_dumps(gear.clean_skills(ch.skills)), db.json_dumps(gear.clean_spells(ch.spells)),
-         db.json_dumps(gear.clean_slots(ch.spell_slots)),
+         db.json_dumps(gear.clean_skills(ch.skills)),
          db.json_dumps(gear.clean_saves(ch.saves)), db.json_dumps(gear.clean_defenses(ch.defenses)),
          db.json_dumps(gear.clean_resources(ch.resources)), gear.clean_hit_die(ch.hit_die), cid))
     return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)))

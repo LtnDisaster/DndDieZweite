@@ -96,14 +96,21 @@ def test_stranger_cannot_alter_class_levels(client):
     assert db.q1("SELECT level FROM characters WHERE id=?", (ch["id"],))["level"] == 5  # lie-proof
 
 
-def test_owner_can_set_own_and_invalid_payload_refused(client):
-    dm, player, code, ch = base_room(client)
+def test_owner_class_levels_refused_dm_only(client):
+    # D100 autonomy lock: the raw class_levels transport is DM-only. A player advances
+    # through the validated Build instead — the owner can no longer hand-set class
+    # levels here — while DM/server-side progression is fully preserved.
+    dm, player, code, ch = base_room(client)          # base char is legacy level 5
     with ws_connect(client, player, code) as ws:
         ws.send_json({"type": "class_levels", "character_id": ch["id"],
-                      "class_levels": [{"class_id": "warrior", "level": 0}]})   # invalid
-        assert recv_until(ws, "error")["kind"] == "error"
+                      "class_levels": [{"class_id": "warrior", "level": 4}]})  # valid, but not for an owner
+        ev = recv_until(ws, "error")
+        assert "build" in ev["payload"]["msg"].lower() or "dm" in ev["payload"]["msg"].lower()
+    assert db.q1("SELECT level FROM characters WHERE id=?", (ch["id"],))["level"] == 5  # untouched
+
+    # the DM still advances this room-member character:
+    with ws_connect(client, dm, code) as ws:
         ws.send_json({"type": "class_levels", "character_id": ch["id"],
-                      "class_levels": [{"class_id": "warden", "level": 4}]})    # valid
+                      "class_levels": [{"class_id": "warrior", "level": 4}]})
         recv_until(ws, "snapshot")
-    mine = state_of(client, player, code)["characters"]
-    assert [c for c in mine if c["id"] == ch["id"]][0]["total_level"] == 4
+    assert db.q1("SELECT level FROM characters WHERE id=?", (ch["id"],))["level"] == 4

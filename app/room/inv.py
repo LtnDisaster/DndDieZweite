@@ -59,6 +59,15 @@ async def handle_item_def(ws, room_id, user, is_dm, msg):
             await send_to(ws, "error", {"msg": "Invalid item definition"})
             return
         did = d.pop("id") or "def" + _rand()
+        # D100: item_defs.id is global. Never clobber another room's definition —
+        # a same-room id updates in place, a foreign id is refused outright (a
+        # per-room key would need a destructive rebuild, so the conflict is made
+        # explicit instead of silently overwriting the other room's library row).
+        owner = db.q1("SELECT room_id FROM item_defs WHERE id=?", (did,))
+        if owner is not None and owner["room_id"] != room_id:
+            await send_to(ws, "error", {"msg": "That definition id is already used by "
+                                               "another room — choose a different id"})
+            return
         db.x("INSERT INTO item_defs(id, room_id, name, desc, kind, weight, stackable,"
              " props, created_by) VALUES(?,?,?,?,?,?,?,?,?)"
              " ON CONFLICT(id) DO UPDATE SET name=excluded.name, desc=excluded.desc,"

@@ -1877,3 +1877,62 @@ lines name conditions by design (public table record, D90).
   bonuses, the overload warn, companion/controller authorisation, and
   reload-stable derived state. `tests/test_content_examples.py` gains an importable
   `carry_bonus` example.
+
+## D100 — Integration hardening: atomic resource spend, server-authorised progression fields, room-scoped item library, real-JS testing via a pinned node
+
+- **Decision:** Sprint 29 was an audit, not a feature. An adversarial read of the
+  D95–D99 subsystems surfaced five real defects and one legitimate design tension;
+  each is closed with a REAL regression test (no xfail, no new skips), and the
+  remaining non-issues are documented as honest limits.
+- **G7 — the ONE ability engine is now atomic about cost.** `_consume_cost` read,
+  checked and incremented a slot/resource across SEPARATE autocommit statements, so
+  two concurrent casts of the same caster could both pass the "slots left?" check and
+  LOSE an increment (probe: 91/120 rounds cast 4 against `max=3`). The legacy `cast`
+  path was already single-tx; D97's `ability_cast` path was the outlier. `op_id` claim
+  + cost now happen inside ONE `db.tx()` (`_cast_gate`, `app/abilities.py`), and a
+  refused cost ROLLS the claim back so a genuine retry is not swallowed. The fix is
+  pinned by a synchronous thread-hammer invariant (`tests/test_d100_integration.py`):
+  N concurrent `_cast_gate` calls against `max=1` yield EXACTLY 1 success, never more.
+- **Autonomy lock (design).** The raw character-editor `PUT /characters/{cid}` no
+  longer writes the SERVER-AUTHORISED fields `level` / `spells` / `spell_slots` — a
+  sheet owner can neither refill consumed slots, self-grant a spell list, nor set
+  their own level by hand. The raw `class_levels` WS transport is DM-only. The
+  SELF-SERVICE progression the players keep is the VALIDATED path: `charbuild.apply`
+  (`/api/build/{code}/{cid}/apply`, owner- or room-DM-authorised) plus the DM's WS
+  advance. Nothing was migrated: existing characters are untouched; only the unauthorised
+  write doors closed. Ordinary sheet fields (name, AC, HP, stats, items, skills, …) stay
+  editable by the owner, and DM/server-side progression is fully preserved.
+- **G8b — a granted NPC ability id survives the real editor path.** `npc.clean_npc`
+  dropped bare STRING ability ids (it only kept `{name,desc}` prose), so a familiar
+  created through the real `add_token`/`update_npc` path could never be cast by its
+  controller — the existing tests masked this by writing the block straight to the DB.
+  `_clean_abilities` now preserves a bare string as a canonical id alongside prose
+  entries, which is exactly the list `_rollable_by` reads.
+- **G9/A13 — the DM item library is room-scoped, and a shared id is refused, never
+  clobbered.** Reads/deletes/grants already filtered `WHERE room_id=?`; the two
+  `item_defs` UPSERTs (editor create + CSV projection) silently rewrote ANOTHER room's
+  row on an id collision. Because `item_defs.id` is a GLOBAL primary key (a per-room
+  key needs a destructive table rebuild, which is off-limits), a cross-room collision
+  is now REFUSED with a clear message instead of overwriting — the authoritative
+  room-scoped `content` row is still stored, so no content is lost. This is the honest
+  resolution the schema permits without a migration.
+- **G5 — a non-DM rest answers.** A player-initiated `long_rest`/`short_rest` on a
+  token they may not rest returned silently; it now sends an explicit error, matching
+  every other refusal.
+- **Real-JS testing.** The `test` Docker stage copies the pinned `node:22-slim` binary
+  (no npm, no node_modules, nothing fetched at run time — `python:3.12-slim` already
+  ships its only extra lib, `libstdc++.so.6`) so the ~17 node-gated tests run the
+  ACTUAL shipped client JS (and the diorama parity) instead of skipping. The runtime
+  image is unchanged and never sees node.
+- **Consequences:** the canonical suite is `682 tests, 0 failed, 0 errors` (node-less it
+  reports the ~18 node skips; with node in the image those become real runs).
+  `tests/test_d100_integration.py` pins all of the above plus a green end-to-end flow
+  (import → build → cast → consume → money → companion → reload → consistency);
+  `tests/test_progression.py` and `tests/test_sprint23_combat.py` were updated to stage
+  the server-authorised fields through the legitimate writers instead of the now-locked
+  editor PUT; `test_content.py` reads `item_defs` BY ROOM+id and run-unique ids.
+  Remaining honest limits: `POST /characters` stays the trusted authoring/seed surface
+  (used to create a blank sheet and by tooling); ability SCORES / saves remain
+  owner-editable sheet fields (lower-severity, no confirmed exploit, the build is the
+  intended author of a fresh sheet's scores); and the global `item_defs` id means two
+  rooms independently choosing the same item id collide by design and are refused.

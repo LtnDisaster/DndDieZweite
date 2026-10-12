@@ -1054,6 +1054,28 @@ If new state is added:
 - decide whether it should be persisted
 - avoid treating it as durable room state unless explicitly documented
 
+## Server-authorised character fields (Sprint 29, D100)
+
+These fields are the game's AUTHORITATIVE progression and must NOT be writable
+through the raw sheet editor `PUT /characters/{cid}` (owner) — that path preserves
+`level`, `spells`, `spell_slots` from the stored row. The authorised writers are:
+`charbuild.apply` (validated build/level-up, owner or room-DM), the DM `class_levels`
+WS transport (DM-only), and the WS rest/ability/progression handlers. When staging a
+caster in a test, set these via `db.x(...)`/`charbuild.apply` — the way the game itself
+does — NOT via `put_char`/the editor PUT (`tests/test_d100_integration.py` shows the
+`set_progression` idiom).
+
+## The shared item library & atomic cost (Sprint 29, D100)
+
+- `item_defs.id` is a GLOBAL primary key. Reads/deletes/grants filter `WHERE room_id=?`;
+  a create or CSV projection that collides with ANOTHER room's id is REFUSED (never
+  silently overwritten), because a per-room key would need a destructive rebuild. Do not
+  "fix" a collision by widening the UPSERT to clobber across rooms.
+- Slot / charge / resource consumption lives in `app/abilities.py` `_cast_gate`, which
+  claims the `op_id` AND pays the cost in ONE `db.tx()`. Any new cost path must keep the
+  read→check→increment inside a single `BEGIN IMMEDIATE` transaction (mirroring
+  `room/dice.py`) so concurrent casts cannot lose an increment.
+
 ---
 
 # 11. Editing hints

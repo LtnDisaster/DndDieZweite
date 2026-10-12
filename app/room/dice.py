@@ -703,6 +703,7 @@ async def handle_cast(ws, room_id, user, is_dm, msg):
 
 async def handle_long_rest(ws, room_id, user, is_dm, msg):
     if not is_dm:
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     clear_conditions = bool(msg.get("clear_conditions"))
     for m in db.q("SELECT user_id, character_id FROM room_members "
@@ -773,6 +774,7 @@ async def handle_short_rest(ws, room_id, user, is_dm, msg):
     if not is_dm:
         owner = roller_char(room_id, user["id"])
         if owner is None or owner["id"] != tok["character_id"]:
+            await send_to(ws, "error", {"msg": "Not your character"})
             return
     ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
     if ch is None:

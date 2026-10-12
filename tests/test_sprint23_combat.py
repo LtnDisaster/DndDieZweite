@@ -38,6 +38,23 @@ def put_char(client, user, cid, **over):
     return r.json()
 
 
+def set_progression(cid, **fields):
+    """Author the SERVER-AUTHORISED progression fields (spells / spell_slots / level
+    / class_levels) directly, the way the game's own writers do (build, rest, DM
+    class_levels transport). Since D100 the owner sheet PUT no longer accepts these,
+    so tests that need a caster stage them here rather than through the editor."""
+    cols, vals = [], []
+    for k, v in fields.items():
+        if k == "level":
+            cols.append("level=?"); vals.append(int(v)); continue
+        clean = {"spells": gear.clean_spells, "spell_slots": gear.clean_slots,
+                 "abilities": lambda x: x, "resources": gear.clean_resources}[k]
+        cols.append(f"{k}=?"); vals.append(db.json_dumps(clean(v)))
+    if cols:
+        vals.append(cid)
+        db.x(f"UPDATE characters SET {', '.join(cols)} WHERE id=?", tuple(vals))
+
+
 def own_char(client, user, code):
     st = state_of(client, user, code)
     me = next(m for m in st["members"] if m["user_id"] == st["me"])
@@ -262,9 +279,9 @@ def test_attack_off_turn_and_with_foreign_token_refused(client):
 
 def test_cast_slot_replay_and_overspend(client):
     dm, player, code, ch = base_room(client)
-    put_char(client, player, ch["id"],
-             spells=[{"id": "s1", "name": "Zap", "level": 1, "cast": "none"}],
-             spell_slots={"1": {"max": 1, "used": 0}})
+    set_progression(ch["id"],
+                    spells=[{"id": "s1", "name": "Zap", "level": 1, "cast": "none"}],
+                    spell_slots={"1": {"max": 1, "used": 0}})
     with ws_connect(client, player, code) as ws:
         ws.send_json({"type": "cast", "spell_id": "s1", "op_id": "c1", "visibility": "public"})
         recv_until(ws, "snapshot")
@@ -398,9 +415,9 @@ def test_forged_char_id_attack_uses_own_sheet_only(client):
 
 def test_equipment_and_spending_persist_in_sqlite(client):
     dm, player, code, ch = armed_room(client)
-    put_char(client, player, ch["id"],
-             spells=[{"id": "s1", "name": "Zap", "level": 1, "cast": "none"}],
-             spell_slots={"1": {"max": 2, "used": 0}})
+    set_progression(ch["id"],
+                    spells=[{"id": "s1", "name": "Zap", "level": 1, "cast": "none"}],
+                    spell_slots={"1": {"max": 2, "used": 0}})
     with ws_connect(client, player, code) as ws:
         ws.send_json({"type": "cast", "spell_id": "s1", "op_id": "p1", "visibility": "public"})
         recv_until(ws, "snapshot")

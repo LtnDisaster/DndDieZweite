@@ -394,3 +394,30 @@ First import `spells.csv` + `classes.csv` from `app/content_pack/` (DM → 🎲 
       and ownership are DM-assigned; a player can never take a companion they don't own.
 - [ ] Coin + balance + carried weight all still correct after reloading the page
       (state comes from the server, never recomputed in the client).
+
+## INTEGRATION HARDENING (Sprint 29, D100)
+
+These are the manual confirmations for the D100 fixes. Most are ALREADY covered by
+automated tests (`tests/test_d100_integration.py`); do them here to see the UX is honest.
+
+- [ ] **Autonomy lock.** As a PLAYER opening your own character sheet in the lobby
+      editor: changing Level, the spell list, or spell-slot maxima and saving must NOT
+      change those server-authorised values on reload (AC/HP/name/etc. ordinary fields
+      DO save). Level up / class via the in-room **Build** still works normally.
+- [ ] **Build stays open to the owner.** Player runs the Build (e.g. a level with a
+      skill/subclass choice) → it applies; the DM can also still advance a character
+      with the class control. Neither path is broken by the lock.
+- [ ] **Rest refusal.** A player triggering a long rest (which is DM-only) now sees a
+      clear "DM only" message instead of nothing happening; short-resting someone
+      else's token reports "Not your character".
+- [ ] **Cross-room item library (two rooms, DM in both).** Reusing one item-definition
+      id in a second room is refused with a clear message ("used by another room");
+      the first room's definition is unchanged. Item reads/grants in a room only ever
+      list that room's own definitions.
+- [ ] **Familiar cast.** A DM-created familiar carrying a registered ability (string id)
+      can still be cast by the player the DM assigned as its controller.
+
+> Note (not a browser step): the `node`-gated parity/diorama JS tests now execute in
+> the canonical Docker test run (node 22 added to the test stage), so the shipped
+> client JS — including `55_diorama.js`, which is only READ there — is verified in CI
+> rather than skipped.

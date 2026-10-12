@@ -584,3 +584,31 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [ ] **PHASE F (next):** overload MOVEMENT penalty (once fully specified/tested);
       content-configurable currency rate table; DM item-editor `carry_bonus` field;
       short-rest charge recharge.
+
+## Done — Sprint 29 Phase 1-5: Operation Integration (2026-10-12, D100)
+- [x] **G7 atomic cost:** op_id claim + slot/resource spend folded into ONE
+      `db.tx()` (`_cast_gate`, `app/abilities.py`); refused cost rolls the claim
+      back. Pinned by a synchronous thread-hammer (`_cast_gate`, max=1 → exactly 1
+      success), not the flaky async engine.
+- [x] **D100 autonomy lock:** editor `PUT /characters/{cid}` no longer writes
+      `level`/`spells`/`spell_slots`; raw `class_levels` WS is DM-only. Validated
+      `charbuild.apply` (owner/DM) + DM advance preserved; ordinary sheet fields stay
+      editable; no data migrated. `test_progression.py` / `test_sprint23_combat.py`
+      updated to stage authorised fields via the legitimate writers (`set_progression`).
+- [x] **G5:** non-DM `long_rest`/`short_rest` now returns an explicit error (no silence).
+- [x] **G8b:** `npc._clean_abilities` keeps a bare string ability id alongside prose, so
+      a familiar made through the real `add_token` path stays castable by its controller.
+- [x] **G9/A13:** `item_defs` create + CSV projection REFUSE a cross-room id collision
+      (global PK kept, no destructive rebuild); reads/delete/grant already room-scoped;
+      room-scoped `content` row still stored. Tests read `item_defs` by ROOM+id.
+- [x] **Node 22 in the test image** (`COPY --from=node22 /usr/local/bin/node`, test
+      stage only; no npm, no runtime change) → the ~17 node-gated parity/diorama tests
+      run the real shipped JS instead of skipping.
+- [x] **C1** WS flush-barrier in the mount/floor test (kills the historical flake);
+      **C2** room-qualified `containers`/`item_defs` test queries.
+- [x] `tests/test_d100_integration.py` (10): green end-to-end flow + each fix pinned.
+      Local suite `682 passed, 0 failed`. Docs: D100, AGENT_GUIDE (hazards), MANUAL.
+- [ ] **Follow-ups (honest limits):** per-room `item_defs` key (needs a schema rebuild —
+      now refused, not fixed); server-authorise ability SCORES/saves (still owner-editable
+      sheet fields, no confirmed exploit); `POST /characters` stays the trusted authoring/
+      seed surface; content-configurable currency table (carried from Phase E).

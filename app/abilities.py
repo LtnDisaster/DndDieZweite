@@ -290,8 +290,18 @@ def _rollable_by(defn, tok, is_dm):
     return defn["id"] in ((block or {}).get("abilities") or [])
 
 
-def _consume_cost(room_id, tok, defn, cast_level):
-    """Return (ok, error, consumed_desc). Mutates only on success."""
+class _CastRejected(Exception):
+    """Signal that a cast's cost could not be paid so the surrounding transaction
+    (including a just-inserted op_id claim) rolls back — a genuine retry with the
+    same op_id must not be swallowed by a failed first attempt."""
+
+
+def _consume_cost(c, room_id, tok, defn, cast_level):
+    """Return (ok, error, consumed_desc). EVERY read+write happens on the caller's
+    open transaction ``c`` (a BEGIN IMMEDIATE tx), so the "slots left?" check and
+    the increment share one write lock: two concurrent casts cannot both pass the
+    check and lose an increment (D100 / G7 — mirrors the single-tx legacy cast
+    path in room.dice). Mutates only on success."""
     cost = defn["cost"]
     if not cost:
         return True, None, None
@@ -305,29 +315,31 @@ def _consume_cost(room_id, tok, defn, cast_level):
             if not 1 <= cast_level <= 9 or cast_level < lvl:
                 return False, "Invalid cast level", None
             lvl = cast_level
-        slots_holder = None
         if tok["character_id"]:
-            ch = db.q1("SELECT id, spell_slots FROM characters WHERE id=?", (tok["character_id"],))
+            ch = c.execute("SELECT id, spell_slots FROM characters WHERE id=?",
+                           (tok["character_id"],)).fetchone()
             if ch is None:
                 return False, "Caster gone", None
             slots = gear.clean_slots(db.j(ch["spell_slots"], {}))
-            slots_holder = ("char", ch["id"])
+            holder = ("char", ch["id"])
         else:
-            block = npc.load(tok)
-            if block is None:
+            row = c.execute("SELECT npc FROM tokens WHERE id=?", (tok["id"],)).fetchone()
+            block = db.j(row["npc"], {}) if row else None
+            if not isinstance(block, dict):
                 return False, "Caster gone", None
             slots = gear.clean_slots(block.get("spell_slots", {}))
-            slots_holder = ("npc", tok["id"])
+            holder = ("npc", tok["id"])
         s = slots.get(lvl, {"max": 0, "used": 0})
         if s["used"] >= s["max"]:
             return False, f"No {lvl}-level spell slots left", None
         s["used"] += 1
-        _save_slots(slots_holder, slots)
+        _save_slots(c, holder, slots)
         return True, None, {"type": "spell_slot", "level": lvl}
     # generic resource (ki-like, charges, rage, …)
     rid = cost["id"]
     if tok["character_id"]:
-        ch = db.q1("SELECT id, resources FROM characters WHERE id=?", (tok["character_id"],))
+        ch = c.execute("SELECT id, resources FROM characters WHERE id=?",
+                       (tok["character_id"],)).fetchone()
         if ch is None:
             return False, "Caster gone", None
         resources = gear.clean_resources(db.j(ch["resources"], []))
@@ -337,10 +349,12 @@ def _consume_cost(room_id, tok, defn, cast_level):
         if target["current"] < 1:
             return False, "Resource exhausted", None
         target["current"] -= 1
-        db.x("UPDATE characters SET resources=? WHERE id=?", (db.json_dumps(resources), ch["id"]))
+        c.execute("UPDATE characters SET resources=? WHERE id=?",
+                  (db.json_dumps(resources), ch["id"]))
         return True, None, {"type": "resource", "id": rid}
-    block = npc.load(tok)
-    if block is None:
+    row = c.execute("SELECT npc FROM tokens WHERE id=?", (tok["id"],)).fetchone()
+    block = db.j(row["npc"], {}) if row else None
+    if not isinstance(block, dict):
         return False, "Caster gone", None
     resources = gear.clean_resources(block.get("resources", []))
     target = next((r for r in resources if r["id"] == rid), None)
@@ -348,19 +362,38 @@ def _consume_cost(room_id, tok, defn, cast_level):
         return False, "Resource not found or exhausted", None
     target["current"] -= 1
     block["resources"] = resources
-    db.x("UPDATE tokens SET npc=? WHERE id=?", (db.json_dumps(block), tok["id"]))
+    c.execute("UPDATE tokens SET npc=? WHERE id=?", (db.json_dumps(block), tok["id"]))
     return True, None, {"type": "resource", "id": rid}
 
 
-def _save_slots(holder, slots):
+def _save_slots(c, holder, slots):
+    """Persist a slot ledger through the caller's transaction ``c``. The NPC row is
+    RE-read inside the tx (never the pre-fetched token) so the increment rides the
+    freshest committed value under the write lock."""
     kind, ident = holder
     if kind == "char":
-        db.x("UPDATE characters SET spell_slots=? WHERE id=?", (db.json_dumps(slots), ident))
+        c.execute("UPDATE characters SET spell_slots=? WHERE id=?",
+                  (db.json_dumps(slots), ident))
     else:
-        tok = db.q1("SELECT npc FROM tokens WHERE id=?", (ident,))
+        tok = c.execute("SELECT npc FROM tokens WHERE id=?", (ident,)).fetchone()
         block = db.j(tok["npc"], {}) if tok else {}
         block["spell_slots"] = slots
-        db.x("UPDATE tokens SET npc=? WHERE id=?", (db.json_dumps(block), ident))
+        c.execute("UPDATE tokens SET npc=? WHERE id=?", (db.json_dumps(block), ident))
+
+
+def _cast_gate(room_id, tok, defn, cast_level, op_id):
+    """Claim the op_id (if any) and pay the cost in ONE BEGIN IMMEDIATE tx so the
+    slot/resource check is race-free. Returns (status, err, consumed) with status
+    in {"replayed", "fail", "ok"}. A refused cost rolls the tx back — including the
+    op_id claim — so a genuine retry is never swallowed."""
+    from . import inventory as INV
+    with db.tx() as c:
+        if op_id and not INV._claim(c, str(op_id)[:40], room_id, "ability_cast", tok["id"]):
+            return "replayed", None, None
+        ok, err, consumed = _consume_cost(c, room_id, tok, defn, cast_level)
+        if not ok:
+            raise _CastRejected(err)
+        return "ok", None, consumed
 
 
 def _roll_expr(expr, adv=None):
@@ -393,18 +426,27 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
         return _fail("Token has no usable stat block")
     if not _rollable_by(defn, tok, is_dm):
         return _fail("This caster does not have that ability")
-    if op_id:                                               # D93/D97 replay guard:
-        from . import inventory as INV                      # claim once, up-front —
-        with db.tx() as c:                                  # a duplicate consumes
-            if not INV._claim(c, str(op_id)[:40], room_id, "ability_cast", tok["id"]):
-                return {"ok": True, "replayed": True}       # no slot, no effect
     from . import progression
     char_level = progression.total_character_level(actor_sheet)
     if defn["cost"] is not None:
-        ok, err, consumed = _consume_cost(room_id, tok, defn, cast_level)
-        if not ok:
+        # D100/G7: claim + pay atomically in one tx so concurrent casts of the same
+        # caster cannot both pass a slot/resource check and lose an increment.
+        try:
+            status, err, consumed = _cast_gate(room_id, tok, defn, cast_level, op_id)
+        except _CastRejected as ex:
+            return _fail(str(ex))
+        if status == "replayed":
+            return {"ok": True, "replayed": True}          # duplicate op_id: no slot, no effect
+        if status == "fail":
             return _fail(err)
     else:
+        # Zero-cost (e.g. a cantrip): no counter to race, but still honour the
+        # op_id replay guard so a duplicate no-effect cast stays idempotent.
+        if op_id:
+            from . import inventory as INV
+            with db.tx() as c:
+                if not INV._claim(c, str(op_id)[:40], room_id, "ability_cast", tok["id"]):
+                    return {"ok": True, "replayed": True}
         consumed = None
 
     # SPRINT-20 (closes the limitation documented in D88): EVERYTHING about a

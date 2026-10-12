@@ -180,6 +180,14 @@ def test_floor_change_rejects_occupied_destination_and_cross_plane_mount(client)
         with ws_connect(client, dm, code) as wsd:
             wsd.send_json({"type": "forced_move", "token_id": blocker,
                            "kind": "teleport", "tx": cx + 6, "ty": cy + 6})
+            # DETERMINISTIC FLUSH (kills the historical flake): a chat echoed on
+            # the acting DM socket is processed on the DM loop only AFTER
+            # handle_forced_move has fully returned — i.e. the blocker's new cell
+            # is committed. Without this barrier the player's next token_floor can
+            # win the race and still see the destination occupied. Closing the DM
+            # socket here would drop that guarantee, so flush BEFORE closing.
+            wsd.send_json({"type": "chat", "text": "flush-freed"})
+            drain_events(wsd, "chat")
         wsp.send_json({"type": "token_floor", "token_id": mine["id"], "floor": "crypt"})
         assert recv_until(wsp, "token_floor")["payload"]["floor"] == "crypt"
         assert (state_of(client, player, code)["tokens"] and

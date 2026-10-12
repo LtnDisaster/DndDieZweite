@@ -93,9 +93,19 @@ def clean_npc(d):
 
 
 def _clean_abilities(v):
-    """Prose action entries ({name, desc}) — the 'Multiattack/Breath' block."""
+    """A mixed action list: prose entries ({name, desc} — the DM editor writes
+    those) OR a bare registered-ability id string. Prose keeps the {name, desc}
+    shape; a bare string is normalised to a canonical ability id so an NPC granted
+    ids through the REAL add_token/update_npc path stays castable — _rollable_by
+    reads exactly this list (D100/G8b: previously string ids were dropped here,
+    so only DM-controlled casts worked). Anything else is dropped."""
     out = []
     for a in (v or [])[:12]:
+        if isinstance(a, str):
+            s = a.strip().lower()[:32]
+            if s:
+                out.append(s)
+            continue
         if not isinstance(a, dict):
             continue
         name = str(a.get("name", ""))[:32].strip()

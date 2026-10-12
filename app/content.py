@@ -507,6 +507,14 @@ def _project_item(room_id, row):
     if defn is None:
         return "invalid"
     defn_id = defn.pop("id") or did
+    # D100: item_defs.id is a GLOBAL primary key — per-room duplicates would need a
+    # destructive table rebuild. If another room already owns this shared id, refuse
+    # rather than silently rewrite its DM-library row (its authoritative content row
+    # is already stored room-scoped, so nothing is LOST — only the shared library
+    # projection is skipped and reported). The caller surfaces it as a warning.
+    owner = db.q1("SELECT room_id FROM item_defs WHERE id=?", (defn_id,))
+    if owner is not None and owner["room_id"] != room_id:
+        raise ValueError("shared item id owned by another room")
     db.x("INSERT INTO item_defs(id,room_id,name,desc,kind,weight,stackable,props,created_by) "
          "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
          "desc=excluded.desc,kind=excluded.kind,weight=excluded.weight,"
@@ -620,9 +628,10 @@ def apply_rows(kind, room_id, clean_rows, mode="apply"):
         if kind == "item":
             try:
                 _project_item(room_id, row)
-            except Exception:                          # projection must never lose content
+            except Exception as ex:                      # projection must never lose content
                 stats.setdefault("warnings", []).append(
-                    f"item '{row['id']}' stored but not projected to the DM library")
+                    f"item '{row['id']}' stored but not projected to the DM library"
+                    + (f" ({ex})" if str(ex) else ""))
         elif kind == "spell":
             try:
                 _project_spell(row)

@@ -85,7 +85,8 @@ def test_chest_visible_without_contents_and_persists(client):
     assert "items" not in ch_obj and "items" not in str(st["item_defs"])
     assert "Trail Rations" not in str(st["grid"])        # nothing in the map
     # contents are DB truth and survive every refetch ("reconnect")
-    row = db.q1("SELECT items FROM containers WHERE object_id=?", ("chest",))
+    row = db.q1("SELECT items FROM containers WHERE room_id=(SELECT id FROM rooms WHERE code=?) "
+                "AND object_id=?", (code, "chest"))
     assert db.j(row["items"], [])[0]["qty"] == 4
     assert state_of(client, player, code)["grid"]["objects"]
 
@@ -183,7 +184,8 @@ def test_replayed_take_is_a_noop(client):
         ws.send_json(msg)                                   # wire-level replay
         assert "already applied" in recv_until(ws, "whisper")["payload"]["text"]
     assert _items(client, player, code)[0]["qty"] == 1   # not 2
-    assert db.q1("SELECT items FROM containers WHERE object_id=?", ("chest",))
+    assert db.q1("SELECT items FROM containers WHERE room_id=(SELECT id FROM rooms WHERE code=?) "
+                 "AND object_id=?", (code, "chest"))
 
 
 # ---------- reach and planes ----------
