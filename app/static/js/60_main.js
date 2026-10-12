@@ -302,6 +302,7 @@ async function appBoot(){
   wireNotes();
   wireQuestUI();
   wireRoomAtmosphere();
+  wireContent();
   clearPings();
   if (typeof DEBUG !== "undefined" && DEBUG) document.body.classList.add("dbg-on");
   try { await loadLobby(); }

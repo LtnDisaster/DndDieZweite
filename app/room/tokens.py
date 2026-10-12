@@ -469,9 +469,35 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
         await send_to(ws, "error", {"msg": "No valid placement for that footprint"})
         return
     x, y = placed
-    tid = db.x("INSERT INTO tokens (room_id,label,color,x,y,npc,size,disposition,fw,fh,floor) "
-               "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-               (room_id, label, color, x, y, db.json_dumps(block), size, disposition, fw, fh, fl))
+    # D99: a COMPANION is just a token bound to a character and/or an owner —
+    # the SAME tokens table columns a player token uses, set here by the DM only.
+    # No new entity, no new engine: owner_user_id grants control like any owned
+    # token, character_id links a sheet, and token_controller (D82) hands out
+    # operational control independently. A plain monster/NPC leaves both NULL.
+    owner_uid = None
+    if msg.get("owner_user_id") not in (None, "", 0):
+        try:
+            owner_uid = int(msg["owner_user_id"])
+        except (TypeError, ValueError):
+            owner_uid = None
+        if owner_uid is None or db.q1("SELECT 1 AS hit FROM room_members "
+                                      "WHERE room_id=? AND user_id=?",
+                                      (room_id, owner_uid)) is None:
+            return await send_to(ws, "error", {"msg": "Owner is not a member of this room"})
+    char_id = None
+    if msg.get("character_id") not in (None, "", 0):
+        try:
+            char_id = int(msg["character_id"])
+        except (TypeError, ValueError):
+            char_id = None
+        if char_id is None or db.q1("SELECT 1 AS hit FROM room_members "
+                                    "WHERE room_id=? AND character_id=?",
+                                    (room_id, char_id)) is None:
+            return await send_to(ws, "error", {"msg": "No such character in this room"})
+    tid = db.x("INSERT INTO tokens (room_id,label,color,x,y,npc,size,disposition,fw,fh,floor,"
+               "owner_user_id,character_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (room_id, label, color, x, y, db.json_dumps(block), size, disposition, fw, fh, fl,
+                owner_uid, char_id))
     tok = db.q1("SELECT * FROM tokens WHERE id=?", (tid,))
     sys_msg(room_id, f"DM added token '{label}'.")
     await broadcast_token_add(room_id, tok)

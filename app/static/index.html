@@ -268,18 +268,61 @@ window.addEventListener("unhandledrejection", function(ev){
             <select id="inv-def" title="DM item definition"></select>
             <input id="inv-qty" type="number" min="1" max="9999" value="1" style="width:64px">
             <button id="inv-grant">Grant</button>
+            <button id="inv-loaddef" class="ghost" title="load the selected definition into the editor below">✎ Edit</button>
           </div>
-          <div class="row">
-            <input id="inv-newname" placeholder="new item name" maxlength="48" style="flex:1">
-            <select id="inv-newkind" title="category"></select>
-            <label class="tiny" title="stacks as one entry"><input id="inv-newstack" type="checkbox">stk</label>
-            <input id="inv-newweight" type="number" min="0" max="9999" step="0.1" value="0" style="width:64px" title="weight">
-            <input id="inv-newdmg" type="text" maxlength="10" placeholder="dmg e.g. 1d8" style="width:88px" title="attack properties (only for kind weapon): damage dice — leave empty for a plain item">
-            <select id="inv-newdtype" style="width:96px" title="damage type"><option value="">type…</option><option>slashing</option><option>piercing</option><option>bludgeoning</option><option>fire</option><option>cold</option><option>lightning</option><option>poison</option><option>necrotic</option><option>radiant</option></select>
-            <select id="inv-newatab" style="width:88px" title="attack/damage ability"><option value="">abil…</option><option value="str">STR</option><option value="dex">DEX</option><option value="int">INT</option><option value="cha">CHA</option></select>
-            <label style="font-size:.72rem" title="adds the proficiency bonus to the attack roll"><input id="inv-newprof" type="checkbox"> prof</label>
-            <button id="inv-mkdef" title="save as reusable definition, then it can be granted and put into containers">+ Def</button>
-          </div>
+          <details class="sheet-sec" id="inv-defeditor"><summary>🧩 Item definition (weapon & magic)</summary>
+            <input type="hidden" id="inv-editid" value="">
+            <div class="row">
+              <input id="inv-newname" placeholder="item name" maxlength="48" style="flex:1">
+              <select id="inv-newkind" title="category"></select>
+              <label class="tiny" title="stacks as one entry"><input id="inv-newstack" type="checkbox">stk</label>
+              <input id="inv-newweight" type="number" min="0" max="9999" step="0.1" value="0" style="width:58px" title="weight (lb)">
+            </div>
+            <div class="row" title="weapon profile (kind weapon/wand/staff)">
+              <input id="inv-newdmg" type="text" maxlength="10" placeholder="dmg 1d8" style="width:80px" title="damage dice">
+              <input id="inv-newdmg2" type="text" maxlength="10" placeholder="2-h 1d10" style="width:80px" title="two-handed / versatile damage dice">
+              <label class="tiny"><input id="inv-newvers" type="checkbox" title="versatile: switchable grip picks the dice">ver</label>
+              <label class="tiny"><input id="inv-new2h" type="checkbox" title="two-handed: occupies both hands">2H</label>
+              <label class="tiny"><input id="inv-newfin" type="checkbox" title="finesse: uses the better of STR/DEX">fin</label>
+              <input id="inv-newreach" type="number" min="0" max="60" placeholder="reach" style="width:56px" title="reach (ft)">
+              <input id="inv-newrgn" type="number" min="0" max="600" placeholder="rng" style="width:52px" title="normal range (ft)">
+              <input id="inv-newrgl" type="number" min="0" max="600" placeholder="max" style="width:52px" title="long range (ft)">
+            </div>
+            <div class="row">
+              <select id="inv-newatab" style="width:80px" title="attack/damage ability"><option value="">abil…</option><option value="str">STR</option><option value="dex">DEX</option><option value="int">INT</option><option value="cha">CHA</option></select>
+              <label class="tiny"><input id="inv-newprof" type="checkbox" title="adds proficiency to the attack">prof</label>
+              <input id="inv-newatabonus" type="number" min="-10" max="10" placeholder="atk" style="width:52px" title="attack bonus (this weapon)">
+              <input id="inv-newdmbonus" type="number" min="-10" max="10" placeholder="dmg" style="width:52px" title="damage bonus (this weapon)">
+              <select id="inv-newdtype" style="width:92px" title="damage type"><option value="">type…</option><option>slashing</option><option>piercing</option><option>bludgeoning</option><option>fire</option><option>cold</option><option>lightning</option><option>poison</option><option>necrotic</option><option>radiant</option></select>
+              <input id="inv-newextra" type="text" maxlength="8" placeholder="+1d4" style="width:58px" title="extra damage dice">
+              <input id="inv-newextrat" type="text" maxlength="12" placeholder="fire" style="width:58px" title="extra damage type">
+            </div>
+            <div class="row" title="defence & character grants (active while worn/wielded)">
+              <input id="inv-newacbase" type="number" min="0" max="40" placeholder="AC" style="width:48px" title="armour base AC">
+              <input id="inv-newacbonus" type="number" min="-5" max="10" placeholder="+AC" style="width:52px" title="AC bonus">
+              <input id="inv-newacmaxdex" type="number" min="-1" max="99" placeholder="dexcap" style="width:60px" title="max dex to AC (-1 = unlimited)">
+              <input id="inv-newattrb" type="text" maxlength="32" placeholder="wis+2" style="width:74px" title="attribute bonus, e.g. wis+2,cha+2">
+              <input id="inv-newattrset" type="text" maxlength="16" placeholder="dex=15" style="width:70px" title="set score, e.g. dex=15">
+              <input id="inv-newdark" type="number" min="0" max="999" placeholder="dark" style="width:56px" title="darkvision ft">
+              <input id="inv-newspeed" type="number" min="-99" max="999" placeholder="spd" style="width:52px" title="speed bonus ft">
+            </div>
+            <div class="row" title="grants: skills/saves/expertise (comma lists) and charges/attunement">
+              <input id="inv-newskill" type="text" maxlength="48" placeholder="skills" style="width:110px" title="skill proficiencies, comma list">
+              <input id="inv-newexpert" type="text" maxlength="48" placeholder="expertise" style="width:110px" title="expertise, comma list">
+              <input id="inv-newsave" type="text" maxlength="24" placeholder="saves" style="width:90px" title="saving-throw proficiencies, comma list">
+              <input id="inv-newcharges" type="number" min="-1" max="999" placeholder="chg" style="width:52px" title="charges (-1 = none)">
+              <label class="tiny"><input id="inv-newrecharge" type="checkbox" title="recharge on a long rest">rechg</label>
+              <label class="tiny"><input id="inv-newmagic" type="checkbox" title="magic item">mag</label>
+              <label class="tiny"><input id="inv-newattune" type="checkbox" title="requires attunement">att</label>
+            </div>
+            <div class="row">
+              <input id="inv-newdesc" type="text" maxlength="200" placeholder="description / manual effect" style="flex:1" title="shown on the sheet">
+            </div>
+            <div class="row">
+              <button id="inv-mkdef" class="primary" title="save as a reusable definition (grants and containers can use it)">💾 Save definition</button>
+              <button id="inv-newclear" class="ghost" title="clear the editor for a new item">+ New</button>
+            </div>
+          </details>
         </div>
         <div id="inv-chest" class="hidden"></div>
       </div>
@@ -424,10 +467,35 @@ window.addEventListener("unhandledrejection", function(ev){
               <input id="enc-qty" type="number" min="1" max="50" value="1" style="width:54px">
               <label class="tiny"><input id="enc-hidden" type="checkbox"> hidden flag</label>
               <button id="btn-enc-add-row" class="ghost">＋ Add</button></div>
-            <div id="enc-rows" class="journal-list"></div>
+             <div id="enc-rows" class="journal-list"></div>
+          </div>
+        </details>
+        <details class="group">
+          <summary>📚 Rule packages <small style="opacity:.7">(CSV content, D95)</small></summary>
+          <div class="group-body">
+            <div class="row">
+              <input type="file" id="ct-file" accept=".csv,.zip" multiple>
+            </div>
+            <div class="row">
+              <select id="ct-mode" title="Import mode">
+                <option value="preview">Preview (validate only)</option>
+                <option value="apply">Apply (keep conflicts)</option>
+                <option value="replace">Replace (overwrite)</option>
+              </select>
+              <button id="btn-ct-upload" class="primary">Upload</button>
+            </div>
+            <div id="ct-report" class="journal-list" style="max-height:150px;overflow:auto"></div>
+            <div class="row"><small class="meta" style="opacity:.6" id="ct-kinds">Loading…</small></div>
+            <div class="row">
+              <select id="ct-export-kind" title="Export one kind"></select>
+              <button id="btn-ct-export" class="ghost">⬇ CSV</button>
+              <button id="btn-ct-export-zip" class="ghost">⬇ All (ZIP)</button>
+            </div>
+            <div class="row"><small class="meta" style="opacity:.6">Guide: <code>docs/CSV_CONTENT_GUIDE.md</code></small></div>
           </div>
         </details>
         <div id="editor" class="hidden">
+
           <div class="row brushes">
             <button class="brush" data-b="wall" title="Wall (blocks path)">🧱</button>
             <button class="brush" data-b="floor" title="Floor">⬜</button>
@@ -546,6 +614,7 @@ window.addEventListener("unhandledrejection", function(ev){
 <script src="/static/js/50_canvas.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/55_diorama.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/60_main.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/70_content.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/99_boot.js?v=__BUILDTOKEN__"></script>
 </body>
 </html>

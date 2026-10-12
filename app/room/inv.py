@@ -20,6 +20,16 @@ def _op(msg):
     return v or None
 
 
+def _coins_to_cp(msg):
+    """(integer amount, coin id) -> copper, via the SSOT converter. A client can
+    only ever send a denomination + whole count — never a raw copper total."""
+    from .. import gear
+    try:
+        return gear.to_cp(msg.get("amount"), msg.get("coin", "cp"))
+    except ValueError as ex:
+        raise INV.InvError(str(ex))
+
+
 async def _sheet_char(ws, room_id, user, is_dm, msg):
     """Character of THIS room whose sheet the sender may manage, else None."""
     ch = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("char_id", -1),))
@@ -217,7 +227,85 @@ async def handle_inv_equip(ws, room_id, user, is_dm, msg):
     await broadcast(room_id, "inv_changed", None)
 
 
-# ---------- world containers ----------
+async def handle_inv_grip(ws, room_id, user, is_dm, msg):
+    """D98: choose one/two-handed grip for an equipped versatile weapon."""
+    ch = await _sheet_char(ws, room_id, user, is_dm, msg)
+    if ch is None:
+        return
+    item_id = str(msg.get("item_id", "") or "")[:16]
+    try:
+        res = INV.set_grip(room_id, ch["id"], item_id, msg.get("grip", "one"), _op(msg))
+    except INV.InvError as ex:
+        await send_to(ws, "error", {"msg": str(ex)})
+        return
+    if res == "replay":
+        await send_to(ws, "whisper", {"text": "⚠️ That action was already applied."})
+        return
+    await broadcast(room_id, "inv_changed", None)
+
+
+async def handle_inv_money(ws, room_id, user, is_dm, msg):
+    """D99: grant/deduct (DM) or transfer (owner) coin. Amount is ALWAYS an
+    integer + denomination converted through gear.to_cp — a client can never
+    send a copper total that mints money. Debit/credit are atomic and guarded
+    against negative balances inside app/inventory.py."""
+    from .. import gear
+    action = str(msg.get("action", ""))
+    try:
+        cp = gear.to_cp(msg.get("amount"), msg.get("coin", "cp"))
+    except ValueError as ex:
+        await send_to(ws, "error", {"msg": str(ex)})
+        return
+    if action in ("grant", "deduct"):
+        if not is_dm:
+            await send_to(ws, "error", {"msg": "DM only"})
+            return
+        ch = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("char_id", -1),))
+        if ch is None or db.q1("SELECT 1 AS hit FROM room_members WHERE room_id=? AND character_id=?",
+                               (room_id, ch["id"])) is None:
+            await send_to(ws, "error", {"msg": "No such character"})
+            return
+        fn = INV.grant_coins if action == "grant" else INV.remove_coins
+        verb = "gives" if action == "grant" else "takes"
+        try:
+            res = fn(room_id, ch["id"], cp, _op(msg))
+        except INV.InvError as ex:
+            await send_to(ws, "error", {"msg": str(ex)})
+            return
+        if res == "replay":
+            await send_to(ws, "whisper", {"text": "⚠️ That action was already applied."})
+            return
+        await broadcast(room_id, "inv_changed", None)
+        line = f"🪙 The DM {verb} {ch['name']} {gear.cp_label(cp)}."
+        sys_msg(room_id, line)
+        if ch["user_id"] != user["id"]:
+            await send_user(room_id, ch["user_id"], "whisper", {"text": line})
+        return
+    if action == "transfer":
+        ch = await _sheet_char(ws, room_id, user, is_dm, msg)
+        if ch is None:
+            return
+        to = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("to_char_id", -1),))
+        if to is None or to["id"] == ch["id"]:
+            await send_to(ws, "error", {"msg": "Who is that?"})
+            return
+        if db.q1("SELECT 1 AS hit FROM room_members WHERE room_id=? AND character_id=?",
+                 (room_id, to["id"])) is None:
+            await send_to(ws, "error", {"msg": "Who is that?"})
+            return
+        try:
+            res = INV.transfer_coins(room_id, ch["id"], to["id"], cp, _op(msg))
+        except INV.InvError as ex:
+            await send_to(ws, "error", {"msg": str(ex)})
+            return
+        if res == "replay":
+            await send_to(ws, "whisper", {"text": "⚠️ That transfer was already applied."})
+            return
+        await broadcast(room_id, "inv_changed", None)
+        sys_msg(room_id, f"🤝 {ch['name']} hands {gear.cp_label(cp)} to {to['name']}.")
+        return
+    await send_to(ws, "error", {"msg": "Unknown money action"})
+
 
 async def handle_inv_container(ws, room_id, user, is_dm, msg):
     """inspect / move (put-or-take) / fill / remove against a container object.
@@ -245,7 +333,7 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
             await send_to(ws, "error", {"msg": "Walk up to it first"})
             return
     ch = None
-    if action in ("move", "put", "take"):                 # need a character
+    if action in ("move", "put", "take", "coins_take"):      # need a character
         ch = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("char_id", -1),))
         if ch is None or (not is_dm and ch["user_id"] != user["id"]):
             await send_to(ws, "error", {"msg": "Not your character"})
@@ -257,9 +345,10 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
     if action == "inspect":
         await send_to(ws, "inv_contents",
                       {"object_id": oid, "label": obj.get("label", ""),
-                       "floor": fl, "items": INV.container_peek(room_id, oid)})
+                       "floor": fl, "items": INV.container_peek(room_id, oid),
+                       "coins": INV.container_coins_peek(room_id, oid)})
         return
-    if action in ("fill", "remove") and not is_dm:
+    if action in ("fill", "remove", "coins_fill") and not is_dm:
         await send_to(ws, "error", {"msg": "DM only"})
         return
     try:
@@ -287,6 +376,11 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
             res = INV.container_move(room_id, oid, ch["id"],
                                      str(msg.get("item_id", ""))[:16],
                                      msg.get("qty", 1), _op(msg))
+        elif action == "coins_fill":
+            res = INV.container_fill_coins(room_id, oid, _coins_to_cp(msg), _op(msg))
+        elif action == "coins_take":
+            res = INV.container_take_coins(room_id, ch["id"], oid,
+                                           _coins_to_cp(msg), _op(msg))
         else:
             return
     except INV.InvError as ex:
@@ -294,6 +388,17 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
         return
     if res == "replay":
         await send_to(ws, "whisper", {"text": "⚠️ That action was already applied."})
+        return
+    if action in ("coins_fill", "coins_take"):
+        from .. import gear
+        await send_to(ws, "inv_contents",
+                      {"object_id": oid, "label": obj.get("label", ""),
+                       "floor": fl, "items": INV.container_peek(room_id, oid),
+                       "coins": INV.container_coins_peek(room_id, oid)})
+        await broadcast(room_id, "inv_changed", None)
+        if action == "coins_take":
+            sys_msg(room_id, f"🪙 {user['username']} takes {gear.cp_label(res['cp'])}"
+                             f" from the {obj['label']}.")
         return
     if action == "fill":
         await send_to(ws, "inv_contents",

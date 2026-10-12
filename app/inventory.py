@@ -256,15 +256,37 @@ def equip_slot(room_id, char_id, slot, item_id, op_id=None):
             raise InvError("Item not found")
         if not gear.can_equip(it, slot, equip, items):
             raise InvError(f"{it['name']} does not fit the {slot.replace('_', ' ')}")
-        if (it.get("props") or {}).get("two_handed") and slot == "main_hand":
-            equip["off_hand"] = None            # two-handed: the off hand is free
+        if gear.wields_two_handed(it) and slot == "main_hand":
+            equip["off_hand"] = None            # two-hander / versatile gripped two: off hand frees
         if slot == "off_hand":
             held = find(items, equip.get("main_hand"))
-            if held and (held.get("props") or {}).get("two_handed"):
+            if held and gear.wields_two_handed(held):
                 raise InvError(f"{it['name']} does not fit the off hand")
         equip[slot] = it["id"]
         return {"slot": slot, "item": it["name"]}
     return mutate_char(room_id, char_id, fn, op_id, "equip")
+
+
+def set_grip(room_id, char_id, item_id, grip, op_id=None):
+    """D98: choose how a VERSATILE weapon currently wielded in the MAIN hand is
+    gripped — one-handed (base dice, off hand free) or two-handed (the two-handed
+    dice, off hand cleared so a shield returns to the pack). The whole decision —
+    including the hand/shield conflict — is resolved atomically in one claim."""
+    grip = "two" if str(grip).lower() in ("two", "2h", "two-handed", "2") else "one"
+
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        if equip.get("main_hand") != it["id"]:
+            raise InvError("Equip it in the main hand first")
+        if not (it.get("props") or {}).get("versatile"):
+            raise InvError(f"{it['name']} is not a versatile weapon")
+        it["grip"] = grip
+        if grip == "two":
+            equip["off_hand"] = None
+        return {"item": it["name"], "grip": grip}
+    return mutate_char(room_id, char_id, fn, op_id, f"grip:{grip}")
 
 
 # ---------- transfers (both sides in ONE transaction) ----------
@@ -385,3 +407,142 @@ def container_move(room_id, object_id, char_id, item_id, qty, op_id=None):
         strip_slots(equip_s, items_s)
         _store(c, char_id, items_s, equip_s)
     return {"name": name, "qty": q, "direction": direction, "item_id": got["id"]}
+
+
+# ---------- D99: currency (integer copper pieces) ----------
+# A purse is ONE non-negative integer of copper pieces (see gear.py). Amounts
+# ALWAYS arrive as (integer, denomination) and convert through gear.to_cp — a
+# client can never send a copper total that would mint money. Every mutation is
+# transactional (BEGIN IMMEDIATE), replay-guarded by an op_id namespaced to the
+# character/object it acts on, and can NEVER drive a balance negative: a
+# shortfall raises BEFORE any store, so the whole transaction rolls back.
+
+def wallet_of(row):
+    return gear.clean_wallet(row.get("wallet", 0) if isinstance(row, dict) else 0)
+
+
+def _wallet_store(c, char_id, cp):
+    c.execute("UPDATE characters SET wallet=? WHERE id=?",
+              (gear.clean_wallet(cp), char_id))
+
+
+def _wallet_read(c, char_id):
+    r = c.execute("SELECT wallet FROM characters WHERE id=?", (char_id,)).fetchone()
+    if r is None:
+        raise InvError("No such character")
+    return gear.clean_wallet(r["wallet"])
+
+
+def mutate_wallet(room_id, char_id, fn, op_id=None, kind="coins"):
+    """fn(copper)->(new_copper, result). The read happens INSIDE the tx, so two
+    operations on one purse serialise on the DB, never a lost update."""
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, kind, char_id):
+            return "replay"
+        new_cp, res = fn(_wallet_read(c, char_id))
+        new_cp = gear.clean_wallet(new_cp)
+        if new_cp < 0:
+            raise InvError("Not enough coin")
+        _wallet_store(c, char_id, new_cp)
+    return res
+
+
+def grant_coins(room_id, char_id, cp, op_id=None):
+    """DM adds coin to a purse."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    return mutate_wallet(room_id, char_id,
+                         lambda cur: (cur + cp, {"cp": cp}), op_id, "coins_grant")
+
+
+def remove_coins(room_id, char_id, cp, op_id=None):
+    """DM withdraws coin; a shortfall refuses the whole op."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    def fn(cur):
+        if cur < cp:
+            raise InvError("Not enough coin")
+        return (cur - cp, {"cp": cp})
+    return mutate_wallet(room_id, char_id, fn, op_id, "coins_remove")
+
+
+def transfer_coins(room_id, from_char, to_char, cp, op_id=None):
+    """Player→player hand-off. Both characters are members of THIS room (checked
+    by _validate_parties); the debit and the credit commit together or not at all."""
+    _validate_parties(room_id, from_char, to_char)
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "coins_transfer", from_char):
+            return "replay"
+        src = _wallet_read(c, from_char)
+        dst = _wallet_read(c, to_char)
+        if src < cp:
+            raise InvError("Not enough coin")
+        if dst + cp > gear.WALLET_MAX:
+            raise InvError("Recipient purse is full")
+        _wallet_store(c, from_char, src - cp)
+        _wallet_store(c, to_char, dst + cp)
+    return {"cp": cp, "to": to_char}
+
+
+# ---------- D99: container coin (loot a character can scoop out) ----------
+
+def container_coins_peek(room_id, object_id):
+    row = db.q1("SELECT coins FROM containers WHERE room_id=? AND object_id=?",
+                (room_id, object_id))
+    return gear.clean_wallet(row["coins"]) if row else 0
+
+
+def _container_coins_read(c, room_id, object_id):
+    r = c.execute("SELECT coins FROM containers WHERE room_id=? AND object_id=?",
+                  (room_id, object_id)).fetchone()
+    return gear.clean_wallet(r["coins"]) if r else 0
+
+
+def _container_coins_store(c, room_id, object_id, cp):
+    # UPSERT touching ONLY coins + updated_at; the items column is left untouched
+    # (on a fresh row it keeps its '{}' default) so coin and item paths can't
+    # clobber each other regardless of which runs first.
+    c.execute("INSERT INTO containers(room_id,object_id,coins,updated_at) "
+              "VALUES(?,?,?,datetime('now')) ON CONFLICT(room_id,object_id) "
+              "DO UPDATE SET coins=excluded.coins, updated_at=excluded.updated_at",
+              (room_id, object_id, gear.clean_wallet(cp)))
+
+
+def container_fill_coins(room_id, object_id, cp, op_id=None):
+    """DM fills (or a player drops) coin into a container."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_coins_fill", object_id):
+            return "replay"
+        cur = _container_coins_read(c, room_id, object_id)
+        if cur + cp > gear.WALLET_MAX:
+            raise InvError("Hoard too large")
+        _container_coins_store(c, room_id, object_id, cur + cp)
+    return {"cp": cp}
+
+
+def container_take_coins(room_id, char_id, object_id, cp, op_id=None):
+    """A character moves coin OUT of a container into their purse — one tx, one
+    op_id claim namespaced to the object, so a double-click cannot duplicate it."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_coins_take", object_id):
+            return "replay"
+        hoard = _container_coins_read(c, room_id, object_id)
+        if hoard < cp:
+            raise InvError("Not enough coin in the container")
+        purse = _wallet_read(c, char_id)
+        if purse + cp > gear.WALLET_MAX:
+            raise InvError("Your purse is full")
+        _container_coins_store(c, room_id, object_id, hoard - cp)
+        _wallet_store(c, char_id, purse + cp)
+    return {"cp": cp}

@@ -19,10 +19,10 @@
   if (typeof console !== "undefined" && console.log) console.log("BUILD " + EXPECTED);
 
   const MODULES = ["10_core.js", "20_lobby.js", "30_room.js", "40_ws.js",
-                   "50_canvas.js", "55_diorama.js", "60_main.js", "99_boot.js"];
+                   "50_canvas.js", "55_diorama.js", "60_main.js", "70_content.js", "99_boot.js"];
   const REQUIRED = ["gridOrigin", "w2s", "s2w", "wIdx", "api", "toast", "esc", "show",
                     "openRoom", "refreshRoom", "resize", "drawTactical", "drawDiorama",
-                    "wsSend", "setViewMode", "myToken", "cellSize", "appBoot"];
+                    "wsSend", "setViewMode", "myToken", "cellSize", "appBoot", "wireContent"];
   const defined = function(name){
     try { return new Function("return typeof " + name + ";")() !== "undefined"; }
     catch (e){ return false; }

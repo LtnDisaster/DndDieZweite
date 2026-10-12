@@ -1,0 +1,4 @@
+id,name,size,speed_ft,fly_ft,swim_ft,climb_ft,darkvision_ft,ability_bonuses,languages,traits,image,manual
+kin_fey,Fey-kin,medium,30,,,,60,dex+2,"Common, Sylvan",Darkvision 60 ft; Fey ancestry,,
+kin_stoutheart,Stoutheart,medium,25,,,,60,con+2,"Common, Understone",Darkvision 60 ft; Sturdy,,Stonecunning is adjudicated by the DM
+kin_kit,Kit-kin,small,30,,,,,"dex+1, int+1","Common, Kit",Clever; Small size,,

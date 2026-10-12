@@ -487,3 +487,100 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [x] tests/test_sprint24_hardening.py (7 live-dispatch adversarial tests)
 - [ ] DEFERRED: live range/reach pin (harness grant-of-2nd-def flaky — server
       gate itself implemented; skip marker carries the reason)
+
+## Done — Sprint 25 Phase A: CSV content packages (2026-10-12, D95)
+- [x] `app/content.py` — ONE content engine: 8-kind schema (species/class/subclass/
+      item/spell/background/feat/creature), parse/validate(file/line/column),
+      idempotent apply + conflict/replace, ZIP auto-detect, export with formula
+      escaping; **no code executed from CSV**; size/row/zip-bomb guards.
+- [x] Reuses the engines (no second engine): items→`item_defs`(typed combat props,
+      `weapon_profiles` reads range), spells→`abilities.register` (slot cost),
+      everything else read back from `content` (Phase B/sheet). Restart-safe
+      (`main.startup` re-registers abilities from the DB).
+- [x] `content` table `(kind,room_id,id)` in `db.py` (additive; room 0 = global).
+- [x] `app/content_api.py` — DM-only REST `/api/content/{code}` import(preview/apply/
+      replace)/export(one|zip)/kinds; raw-body transport (no python-multipart).
+- [x] `app/content_pack/*.csv` technical pack (original names; ATTRIBUTION.md).
+- [x] DM "📚 Rule packages" panel + `app/static/js/70_content.js` (registered in the
+      D78 integrity gate). Guide: `docs/CSV_CONTENT_GUIDE.md`.
+- [x] `tests/test_content.py` + `tests/test_content_examples.py` (16 doc examples
+      imported by the real importer). **Canonical (py3.12): 593 passed, 18 skipped.**
+- [ ] **PHASE C:** known-vs-prepared spell model; slot-progression TABLE (D58).
+
+## Done — Sprint 25 Phase B: chronological character build (2026-10-12, D96)
+- [x] `app/charbuild.py` — pure `plan()`/`apply()` Stufe 1–20 from D95 content;
+      drives ONLY the existing engines (`progression.set_class_levels`, HP from
+      `hp_base`/`hp_per_level`, `gear.clean_saves/clean_skills`, ASI/feat→`stats`).
+      No second engine; slots never derived from total level (D58).
+- [x] Additive `characters.build` ledger (class, applied_through, subclass,
+      per-level decisions, `base_stats` snapshot). Idempotent forward recompute;
+      missing choices → `needs_choice` writes nothing; rebuild ≤ applied_through refused.
+- [x] `app/charbuild_api.py` room-scoped `/api/build/{code}/{cid}` plan/apply;
+      authz mirrors `class_levels` (owner / room-DM via `room_members`).
+- [x] Room-sheet "⬆️ Build / Level-up" section (generic; renders chronology, POSTs
+      choices; no class logic in the client).
+- [x] `tests/test_charbuild.py` (Stufe 1/8/20 chronology, subclass/ASI/feat on
+      their levels, needs_choice no-write, repeat/forward guard, restart ledger,
+      owner-vs-DM-vs-outsider authz).
+## Done — Sprint 25 Phase C: class spellcasting through the existing engines (2026-10-12, D97)
+- [x] Content schema additive: `spell_first_level`/`spell_replace`/`class_resource_reset`
+      (class) + `scale_tiers` (spell); `slot_progression` is now a per-class-level
+      **TABLE the build READS** (never derived from total level, D58).
+- [x] `charbuild`: known-model classes CHOOSE at each total-delta level
+      (`needs_choice`), prepared-model use the class list; writes castable
+      `abilities`, display `spells`, the slot table and `class_resource` → the
+      generic `resources` list. Non-casters write none of the spell columns.
+- [x] `abilities.execute`: `cast_level` (upcast `upcast_step`) and cantrip
+      `scale_tiers` applied generically into the ONE base dice term; `op_id` is
+      claimed up-front inside the write tx → one slot and one effect per request.
+- [x] `handle_long_rest` also refills short-reset class resources (long ≥ short).
+- [x] Sheet spellbook: registered spells cast via `ability_cast` (+ upcast level
+      select), AoE aimed from the map; `gear.clean_spells` carries `targeting`.
+- [x] Pack templates `adept`/`warden`/`seer` + `scale_tiers`/`upcast_step` spells.
+- [x] `tests/test_spells.py` — models, slot-table-vs-total-level, choice no-write,
+      forward idempotency, resource reset, upcast/cantrip scaling, dup-op_id guard.
+## Done — Sprint 27 Phase D: weapons, equipment & magic items through the one engine (2026-10-12, D98)
+- [x] `gear.effective_gear` — a DERIVED, transient equipment overlay (stats/sets/
+      darkvision/speed) consumed by `_stat_mod`/`skill_bonus`/`save_bonus`/
+      `compute_ac`/`clean_speeds`/`weapon_profiles`; never persisted, base stats
+      never mutated (equip/unequip/restart can't double-apply or go stale).
+- [x] `gear.clean_props` = THE single prop validator (DM defs + content import).
+      Five bonus scopes distinguished: per-weapon, general (`attribute_*`),
+      while-equipped, while-attuned (`attune` gate → inert until attuned), on-consume.
+- [x] Weapons: one/two/versatile grip (`inv_grip`, off-hand cleared atomically, dice
+      chosen), finesse/ranged ability choice, ability-mod-to-damage default,
+      `extra_damage_dice/_type`, long-range tiers (≤normal ok / ≤long dis / beyond
+      invalid, advantage cancels), `ac_base`/`ac_bonus`/`ac_max_dex` in AC.
+- [x] `items.csv` additive: `hands`; `charges`/`recharge`/`attune`/`heal_dice` now
+      projected into the definition and promoted onto the inventory entry.
+- [x] Sheet + DM editor (browser): item-definition editor (kind/grip/dice/range/AC/
+      attribute/grant/magic + `✎ Edit` reload), grip toggle, effective speed +
+      darkvision, gated 🔒, longer/extra damage shown; legacy math byte-identical.
+- [x] `tests/test_weapons_gear.py` + `tests/test_content_examples.py` (ranged,
+      attribute bonus/set, multi-effect). Docs: D98, CSV guide (items section 4.4 +
+      section 7 + examples), AGENT_GUIDE, MANUAL.
+
+## Done — Sprint 28 Phase E: currency, carrying & companions (2026-10-12, D99)
+- [x] Currency: ONE server-owned integer of **copper** (`characters.wallet`),
+      `gear.CURRENCIES` data table (cp/sp/ep/gp/pp, coin weight 0.02 lb),
+      `to_cp`/`cp_breakdown`/`cp_label`; a client sends only (int, coin) → never
+      mints gold. DM grant/deduct, player→member **transfer** (atomic, replay),
+      container **loot** (`coins_fill`/`coins_take`, one object-namespaced claim);
+      no-negative rollback; all through `inventory.py` + `op_id` replay.
+- [x] Encumbrance: DERIVED (`gear.encumbrance`) — `qty×weight` per distinct stack
+      (equipped counted once, never double), coins weigh the shown split, capacity
+      = effective STR × `CARRY_PER_STR`(15) × `SIZE_CARRY` × + worn `carry_bonus`.
+      `overloaded` is a WARN only — no movement penalty yet. `characters.size` +
+      `items.carry_bonus` additive.
+- [x] Companions = existing tokens with `owner_user_id`/`character_id` (DM binds in
+      `add_token`); control via D82 `token_controller` (DM-only, room member),
+      riding via `token_mount`; a player can never seize a foreign companion and
+      only sees already-visible tokens (no hidden/other-plane leak).
+- [x] Sheet collapsibles (Wallet / Encumbrance / Companions) + DM grant/deduct +
+      container coin row; reload-stable (all derived, server-rendered).
+- [x] `tests/test_money_encumbrance.py` (18) + `tests/test_content_examples.py`
+      (carry_bonus example). Docs: D99, CSV guide (section 8 + items `carry_bonus`
+      + example 15b), AGENT_GUIDE, MANUAL.
+- [ ] **PHASE F (next):** overload MOVEMENT penalty (once fully specified/tested);
+      content-configurable currency rate table; DM item-editor `carry_bonus` field;
+      short-rest charge recharge.

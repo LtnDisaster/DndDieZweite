@@ -190,6 +190,17 @@ CREATE TABLE IF NOT EXISTS inv_ops (
     kind TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS content (
+    kind TEXT NOT NULL,
+    room_id INTEGER NOT NULL,
+    id TEXT NOT NULL,
+    name TEXT DEFAULT '',
+    data TEXT DEFAULT '{}',
+    source TEXT DEFAULT '',
+    version INTEGER DEFAULT 1,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (kind, room_id, id)
+);
 """
 
 
@@ -303,6 +314,19 @@ def init_db():
     # D92: explicit EQUIPMENT slots (main_hand/off_hand/armor/acc1..acc3 → item id).
     # '{}' = no explicit rig ⇒ gear.compute_ac keeps the legacy auto-derivation.
     migrate("characters", "equipment", "equipment TEXT DEFAULT '{}'")
+    # D96: chronological character-build ledger (Stufe 1–20). '' = unbuilt.
+    # Purely additive bookkeeping: which class, which level is applied THROUGH,
+    # the subclass and the per-level choices. The MECHANICAL writes still go
+    # through progression.set_class_levels + gear cleaners — this column never
+    # becomes a second source of truth for level/HP/abilities.
+    migrate("characters", "build", "build TEXT DEFAULT ''")
+    # D99: money is ONE integer of copper pieces (never a float, never a per-coin
+    # dict that could go negative per denomination); size feeds the encumbrance
+    # size modifier; container coins are loot a character can take (also copper).
+    # All purely additive — existing rows read their defaults, no migration data.
+    migrate("characters", "wallet", "wallet INTEGER DEFAULT 0")
+    migrate("characters", "size", "size TEXT DEFAULT 'medium'")
+    migrate("containers", "coins", "coins INTEGER DEFAULT 0")
     c.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_type_created "
               "ON messages (room_id, type, created_at)")
     c.commit()

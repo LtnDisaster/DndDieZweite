@@ -19,7 +19,7 @@ from .items import handle_attune, handle_identify, handle_recharge, handle_use_i
 from .fog import handle_fog_edit, handle_fog_toggle
 from .interact import handle_interact
 from .inv import (handle_inv_adjust, handle_inv_container, handle_inv_equip,
-                  handle_inv_grant, handle_inv_remove, handle_inv_transfer,
+                  handle_inv_grant, handle_inv_grip, handle_inv_money, handle_inv_remove, handle_inv_transfer,
                   handle_item_def)
 from .movement import handle_move, handle_path_preview, handle_stop_move
 from .moveforced import handle_forced_move
@@ -195,6 +195,8 @@ HANDLERS = {
     "inv_adjust": handle_inv_adjust,           # D92: split/combine (owner)
     "inv_transfer": handle_inv_transfer,       # D92: member→member hand-off
     "inv_equip": handle_inv_equip,             # D92: (un)equip a slot
+    "inv_grip": handle_inv_grip,               # D98: versatile one/two-handed grip
+    "inv_money": handle_inv_money,             # D99: grant/deduct (DM) / transfer (owner) coin
     "inv_container": handle_inv_container,     # D92: world container inspect/move
 }
 

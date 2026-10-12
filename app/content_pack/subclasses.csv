@@ -1,0 +1,9 @@
+id,class_id,level,name,features,spells_grant,needs_choice,manual
+tradition_stalker,scout,3,Stalker Tradition,Careful Step; climb speed equals walking speed,,,
+tradition_stalker,scout,9,Vanishing Step,Hide with a Bonus action,,,
+tradition_stalker,scout,13,Evasive Footwork,Take no damage when you move away,,,
+tradition_stalker,scout,17,Uncatchable,Only an opportunity attack can stop you,,,
+school_ember,adept,2,Ember School,Ember Affinity; learn a bonus fire spell,"bolt, spark",,
+school_ember,adept,6,Shielded Ember,Reactions resist fire damage,,,
+school_ember,adept,10,Burn Away,"Once per rest, burn conditions",,,
+school_ember,adept,14,Ember Storm,Area feature,,,area burst resolved by the DM

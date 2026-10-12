@@ -121,6 +121,9 @@ def _char_row(r, mask_items=False):
     # D92: parsed BEFORE ac_total — compute_ac switches to equipped mode off
     # this column; clean_equipment drops dangling refs at READ time too.
     r["equipment"] = gear.clean_equipment(db.j(r.get("equipment"), {}), r["items"])
+    # D99: money is one integer of copper; size drives the encumbrance modifier.
+    r["wallet"] = gear.clean_wallet(r.get("wallet", 0))
+    r["size"] = gear.clean_size(r.get("size"))
     r["hit_dice_max"] = gear.hit_dice_max(r)
     r["hit_dice_spent"] = max(0, min(gear.hit_dice_max(r), int(r.get("hit_dice_spent") or 0)))
     r["has_spellbook"] = gear.has_spellbook(r["items"])
@@ -139,6 +142,18 @@ def _char_row(r, mask_items=False):
         "initiative": gear.dex_mod(r),
         "attack_profiles": gear.weapon_profiles(r),
         "attune_max": gear.ATUNE_MAX,
+        # D98: worn/wielded-derived values the sheet must show but must never
+        # recompute — darkvision granted by gear, and the effective walk speed
+        # (base + any speed_bonus_ft from worn items).
+        "darkvision_ft": gear.effective_gear(r)["darkvision_ft"],
+        "speed_effective": gear.clean_speeds(r)["walk"],
+        # D99: the purse (copper + a display breakdown + the currency table the
+        # sheet renders) and the derived carrying report. Both are READ-only
+        # server derivations — the client renders, never recomputes, so a client
+        # can never inflate its own gold or shrink its own load.
+        "wallet": {"cp": r["wallet"], "coins": gear.cp_breakdown(r["wallet"]),
+                   "currencies": gear.currency_table()},
+        "encumbrance": gear.encumbrance(r, r["wallet"]),
     }
     return r
 

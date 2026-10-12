@@ -1630,3 +1630,250 @@ lines name conditions by design (public table record, D90).
   guard, documented in `test_duplicate_op_id_changed_payload_is_silent`).
   DM-side damage dice caps remain DM-trust territory (a DM can author any
   NPC bonus anyway — D92 doctrine).
+
+## D95 — CSV content packages are DATA read by the existing engines, never code; a generic room-scoped `content` table is the round-trip source of truth
+
+- **Context:** Sprint 25 asks for hand-editable rule content (weapons, armour,
+  spells, species, classes/subclasses, backgrounds, feats, creatures) without a
+  second combat/dice/character/spell engine and without ever executing code from
+  a file. The engines (gear/abilities/progression/health/dice) already own the
+  MECHANICS; what was missing is a place to describe WHAT exists and its
+  PARAMETERS, editable by a DM and versionable as text.
+- **Decision:**
+  - ONE CONTENT ENGINE (`app/content.py`). It PARSES and VALIDATES CSV against a
+    per-kind column schema (spec = key/required/vtype/default) and stores the
+    validated row as JSON in a generic `content(kind, room_id, id)` table — that
+    JSON is the round-trip source of truth for export. It NEVER evaluates code;
+    anything no engine implements is carried as `manual`/`needs_choice` TEXT and
+    only displayed. Validation reports file/line/column; one bad row refuses only
+    its own file; unknown files are skipped; size/row/zip-uncompressed caps stop
+    zip-bombs. Import modes preview/apply/replace; apply is IDEMPOTENT (an
+    identical row re-imports as `unchanged`, a DIFFERENT existing id is a
+    CONFLICT that apply refuses and replace overwrites).
+  - REUSE, NOT REPLACE. Content only projects into the LIVE systems where a
+    mechanic already exists: an `item` row becomes an `item_defs` row (D92/D93
+    DM library — `gear.weapon_profiles` reads the TYPED combat props, and
+    `range_normal_ft` maps to the single `range_ft` that profile consumes); a
+    `spell` row `abilities.register`s as a castable ability whose `level` sets the
+    slot cost (D41 deduction path unchanged). Species/classes/subclasses/
+    backgrounds/feats/creatures are read back from `content` by the sheet and the
+    Phase-B build engine. `main.startup` re-registers spell abilities from the DB,
+    so a restart repopulates the in-memory registry.
+  - TRANSPORT IS MULTIPART-FREE. The pinned image has no `python-multipart`, so
+    the DM tool POSTs a file's RAW BYTES (or a whole `.zip`, auto-detected by the
+    `PK\003\004` signature) to `/api/content/{code}/import`; the frontend reads
+    bytes with `FileReader`/`fetch(File)` exactly as the map upload already does.
+    No new dependency, no build step (D1). Export escapes spreadsheet formula
+    injection (`= + - @ TAB/CR` get a leading `'`) and the importer reverses ONLY
+    that escape, so export→import is byte-true.
+  - ROOM SCOPING + GLOBAL LIBRARY. Content keys on `(kind, room_id, id)`;
+    `room_id` 0 is a reserved GLOBAL library read by every room. Class/subclass
+    ids repeat across levels, so `store_key` encodes `"<id>#L<level>"` to avoid a
+    false duplicate. Authorization mirrors D92: only this room's DM may
+    import/export/read counts.
+- **Consequences:**
+  - The projection reuses the DM library's EXACT insert (global `id` PK, same
+    `ON CONFLICT DO UPDATE`, same `clean_def`); because that update does not move
+    `room_id`, the FIRST room to author a def id keeps the library row while every
+    room keeps its OWN authoritative copy in `content`. Tests therefore read the
+    projected `item_defs` by its global id and assert the CONTENT row is the one
+    scoped to the room.
+  - Slot progression stays a TABLE owned by class rows (`slot_progression`) and is
+    explicitly NOT derived from total level (D58). Cantrip/upcast dice scaling,
+    currency (`value_gp`) and encumbrance (`weight`, STR-derived) are columns that
+    already import cleanly but are deferred to Phases C–E and marked accordingly.
+  - SHIPPED pack uses ORIGINAL names (`scout`, `sword_plus1`, `kin_fey`) so no
+    protected text is committed; real rule packages are authored by humans
+    (ATTRIBUTION.md). `tests/test_content_examples.py` imports every documentation
+    example through the SAME code path, so docs and importer cannot drift apart.
+
+## D96 — Character build is a chronology that DRIVES the existing columns, and the per-level ledger is bookkeeping — never a second source of level/HP/abilities
+
+- **Context:** Sprint 25 Phase B needs a Stufe 1–20 build (subclass on its
+  unlock level, ASI/feat on theirs, skill choices) built from the D95 CONTENT,
+  without a second character/level/slot engine and without breaking D53
+  (multiclass entries + derived total) or D58 (slot progression is a TABLE,
+  never derived from total level).
+- **Decision:**
+  - `app/charbuild.py` is a PURE operation module (like `progression`). `plan()`
+    reads `content.class_levels/class/load` and returns the strict chronology
+    (level 1..to) plus the decisions still required — it mutates nothing.
+    `apply()` advances a class FORWARD and performs only the mutations the
+    engines already own: `progression.set_class_levels` (single entry per build;
+    `level` stays derived), HP from the rows' `hp_base`/`hp_per_level` (fixed
+    documented formula, not a roll), `gear.clean_saves`/`clean_skills` for
+    proficiencies, and ASI/feat `ability_boost` written into `stats`. Anything
+    no engine implements (subclass features, granted spells) is recorded as TEXT
+    in the ledger and shown, never re-implemented (D95 boundary).
+  - LEDGER, not truth. The build state (class id, `applied_through`, subclass,
+    per-level choices, and a `base_stats` snapshot) lives in the new additive
+    `characters.build` column. It drives the forward-only guard and the sheet;
+    level/HP/abilities remain the columns the rest of the app reads.
+  - IDEMPOTENT FORWARD BUILD. `apply()` RECOMPUTES levels 1..to from the content
+    rows + accumulated decisions each time, starting ability deltas from the
+    snapshot `base_stats` (never from the already-mutated row, which would
+    re-stack each ASI). Guard: a rebuild to a level `<= applied_through` is
+    refused; a different class once started is refused. Missing choices return
+    `needs_choice` and write NOTHING.
+  - ONE auth rule, ONE transport. `app/charbuild_api.py` (room-scoped) copies
+    the `class_levels` authorization EXACTLY: owner always, DM only for a
+    character in `room_members` of that room; the frontend lives in the room
+    sheet (owner/DM), not the lobby, so there is a single owner-or-room-DM rule
+    rather than a second unauthenticated lobby path.
+- **Consequences:** the wizard is fully generic — the client renders the
+  chronology and POSTs a choices object, and `charbuild` re-validates every
+  rule, so no class logic ships to the browser and no rule can be bypassed by a
+  hand-edited payload. Multiclass is untouched (build writes one entry;
+  `progression` still accepts several). `base_stats` means later item/stat edits
+  by other systems are NOT clobbered by a rebuild of the build-owned deltas.
+
+## D97 — Class spellcasting is DATA the build reads and the ONE ability engine executes; slots stay a per-class TABLE, never derived from total level
+- **Decision:** Phase C closes the spell axis D58 left open, with NO new engines:
+  - **Consumer, not creator.** The class-row spell columns
+    (`spellcasting_ability`, `cantrips_known`, `spells_known`, `prepared`,
+    `slot_progression`, `upcast_scaling`) were validated in D95 but read by
+    nothing; `charbuild` is now that consumer. It derives the castable ability
+    ids (`characters.abilities`), a sheet display pool (`characters.spells`) and
+    the slot table (`characters.spell_slots`) straight from the rows + the
+    build ledger. Known-model classes CHOOSE at each level where the cumulative
+    totals rise (`needs_choice`); prepared-model classes take the whole class
+    list and re-prepare as a DM/long-rest step — that daily activity is NOT
+    auto-faked.
+  - **Slots are a TABLE, still never a derivation.** `slot_progression` is
+    `level:count;…` for THAT class level; a 2nd-level half caster has two 1st-level
+    slots and no 2nd-level slot, which a naive total-level lookup would never
+    produce. This is the concrete realisation of the D58 trap.
+  - **One cast op, now scaled and replay-safe.** Casting routes through
+    `abilities.execute` (D55) — for both PACT (`cast` legacy rows) and registered
+    content spells the SAME engine. `cast_level` finally does something:
+    `upcast_step` raises the base dice per slot level above base; a cantrip's
+    `scale_tiers` raises it by character level — generically, folded into the ONE
+    base dice term (added dice must share the base die's sides, else the roll is
+    left at base and `manual` covers it; nothing is fabricated). `execute` now
+    claims a client `op_id` up-front inside the write transaction, so a repeated
+    request consumes one slot AND applies effects once (closes the D93 gap for
+    the ability path; the sheet sends `op_id` like the legacy path does).
+  - **Class resources ride the generic system.** `class_resource[:spec]` +
+    `class_resource_reset` become a normal resource (e.g. sorcery points,
+    `short` reset); `handle_long_rest` was corrected to also refill short-reset
+    resources (a long rest is never less than a short one). Slots/resources use
+    the EXISTING `{max,used}` consume/restore semantics unchanged.
+- **Honest limits (not faked):** choosing each new spell is a build `needs_choice`
+  step; `spell_replace` swaps, daily re-preparation for prepared casters, and
+  AREA/POINT aiming of a spell (cast from the tactical map, not the sheet) are
+  table/DM decisions, shown as such.
+- **Consequences:** the shipped technical pack gains original-name caster
+  templates (`adept` prepared, `warden` half-known, `seer` known + sorcery
+  points) with SRD-style — not copied — tables, and `spells.csv` demonstrates
+  `scale_tiers`/`upcast_step`. Existing non-caster builds and legacy sheet
+  spellbooks are untouched (a non-caster build writes none of the spell columns;
+  a sheet spell not in `abilities` still casts via the legacy path). Cantrip
+  scaling by total character level is legitimate (unlike SLOTS, D58 only forbade
+  deriving SLOTS from total level). Tests: `tests/test_spells.py` pins the models,
+  the slot table, choice-gating, resource reset, upcast/cantrip scaling and the
+  duplicate-`op_id` guard.
+
+## D98 — Gear is a DERIVED overlay consumed by the existing math, never a second equipment engine or a persisted stat
+- **Decision:** Phase D closes the weapon/armor/magic-item axis WITHOUT a second
+  engine. The item SCHEMA already carried almost every column; what was missing was
+  the CONSUMERS, which ignored `attribute_*`, `ac_base/ac_bonus/ac_max_dex`,
+  `skill_prof/save_prof/expertise`, `darkvision_ft`, `speed_bonus_ft`,
+  `extra_damage_dice`, `finesse`, versatile grip, `range_long_ft`, `attune` gating.
+  - **One derivation, transient.** `gear.effective_gear(char)` computes effective
+    scores + skill/save/expertise sets + darkvision + speed FROM the base columns +
+    `items` + `equipment` on EVERY read, and NOTHING is memoised on a mutable dict
+    or written back. `attribute_set` applies first (`max(base, value)` — an item
+    never lowers a score), then `attribute_bonus` (stacking deltas); `_stat_mod`,
+    `dex_mod`, `skill_bonus`, `save_bonus`, `compute_ac`, `clean_speeds` and
+    `weapon_profiles` all read it, so base stats are never mutated and equipping,
+    unequipping, attuning or restarting can neither double-apply nor go stale.
+  - **One prop vocabulary.** `gear.clean_props` is THE validator for DM definitions
+    (`inventory.clean_def`) AND the content importer (which projects through it), so
+    a prop means the same thing everywhere — no second validator. Typed keys are
+    range-clamped and wrongly-typed values are DROPPED (never coerced).
+  - **Five bonus scopes, distinguished exactly.** per-weapon (`attack_bonus`,
+    `damage_bonus`, `extra_damage_dice`) → the server attack profile only; general
+    (`attribute_bonus`/`attribute_set`) → every derived value; while-equipped (all
+    gear bonuses live only in a slot; a slotless legacy sheet is byte-identical);
+    while-attuned (an `attune` item that is not attuned is INERT, even its weapon
+    bonus); on-consume (`heal_dice`, `op_id`-guarded).
+  - **Weapon mechanics ride `weapon_profiles`.** versatile `grip` is per-instance
+    (`inv_grip`, off-hand cleared atomically for two-handed grip; shield conflict
+    resolved) and picks `damage_dice` vs `damage_dice_two_handed`; finesse/ranged
+    choose the ability; a weapon attack adds its ability mod to damage by default
+    (a legacy DM weapon can opt out with `mod_to_damage=false`); long range is
+    server-tiered (≤normal ok, ≤long disadvantage — advantage cancels it, beyond
+    invalid).
+  - **Identification ≠ inertness.** Unidentified gear still applies its passive
+    mechanic while worn+attuned (it gates only the DISPLAY of unknown properties);
+    blindly USING an unidentified magic item still needs identification (D98).
+  - **Additive only.** `characters` gains no new column; grip is a field on the
+    inventory entry, `hands`/`charges`/`recharge` are additive item columns; legacy
+    sheets and pre-Phase-A items (no props / no equipment) are unchanged.
+- **Honest limits:** long-rest is the only charge recharge (short-rest recharge
+  deferred); `duration`/`trigger`/`hit_dice_bonus`/`properties` remain table notes;
+  creatures use the SAME overlay only when they carry the compatible item/equipment
+  model (no NPC-specific engine).
+- **Consequences:** DMs author any item in the browser (item-definition editor with
+  kind/grip/dice/range/AC/attribute/grant/magic fields, `✎ Edit` to reload a
+  definition), see effective values on the sheet (darkvision, effective walk speed,
+  server-derived attack profiles with extra dice + tiers + grip + 🔒 when gated).
+  Tests `tests/test_weapons_gear.py` pin grip dice + hand/shield occupancy, ranged
+  tiers + finesse, the attunement gate, AC base/bonus/max-dex, attribute set/bonus
+  feeding AC + initiative + stats, skill/save grants + expertise (never double
+  proficiency), darkvision/speed, heal-once, equip persistence, grip replay +
+  main-hand precondition. `tests/test_content_examples.py` gains importable ranged,
+  attribute-bonus, attribute-set and multi-effect item examples.
+
+## D99 — Money is one integer of copper; carrying is derived; a companion is just a token with an owner/controller
+- **Decision:** Phase E finishes currency, encumbrance and companions WITHOUT a new
+  engine. **Currency** is stored on the character as ONE non-negative INTEGER of
+  copper pieces (`characters.wallet`) — never a float, never a per-coin dict that
+  could go negative per denomination. `gear.CURRENCIES` is the single data table
+  (cp/sp/ep/gp/pp, value in copper, coin weight 0.02 lb); the per-coin purse split
+  (`cp_breakdown`) is DISPLAY ONLY and greedy richest-first, so electrum change at
+  50 cp divides exactly. A client can only ever send `(integer amount, coin id)`
+  through `gear.to_cp` — it can never post a copper total, so no request mints
+  gold. All purse and container-coin writes live in `app/inventory.py` reusing the
+  SAME transaction + `op_id` replay claim as items: atomic across sender/receiver,
+  refuse a shortfall before any store (so the whole op rolls back), namespace the
+  claim to the character/object acted on. DM grant/deduct; player→member transfer
+  (both must be THIS room's characters via `_validate_parties`); a DM fills hoards
+  and a character loots them (`coins_take`, one object-namespaced claim so a
+  double-click cannot duplicate the scoop).
+- **Carrying** is DERIVED, never persisted. `gear.encumbrance(char)` sums `qty ×
+  weight` over the character's DISTINCT stacks — equipped items live INSIDE
+  `items[]`, so equipping never double-counts weight — plus the coins' weight from
+  the same greedy split. Capacity = effective STR (`effective_gear`) ×
+  `CARRY_PER_STR` (15) × a SIZE_CARRY modifier (tiny/small ½, medium 1, large 2,
+  huge 4, gargantuan 8) + any `carry_bonus` from WORN gear (a new additive item
+  prop/column). The result rides `derived.encumbrance`; the sheet renders it and
+  the client never recomputes. `overloaded` is a WARN FLAG ONLY — no movement
+  penalty is applied until that rule is fully specified and tested.
+- **Companions are the existing token model, surfaced not duplicated.** A companion
+  is a `tokens` row with `owner_user_id` and/or `character_id` set by the DM
+  (`add_token` now binds those, DM-only, validating room membership) — the same
+  columns a player token already uses. Control is handed out ONLY through the D82
+  `token_controller` (DM-only; the target must be a room member), and riding stays
+  the D82 acyclic `token_mount`. A player can therefore never seize a foreign
+  companion through a forged message; a player sees companions only among the
+  tokens already visible to them (owner/controller = them), so no hidden token or
+  other-plane token is ever named.
+- **Additive only.** New columns: `characters.wallet`, `characters.size`,
+  `containers.coins`; new additive item column/prop `carry_bonus`. `CharIn`, item
+  defs and every pre-Phase-E row read defaults; nothing is migrated destructively.
+- **Honest limits:** currencies are a documented code table (a content-configurable
+  rate table is a later step); coin recharge/interest, minting rules, and the
+  overload MOVEMENT penalty are deferred; the DM item-definition editor does not
+  yet expose the `carry_bonus` field (author it via CSV or an ad-hoc grant).
+- **Consequences:** sheet collapsibles render Wallet (rates + greedy coins + DM
+  grant/deduct + owner transfer), Encumbrance (bar + OVERLOADED warn) and
+  Companions (list + DM controller/mount/add/remove reusing existing ops); the
+  container chest shows and loots coin. `tests/test_money_encumbrance.py` pins the
+  integer/range strictness of `to_cp`, the lossless greedy split, grant/deduct +
+  persistence, the no-negative rollback, `op_id` replay, DM-only grants, member
+  transfers (atomic, insufficient, replay), stranger refusal, container fill→take
+  (adjacent, atomic, replay), quantity/equipment non-double-counting, size + carry
+  bonuses, the overload warn, companion/controller authorisation, and
+  reload-stable derived state. `tests/test_content_examples.py` gains an importable
+  `carry_bonus` example.

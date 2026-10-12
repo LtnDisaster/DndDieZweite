@@ -7,7 +7,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import assets, buildinfo, db, rooms, ws
+from . import assets, buildinfo, content, db, rooms, ws
+from . import content_api, charbuild_api
 from .room import net
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -29,6 +30,12 @@ app = FastAPI(title="D&D VTT")
 async def startup():
     db.init_db()
     net.LOOP = asyncio.get_running_loop()
+    # Re-register every stored spell as an ability so casts survive a restart
+    # (the abilities registry is in-memory). A bad row must never block boot.
+    try:
+        content.load_registered_abilities()
+    except Exception:                                   # pragma: no cover
+        log.exception("content ability re-registration failed")
     # The running frontend generation must be identifiable from server log,
     # /api/build and the browser console (D78 — mixed-bundle black-canvas saga).
     log.info("BUILD %s", buildinfo.token())
@@ -54,6 +61,8 @@ async def unhandled_exception(request: Request, exc: Exception):
 
 app.include_router(rooms.router)
 app.include_router(assets.router)
+app.include_router(content_api.router)
+app.include_router(charbuild_api.router)
 app.include_router(ws.router)
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

@@ -1,0 +1,11 @@
+id,name,level,school,casting_ability,targeting,shape,size_ft,range_ft,casting_time,duration,concentration,resolution,save,on_save,damage_dice,damage_type,heal_dice,upcast_step,upcast_scaling,scale_tiers,class_list,scaling_note,manual
+spark,Test Spark,0,evocation,int,single,,,120,1 action,instant,,attack,,,1d8,fire,,,,5:+1d8;11:+1d8;17:+1d8,adept; warden; seer,,
+mend,Mend,0,transmutation,int,single,,,5,1 action,instant,,auto,,,,,1d4+1,,,,adept; warden; seer,,Touch-range mending; DM narrates
+chill,Chill,0,evocation,cha,single,,,30,1 action,instant,,save,dex,half,1d6,cold,,,,5:+1d6;11:+1d6;17:+1d6,seer,,
+gust,Gust,0,evocation,wis,single,,,30,1 action,instant,,save,dex,half,1d6,thunder,,,,5:+1d6;11:+1d6;17:+1d6,warden; seer,,
+arcane_ward,Arcane Ward,1,abjuration,int,self,,,,1 action,10 minutes,True,auto,,,,,,,,,adept; warden; seer,,Grants temporary hit points — DM tracks
+bolt,Test Bolt,2,evocation,int,area,circle,20,150,1 action,instant,,save,dex,half,8d6,fire,,+1d6,1,,adept; warden; seer,,
+smite,Smiting Touch,1,evocation,cha,single,,,5,1 bonus action,instant,,attack,,,2d8,radiant,,,,,warden; seer,,
+restoration,Lesser Restoration,1,necromancy,wis,single,,,5,1 action,instant,,auto,,,,,2d4+2,,,,warden; seer,,
+ward_ice,Guarded Frost,3,evocation,int,area,circle,20,120,1 action,instant,,save,dex,half,6d6,cold,,+1d6,1,,adept; warden; seer,,
+curse,Dread Curse,2,necromancy,cha,single,,,90,1 action,instant,True,save,wis,half,3d6,necrotic,,+1d6,1,,seer,,

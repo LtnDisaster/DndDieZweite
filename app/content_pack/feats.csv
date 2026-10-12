@@ -1,0 +1,3 @@
+id,name,requires,ability_boost,skill_prof,spells_grant,effect,manual
+feat_keen,Keen Mind,Perception 5 ranks,wis+1,"perception, investigation",,+1 Wisdom; +1 to Perception and Investigation checks,
+feat_nimble,Nimble Steps,,dex+1,,,+1 Dexterity (max 20),the 5 ft speed increase is not automated today

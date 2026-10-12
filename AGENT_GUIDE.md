@@ -41,6 +41,11 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   5. `app/static/js/50_canvas.js` — canvas map, tokens, fog, pins, movement.
   6. `app/static/js/55_diorama.js` — client-local isometric diorama renderer.
   7. `app/static/js/60_main.js` — DOM wiring and boot.
+  8. `app/static/js/70_content.js` — DM CSV rule-package import/export panel (D95).
+  9. `app/static/js/99_boot.js` — bundle-integrity gate; runs LAST and is the only
+     caller of `appBoot()` (D78). Any new script module must be added to its
+     `MODULES` list, stamp itself, and (if it exposes a boot entrypoint) be added
+     to `REQUIRED` — see `tests/test_frontend_bundle.py`.
 - Single mutable global `state` object in `10_core.js`.
 - DOM rendering is imperative `innerHTML`/`createElement` code.
 - Sidebar panels are grouped behind client-local tabs (Game/Chars/Story/DM,
@@ -60,7 +65,7 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/ws.py` | WebSocket auth/lifecycle | `ws_room()` |
 | `app/auth.py` | bcrypt passwords, signed cookie sessions, room access | `read_token()`, `current_user()`, `require_user()`, `room_of()`; tokens are padding-free base64url (cookie-safe, D62) |
 | `app/db.py` | SQLite schema and migrations | `init_db()`, `q()`, `q1()`, `x()`, `tx()` |
-| `app/gear.py` | Shared sheet/item/skill/spell/defense math | `compute_ac()`, `save_bonus()`, `skill_bonus()`, `apply_defense()` |
+| `app/gear.py` | Shared sheet/item/skill/spell/defense math. D98: gear is a DERIVED, transient overlay (`effective_gear`) consumed by `_stat_mod`/`skill_bonus`/`save_bonus`/`compute_ac`/`clean_speeds`/`weapon_profiles` — never persisted, base stats untouched. One prop validator (`clean_props`). D99: currency SSOT (integer copper: `CURRENCIES`/`to_cp`/`cp_breakdown`/`cp_label`) + derived carrying (`carry_capacity`/`inventory_weight`/`encumbrance`, `CARRY_PER_STR`/`SIZE_CARRY`, `carry_bonus`) | `effective_gear()`, `clean_props()`, `weapon_profiles()`, `compute_ac()`, `save_bonus()`, `skill_bonus()`, `wields_two_handed()`, `to_cp()`, `cp_breakdown()`, `encumbrance()`, `carry_capacity()` |
 | `app/npc.py` | NPC stat-block model | `clean_npc()`, `load()`, `to_char()` |
 | `app/conditions.py` | Conditions catalog and logic | `clean_conds()`, `add()`, `remove()`, `step_rounds()` |
 | `app/path.py` | Footprint-aware server A* | `find_path()`, `path_footprint_cost()` |
@@ -72,6 +77,10 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/events.py` | Plain-dict game-event facts + listener seam (D52) | `make()`, `emit()`, `subscribe()`, `recent` |
 | `app/effects.py` | Generic ability/effect geometry (D54) | `effect_cells()` |
 | `app/abilities.py` | Generic ability engine: data defs + authoritative executor (D55) | `register()`, `clean_definition()`, `execute()` |
+| `app/content.py` | CSV content packages (D95): schema/validate/import/export. DATA read by the engines (items→item_defs, spells→abilities), **never code**; generic `content(kind,room_id,id)` SSOT, room 0 = global | `SCHEMAS`, `parse()`, `validate()`, `import_package()`, `export_csv()`, `load_registered_abilities()` |
+| `app/content_api.py` | DM-only content import/export REST, raw-body (no multipart) (D95) | `/api/content/{code}` import/export/kinds |
+| `app/charbuild.py` | Chronological build Stufe 1–20 from CONTENT, drives the EXISTING columns (D96); Phase C adds spellcasting — known/prepared model, slot TABLE, class resource (D97). Ledger in `characters.build` is bookkeeping, not a second truth | `plan()`, `apply()`, `ledger()` |
+| `app/charbuild_api.py` | Room-scoped build REST; owner-or-room-DM (mirrors `class_levels`) (D96) | `/api/build/{code}/{cid}` plan/apply |
 | `app/room/quests.py` | Quest WS transport (thin) | `handle_quest_add/complete/…` |
 | `app/room/progression.py` | `class_levels` WS transport (thin) | `handle_class_levels()` |
 | `app/ratelimit.py` | In-memory request limiter | `limit()` |
@@ -99,6 +108,7 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/static/js/50_canvas.js` | Map/canvas rendering and overlays; view dispatcher | `draw()`, `drawTactical()`, `tick()`, `showAoe()`, `showPing()` |
 | `app/static/js/55_diorama.js` | Isometric diorama renderer + click routing | `drawDiorama()`, `dioProj()`, `dioramaDown()` |
 | `app/static/js/60_main.js` | Wire DOM events | `wire()`, boot function |
+| `app/static/js/70_content.js` | DM CSV rule-package import/export panel (D95), registered in the D78 integrity gate | `wireContent()`, `refreshContentKinds()` |
 | `tests/test_integration.py` | REST/WS integration suite | auth, visibility, rest, map, combat, items |
 
 ---
@@ -548,7 +558,9 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `inv_grant` / `inv_remove` | `room.inv.*` | DM | no | D92: grant (def or ad-hoc) / take; target = character of a member of THIS room |
 | `inv_adjust` | `room.inv.handle_inv_adjust` | sheet owner or DM | no | D92: split/combine stacks |
 | `inv_transfer` | `room.inv.handle_inv_transfer` | sheet owner or DM | no | D92: member→member hand-off, ONE atomic transaction, slots stripped |
-| `inv_equip` | `room.inv.handle_inv_equip` | sheet owner or DM | no | D92: (un)equip {slot, item_id|null}; generic kind table + props.slot/two_handed |
+| `inv_equip` | `room.inv.handle_inv_equip` | sheet owner or DM | no | D92: (un)equip {slot, item_id|null}; generic kind table + props.slot; a two-hander (or versatile gripped two, D98) leaves the off hand empty |
+| `inv_grip` | `room.inv.handle_inv_grip` | sheet owner or DM | no | D98: {item_id, grip:one/two} for an equipped VERSATILE weapon — picks the damage dice; two-handed grip clears the off hand atomically |
+| `inv_money` | `room.inv.handle_inv_money` | grant/deduct: DM; transfer: sheet owner | no | D99: {action:grant/deduct/transfer, amount(int), coin:cp/sp/ep/gp/pp, char_id[, to_char_id]}. Server converts via `gear.to_cp` (never trusts a copper total); atomic + `op_id`-replay-guarded; a shortfall raises before any store. `inv_container{action:coins_fill/coins_take}` moves loot coin |
 | `inv_container` | `room.inv.handle_inv_container` | reach-gated like `interact` (D82) | inspect private | D92: inspect/move/fill/remove on container objects; dm_only/cross-plane refuse without leaking |
 
 ## Important outbound event kinds
@@ -737,6 +749,56 @@ Frontend filtering may improve presentation but may not be the security boundary
   items count) with untouched legacy fallback for sheets without equipment.
 - `app/room/authz.py` — unchanged: CONTROLLER ≠ sheet authority; inventory
   rights are owner-or-DM like attune.
+
+## CSV content packages (Sprint 25, D95)
+
+- `app/content.py` — THE content engine, and the ONLY reader of rule CSV. It
+  stores rows as data in `content(kind, room_id, id)` (room 0 = global, read by
+  every room); that JSON is the export SSOT. **NEVER evaluate code from a CSV**
+  and **NEVER build a second combat/dice/character/spell engine** — content only
+  describes WHAT exists and its PARAMETERS; mechanics stay where they are.
+  Anything no engine implements is carried as `manual`/`needs_choice` TEXT and is
+  displayed, never silently interpreted. Validation reports `file`/`line`/
+  `column`; one bad row refuses only its file; apply is idempotent (identical →
+  unchanged, differing id → conflict).
+- PROJECTION, not duplication: an `item` row → one `item_defs` row via the SAME
+  insert the DM library uses (global `id` PK, `gear.clean_props`;
+  `range_normal_ft`→`range_ft` which `gear.weapon_profiles` reads). A `spell` row
+  → `abilities.register` with `cost.spell_slot.level`; `main.startup`
+  re-registers from the DB so a restart repopulates the in-memory registry. Do
+  not compute AC/damage/slots here — the engines already do.
+- Slot progression is a class-row TABLE (`slot_progression`), NEVER derived from
+  total level (D58). Upcast/cantrip dice scaling, `value_gp` currency and
+  `weight` encumbrance are columns that import cleanly but are Phase C–E work.
+- `app/content_api.py` — DM-only (`_require_dm` via `room_of`), raw-body transport
+  (the pinned image has no `python-multipart`); export escapes formula injection.
+- Frontend `app/static/js/70_content.js` is registered in the D78 bundle-integrity
+  gate (`MODULES`+`REQUIRED` in `99_boot.js`, `wireContent()` in `appBoot`) — keep
+  all three in sync or the boot gate refuses to start.
+- Licensing: the shipped `app/content_pack/*.csv` uses ORIGINAL names
+  (`scout`, `sword_plus1`, `kin_fey`); no protected text is committed
+  (ATTRIBUTION.md). `docs/CSV_CONTENT_GUIDE.md` and `tests/test_content_examples.py`
+  must stay in lockstep.
+
+## Character build (Sprint 25, D96)
+
+- `app/charbuild.py` builds a character STUFE 1..20 **from the D95 content** and
+  performs ONLY the mutations the engines already own — `progression.set_class_levels`
+  (single entry; `level` stays derived, never re-`sum`med), HP from the class
+  rows' `hp_base`/`hp_per_level`, `gear.clean_saves`/`clean_skills`, and ASI/feat
+  boosts into `stats`. Do NOT add a second level/HP/slot engine or re-derive slots
+  from total level (D58).
+- The build LEDGER in `characters.build` (`class_id`, `applied_through`, subclass,
+  per-level `decisions`, `base_stats`) is BOOKKEEPING for the forward-only guard
+  and the sheet. `apply()` RECOMPUTES 1..to from content + decisions each time,
+  starting ability deltas from `base_stats` — never from the mutated row.
+- Missing required choices → `needs_choice`, NOTHING written; a rebuild to a
+  level `<= applied_through` is refused; a second class once started is refused.
+- `app/charbuild_api.py` authz MUST mirror `app/room/progression.py` exactly
+  (owner always; DM only if the character is in `room_members` of THAT room).
+  The UI is the room sheet, not the lobby — one rule, one transport.
+- The client holds NO class logic: it renders the chronology and POSTs a choices
+  object; `charbuild` re-validates every rule server-side.
 
 ## Audio source safety
 

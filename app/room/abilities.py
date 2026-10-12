@@ -29,7 +29,10 @@ async def handle_ability_cast(ws, room_id, user, is_dm, msg):
         room_id, actor_token_id=tok["id"], ability_id=str(msg.get("ability_id", "")),
         is_dm=is_dm, actor_user_id=user["id"], target_id=msg.get("target_id"),
         point=point, direction=str(msg.get("direction", "E")),
-        cast_level=msg.get("cast_level"), adv=msg.get("adv"), user=user)
+        cast_level=msg.get("cast_level"), adv=msg.get("adv"), user=user,
+        op_id=str(msg.get("op_id", ""))[:40])
+    if result.get("replayed"):                              # dup request — already applied
+        return
     if not result["ok"]:
         await send_to(ws, "error", {"msg": result["error"]})
         return

@@ -359,11 +359,19 @@ async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
             if (tok.get("floor") or "") != (target.get("floor") or ""):
                 await send_to(ws, "error", {"msg": "Target is out of reach"})
                 return
-            reach = prof["range_ft"] if prof["range_ft"] > 0 else 5 + prof["reach_ft"]
             dist = max(abs((tok["x"] or 0) - (target["x"] or 0)),
                        abs((tok["y"] or 0) - (target["y"] or 0))) * 5
-            if dist > reach:
-                await send_to(ws, "error", {"msg": "Target is out of range"})
+            normal_r = prof.get("range_ft", 0)
+            long_r = prof.get("range_long_ft", 0)
+            if normal_r > 0:                     # D98 ranged tiers: normal / long / beyond
+                maxr = long_r or normal_r
+                if dist > maxr:
+                    await send_to(ws, "error", {"msg": "Target is beyond the weapon's maximum range"})
+                    return
+                if long_r and dist > normal_r:   # beyond normal range: disadvantage
+                    adv = None if adv == "adv" else "dis"   # advantage cancels it
+            elif dist > 5 + prof.get("reach_ft", 0):        # melee reach
+                await send_to(ws, "error", {"msg": "Target is out of reach"})
                 return
 
     tlabel = target["label"] if target else None
@@ -374,8 +382,19 @@ async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
         if d is None:
             return None
         rolls, mod, total = d
+        parts = [f"[{', '.join(map(str, rolls))}] {mod:+d} = {total}"]
+        grand = total
+        ex = prof.get("extra_dmg")
+        if ex:                                                 # D98: extra damage dice (e.g. flame tongue)
+            e = _roll_dmg(ex, 0, crit)
+            if e is not None:
+                er, _em, et = e
+                grand += et
+                exdt = f" {prof.get('extra_dmg_type')}" if prof.get("extra_dmg_type") else ""
+                parts.append(f"+[{', '.join(map(str, er))}]{exdt} = {et}")
+        tail = f" → {grand} total" if ex and grand != total else ""
         return (f"💥 {ch['name']} — {prof['name']} damage{' (crit!)' if crit else ''}{dtxt}: "
-                f"[{', '.join(map(str, rolls))}] {mod:+d} = {total}"), total
+                f"{' '.join(parts)}{tail}"), grand
 
     if kind == "damage":                         # manual damage die, no d20
         line = _dmg_line(bool(msg.get("crit")))
@@ -700,7 +719,9 @@ async def handle_long_rest(ws, room_id, user, is_dm, msg):
             if it["recharge"] == "long":
                 it["charges"] = it["chargesMax"]
         for r in resources:
-            if r["reset"] == "long":
+            # a long rest is strictly greater than a short one (5e), so it also
+            # refills short-reset class resources (e.g. sorcery points — D97).
+            if r["reset"] in ("long", "short"):
                 r["current"] = r["max"]
         tok = db.q1("SELECT * FROM tokens WHERE room_id=? AND character_id=?",
                     (room_id, m["character_id"]))

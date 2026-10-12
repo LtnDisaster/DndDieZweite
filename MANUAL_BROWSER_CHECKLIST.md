@@ -315,3 +315,82 @@ Darkness (DM candle button 🕯 in the brush bar):
 - [ ] Privacy: second player logs in → clicks first player's token: compact public card (HP/AC/Speed), no items/spells/stats. DM sees the full sheet.
 - [ ] Legacy: a character with a classic `weapons` entry still attacks by name exactly like before (no AC verdict).
 - [ ] D94: DM hides a monster (out of your vision) → you attack it by id (devtools): error is exactly „No target token" — same as a wrong id. DM still sees/attacks it normally.
+
+## Sprint 25 — CSV rule packages (D95)
+- [ ] DM → 🎲 DM tab → „📚 Rule packages": the counts line shows `0` for all kinds in a fresh room. Choose one CSV from `app/content_pack/` (e.g. `items.csv`) with mode **Preview** → Upload: report lists the file `· ok` (or `file/line/column` errors), and NOTHING is written yet (counts stay 0).
+- [ ] Switch to **Apply** → Upload `items.csv` → counts gain `item: N`. In the 🎒 Inv tab the DM can now grant `sword_plus1`; a character that equips it attacks with the +1 typed bonus (server profile, not a client claim).
+- [ ] Re-Apply the SAME file → report shows `=N` unchanged, `+0` new, no duplicates (counts unchanged). Import a file whose row has a bad `kind` → Preview names the file, line, and column; a good file uploaded in the same run is still reported independently.
+- [ ] **Replace** a changed row overwrites it; **Apply** on the same differing id instead reports a `⚠conflict` and keeps the old value.
+- [ ] Upload a **ZIP** of several `*.csv` (auto-detected): each kind imports independently; an unknown `notes.csv` inside is `· skipped`, not fatal.
+- [ ] ⬇ **CSV** exports the chosen kind as a download; ⬇ **All (ZIP)** downloads every kind. A value like `+1d8`/`=evil` re-imports byte-identically (export prefixes `'` to defuse spreadsheets; import reverses it).
+- [ ] A PLAYER (non-DM) sees no DM tab; calling `/api/content/<code>/kinds` without DM (or logged out) returns 403/401.
+- [ ] Persistence: import spells, then restart the container — the castable abilities are back (re-registered from the DB at startup).
+
+## Sprint 25 — Character build (D96)
+- [ ] Player opens their own token's sheet → „⬆️ Build / Level-up": class `scout`, level `1`, **Plan** → `plan ok · 1 levels` and `need: skills 4/…`. Fill 4 skills into the choices box → **Apply** → toast „Built to level 1"; sheet shows Lv 1, HP 14, the 4 skills ✓, saves DEX/INT ✓.
+- [ ] Build to `8` with `{"subclass":"tradition_stalker","levels":{"4":{"ability":{"dex":2}},"8":{"feat":"feat_keen"}}}`: success; DEX +2 (level-4 ASI) and WIS +1 (Keen Mind) show on the sheet; Perception/Investigation become proficient; subclass shows.
+- [ ] Missing a choice (empty choices, target 8): **Apply** shows „choices still needed" with the list (skills/subclass/level) and NOTHING changes (still the previous level/HP).
+- [ ] Repeat guard: Apply the SAME level again → refused (build is forward-only); a lower target likewise refused. Advancing 5→8 keeps the earlier level-4 ASI (recompute from base, not stacked twice).
+- [ ] DM opens the same player's sheet → can Build it too (room-DM). A different room member (not the owner, not DM) sees no Build controls and gets 403 from `/api/build/...`.
+- [ ] Restart the container: the sheet's Build ledger (class, „built to N", subclass, per-level features) is still shown — it lives in `characters.build`.
+
+## Sprint 25 — Spellcasting (Phase C, D97)
+First import `spells.csv` + `classes.csv` from `app/content_pack/` (DM → 🎲 Rule packages → apply) so `adept`/`warden`/`seer` and the scaling spells exist.
+- [ ] Known-caster choices: build `seer` to `1` with `{"skills":["persuasion","religion"],"levels":{"1":{"cantrips":["spark","mend","chill"],"spells":["arcane_ward","bolt","smite"]}}}` → Apply ok. Open the sheet: 📖 Spellbook lists the chosen spells and a slot line `L1 2/2`. Without the `spells` pick, Apply says „choices still needed" (kind `spells`) and writes nothing.
+- [ ] Slot TABLE not total-derived: build `warden` to `2` (choose 2 cantrips + 2 spells). The spellbook shows only `L1 2/2` and NO 2nd-level slot — a half caster. (A level-2 full `seer` shows `L1 3/3`; a level-5 one shows `L1 4/4 · L2 3/3 · L3 2/2`.)
+- [ ] Cast + upcast: with a `seer`, cast `spark` (cantrip, no slot) — a `✨ Use` button rolls; at character level ≥5 the cantrip die is larger. For a leveled single-target spell the row shows a slot-level selector; pick a higher level and Cast — the HIGHER slot's pip drops (`L3 0/1`), not the base one.
+- [ ] Duplicate guard: spam the same Cast (same request) fast — the slot decrements ONCE and the target takes damage ONCE (no double-fire).
+- [ ] Class resource: a `seer` built to N shows `Sorcery Points = N` (reset short). After spending, a **short** rest refills them; a **long** rest refills slots AND sorcery points.
+- [ ] Prepared vs known: an `adept` (prepared) shows its whole class list as castable and notes that daily re-preparing is a long-rest/DM step; a `warden`/`seer` (known) only shows the spells actually chosen.
+- [ ] Area spells (`bolt`) show `🎯 map` on the sheet — aim and cast them from the tactical map, not the sheet.
+- [ ] Existing legacy spellbooks are unaffected: a character with a 📖 spellbook item still casts its data-only spells as before.
+
+## Sprint 27 — Weapons, equipment & magic items (Phase D, D98)
+- [ ] DM → 🎒 Inv → „🧩 Item definition" editor: pick a kind (e.g. weapon), set dice `1d8`,
+      two-handed `1d10`, tick **ver**, set `rng`/`max` or `reach`, `atk`/`dmg` bonus,
+      AC base/bonus/max-dex, `wis+2` attribute bonus, `str=15` set, darkvision, speed,
+      skill/expertise/save lists, `chg`/rechg, **mag**/**att** → **💾 Save definition**.
+      Reopen the dropdown → **✎ Edit** reloads exactly those values back into the form (no loss).
+- [ ] Grant it to a character (Grant, qty) → the item appears in their Inventory with the right chips (✨ magic, 🔗 attunable).
+- [ ] Equip a **versatile** weapon → Attack section shows `⚔️ (one) … 1d8+…`; the Inventory row shows a grip button `🤲 one→two`; click it → the attack now reads `(two) … 1d10`, and a previously-equipped shield in the off hand is returned to the pack automatically.
+- [ ] Attunement gate: a 🔗 magic weapon with an attack bonus shows `🔒` and the plain bonus until you click **Attune**; after attuning, `🔒` disappears and `+atk`/`+dmg` apply (Attack profile changes).
+- [ ] Effective values on the sheet: wear **Goggles of the Night** → header shows `👁 60 ft`; a speed item shows `Speed 30 ft (→ 40 ft worn)`; a `+AC` ring shows in **AC** only while equipped, and vanishes on unequip (no leftover).
+- [ ] Attribute item: a `str=15` glove raises the STR modifier everywhere (skills/saves/AC-derived) while worn; unequip and it drops back exactly (nothing persisted).
+- [ ] Ranged tiers: shoot within `rng` → normal; beyond `rng` up to `max` → the roll prints `dis` (server-forced); beyond `max` → "beyond the weapon's maximum range".
+- [ ] Extra damage dice: a `+1d4 fire` weapon's damage line shows the base dice `+[1d4] fire = … → N total`.
+- [ ] Potion: a `2d4+2` **Draught** has a **Use** button; clicking heals once (re-sending the same action does not double-heal; charge/stack decrements once).
+- [ ] Invalid equip gives a clear error (e.g. a two-handed grip then "shield does not fit the off hand").
+- [ ] Legacy sheets without any equipped slot are unchanged (AC/attacks identical to before).
+- [ ] Restart the container: equipment, grip, and derived attack profiles recompute identically from the DB.
+
+## Sprint 28 — Currency, carrying & companions (Phase E, D99)
+- [ ] Open a player character's sheet → a **🪙 Wallet** collapsible shows the greedy
+      coin split (e.g. `3 gp`) and the rate legend `cp=1cp · sp=10cp · ep=50cp ·
+      gp=100cp · pp=1000cp`. A `0` balance reads `empty`.
+- [ ] As DM: in the Wallet's **DM · grant / deduct** row enter amount `5`, coin `gp`,
+      press **Grant** → chronicle `🪙 The DM gives <name> 5 gp.` and the wallet now
+      reads `5 gp`. Enter `10` `gp` → **Deduct** → an "Not enough coin" error and the
+      balance is UNCHANGED (the whole withdrawal rolled back). Press Grant twice with
+      the same button quickly → the wallet only gained 5 gp once (op_id replay).
+- [ ] As the player: Wallet → **Transfer to a room member** → amount `2` `gp`, pick the
+      member → **Send** → chronicle `🤝 <name> hands 2 gp to <other>`; open the other
+      character's sheet → their wallet shows `2 gp`; this sheet now shows `3 gp`.
+- [ ] Transfer more than owned → an "Not enough coin" error; neither purse changes.
+- [ ] DM → 🎒 Inv → place/inspect a **container**: add coin with the chest's **Add coin**
+      (amount `1` `pp`) → it shows `🪙 1000 cp`. As a player standing NEXT to it,
+      **Take** `4` `gp` → chest drops to `600 cp`, your wallet `4 gp`; take again
+      (double-click) → the scoop applies once. As a player, **Add coin** is refused
+      ("DM only").
+- [ ] **⚖️ Encumbrance** collapsible: a bar + `carried / capacity lb`. Grant a heavy
+      500 lb item → the bar turns red and reads **OVERLOADED**, but moving the token
+      is still allowed (warn only, no movement penalty yet). Equip/unequip does not
+      double-count a weight.
+- [ ] Wear a CSV item with `carry_bonus` (e.g. Bag of Loading) → the capacity number
+      rises by the bonus; unequip → it drops back exactly.
+- [ ] **🐾 Companions** collapsible: DM sees a **＋ Add for <name>** box → add a
+      companion → a new token owned by that player appears; the row shows owner /
+      `led by …` / `rides …`. As DM use the row's controller + mount selects and ✕
+      (remove). **As a player you see NO controller/mount/remove controls** — control
+      and ownership are DM-assigned; a player can never take a companion they don't own.
+- [ ] Coin + balance + carried weight all still correct after reloading the page
+      (state comes from the server, never recomputed in the client).

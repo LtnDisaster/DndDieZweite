@@ -32,6 +32,19 @@ ON_SAVE = ("none", "half", "negate")
 CELL = 5                                      # grid convention: 1 cell == 5 ft
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _DICE_RE = re.compile(r"^\d{1,3}d\d{1,3}([+-]\d{1,3})?$", re.I)
+_BONUS_RE = re.compile(r"^([+-]?)(\d{1,3})d(\d{1,3})$", re.I)      # +1d6 / -2d8 / 1d6
+_TIER_RE = re.compile(r"^(\d{1,3}):\s*([+-]?\d{1,3}d\d{1,3})$", re.I)
+
+
+def _dice_bonus(v):
+    """Parse a bonus-dice string ('+1d6' / '1d6' / '-2d8') to (signed_count, sides).
+    Returns (0, 0) when it is not a clean dice term."""
+    m = _BONUS_RE.match(str(v or "").strip().lower())
+    if not m:
+        return (0, 0)
+    sign = -1 if m.group(1) == "-" else 1
+    return (sign * int(m.group(2)), int(m.group(3)))
+
 
 _REGISTRY: dict = {}
 
@@ -99,6 +112,12 @@ def clean_definition(raw):
         "bonus": _clampi(raw.get("bonus", 0), -20, 20, 0),
         "shape": "", "size_ft": 0, "damage": "", "damage_type": "",
         "heal": "", "condition": None, "cost": None,
+        # D97 scaling (data-driven, generic): base slot level + an upcast step
+        # (dice added per slot level above base) + cantrip tier table (dice added
+        # by character level). Dice are folded into the ONE base dice term, so the
+        # step/tier die must share the base die's sides (else it is not applied).
+        "base_level": _clampi(raw.get("base_level", 0), 0, 9, 0),
+        "upcast_step": "", "upcast_scaling": False, "scale_tiers": [],
     }
     if targeting == "area":
         shape = str(raw.get("shape", "")).lower()
@@ -136,6 +155,33 @@ def clean_definition(raw):
                 out["cost"] = {"type": "resource", "id": rid}
         else:
             return None
+    # scaling metadata (D97) — validated, invalid pieces drop out (fail-safe: no scaling)
+    step = str(raw.get("upcast_step", "") or "").strip().lower()
+    if step:
+        cnt, sides = _dice_bonus(step)
+        if cnt > 0:
+            out["upcast_step"] = f"{cnt}d{sides}"
+            out["upcast_scaling"] = bool(raw.get("upcast_scaling"))
+    tiers = []
+    st = raw.get("scale_tiers")
+    if isinstance(st, (list, tuple)):                 # already normalised (idempotent re-clean)
+        for pair in st:
+            try:
+                thr, ds = pair
+                thr = int(thr)
+            except (TypeError, ValueError):
+                continue
+            cnt, dsides = _dice_bonus(ds)
+            if cnt > 0:
+                tiers.append((max(0, thr), f"{cnt}d{dsides}"))
+    else:
+        for part in re.split(r"[,;]+", str(st or "")):
+            m = _TIER_RE.match(part.strip())
+            if m:
+                cnt, sides = _dice_bonus(m.group(2))
+                if cnt > 0:
+                    tiers.append((max(0, int(m.group(1))), f"{cnt}d{sides}"))
+    out["scale_tiers"] = sorted(tiers)
     return out
 
 
@@ -326,11 +372,14 @@ def _roll_expr(expr, adv=None):
 
 async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_user_id=None,
                   target_id=None, point=None, direction="E", cast_level=None,
-                  adv=None, user=None):
+                  adv=None, user=None, op_id=None):
     """The ONE ability operation (D55/D60). Validates EVERYTHING server-side,
     applies effects through the existing authoritative subsystems, returns a plain
     result dict (``{"ok": False, "error": ...}`` on refusal, nothing applied).
-    ``user`` (dict or None) enables the chronicle posting; transport is never required."""
+    ``user`` (dict or None) enables the chronicle posting; transport is never required.
+    ``op_id`` (D93/D97): when present it is claimed up-front inside the write
+    transaction, so a duplicate request consumes NOTHING and applies no effect —
+    the whole cast is idempotent against a repeated ``op_id``."""
     from .room import gamelog, health, net
 
     defn = get(ability_id)
@@ -344,6 +393,13 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
         return _fail("Token has no usable stat block")
     if not _rollable_by(defn, tok, is_dm):
         return _fail("This caster does not have that ability")
+    if op_id:                                               # D93/D97 replay guard:
+        from . import inventory as INV                      # claim once, up-front —
+        with db.tx() as c:                                  # a duplicate consumes
+            if not INV._claim(c, str(op_id)[:40], room_id, "ability_cast", tok["id"]):
+                return {"ok": True, "replayed": True}       # no slot, no effect
+    from . import progression
+    char_level = progression.total_character_level(actor_sheet)
     if defn["cost"] is not None:
         ok, err, consumed = _consume_cost(room_id, tok, defn, cast_level)
         if not ok:
@@ -423,7 +479,7 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
         damage = heal = 0
         dtype = defn["damage_type"] or None
         if apply and defn["damage"] and sheet is not None:
-            expr = defn["damage"]
+            expr = _scaled_expr(defn, defn["damage"], cast_level, char_level)
             if entry.get("attack", {}).get("crit"):
                 expr = _crit_expr(expr)
             res = _roll_expr(expr)
@@ -520,6 +576,44 @@ def _crit_expr(expr):
         return f"{min(200, int(n) * 2)}d{rest}"
     except (TypeError, ValueError):
         return expr
+
+
+_BASE_RE = re.compile(r"^(\d{1,3})d(\d{1,3})((?:[+-]\d{1,3})?)$", re.I)
+
+
+def _scaled_expr(defn, base, cast_level, char_level):
+    """Raise the BASE dice count from upcast (slot levels above base) or a cantrip
+    tier table (by character level). The added dice must share the base die's sides,
+    else nothing changes (a cross-die step is left to the DM, never faked — D97)."""
+    m = _BASE_RE.match(str(base or "").strip().lower())
+    if not m:
+        return base
+    n, sides, tail = int(m.group(1)), int(m.group(2)), m.group(3)
+    add = 0
+    cost = defn.get("cost") or {}
+    if defn.get("upcast_scaling") and defn.get("upcast_step") and cost.get("type") == "spell_slot":
+        try:
+            cl = int(cast_level) if cast_level is not None else 0
+        except (TypeError, ValueError):
+            cl = 0
+        delta = cl - int(defn.get("base_level") or cost.get("level") or 0)
+        if delta > 0:
+            cnt, dsides = _dice_bonus(defn["upcast_step"])
+            if dsides == sides:
+                add += cnt * delta
+    if defn.get("scale_tiers") and not cost.get("type"):        # cantrip-only
+        try:
+            lvl = int(char_level or 0)
+        except (TypeError, ValueError):
+            lvl = 0
+        for thr, ds in defn["scale_tiers"]:
+            if lvl >= thr:
+                cnt, dsides = _dice_bonus(ds)
+                if dsides == sides:
+                    add += cnt
+    if add <= 0:
+        return base
+    return f"{min(200, n + add)}d{sides}{tail}"
 
 
 def _fail(msg):
