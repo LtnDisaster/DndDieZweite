@@ -2093,3 +2093,65 @@ lines name conditions by design (public table record, D90).
   served artwork carries `max-age=86400`, so a revoked private asset may survive in a
   warm browser cache for a day; "void kills a standing token" is intentionally NOT
   automated — the server refuses occupancy of void but does not simulate falling.
+
+## D104 — Lights become manageable and the DM can stand in a player's eyes: the `lamp` channel and the read-only `view_as`
+
+- **Context:** browser findings: darkness renders the map black (and cannot be
+  diagnosed), light sources "cannot be sensibly placed or managed", and the DM has
+  no way to check what a specific player actually sees. Phase 1 found the premises
+  half wrong: the light MODEL existed since D87/D89 (`mp["dark"]` room flag, lamp
+  world-objects with `bright`/`state.on`, token `light`/`darkvision`, all
+  plane-local, all LOS-correct, pinned by `test_lighting2.py`) — what was missing
+  was the MANAGEMENT SURFACE (no move, no retune, no list; delete+replace silently
+  loses `state.on` because the id merge keys on id), and the PLAYER-VIEW PREVIEW
+  did not exist at all. "Darkness = black" is Rule-as-Designed for a dark plane
+  without light sources.
+- **No new entities, no second light rule.** The lamp IS the light source
+  (registry of INTERACT_OPS unchanged). New DM-only WS message `lamp`
+  (`room/lights.py`): add/update/remove by id ON A PLANE (`floor` arg, D102
+  save rule), same canon as the object sanitizer (bright 0..30, world-window
+  clamp, 16-char ids, uuid ids for adds), same state-merge survival, ending in
+  the SAME `reevaluate_visibility` the lamp-interact and map-edit already call.
+  Panel toggling is silent administration: players experience the WORLD result
+  via `map_changed`, never a fake chronicle action (player-driven lamp interact
+  keeps its chronicle, untouched). New DM panels "Lights" (per viewed plane:
+  label/radius/on-off/move-by-click/delete/add-at-centre) and "Peek".
+- **`GET /rooms/{code}/view_as/{character_id}` — the security promise is
+  structural.** The /state player branch was EXTRACTED into
+  `rooms._viewer_token_view` and `/state` itself now calls it; `view_as` calls
+  the SAME function with the character's owner. There is no second visibility
+  logic to drift: same LOS, same `_lit_cells` dark/lamp/darkvision decision,
+  same hidden-token strips, same fog masking. Pure read (explored bytes and
+  ghost memory are only read — pinned). DM-only; members get 404, non-members
+  the classic 403 membership gate; a character without a token in the room
+  answers 404 like a floor that does not exist.
+- **The client preview is a DATA swap, not a state fork.** `viewData` accessors
+  (`viewG/viewTokens/viewGhosts`) feed the tactical renderer; the live DM state
+  keeps receiving every WS event underneath (map_changed keeps the panels
+  honest). While a preview shows: ALL canvas input is dead (select/drag/roll/
+  interact/dblclick), diorama switching is blocked (its renderer reads live DM
+  data), the plane filter is skipped on preview payloads (server-filtered), and
+  the banner names the character ("👁 DM preview: sight of …"). Invisible
+  tokens are absent from the payload — they cannot be clicked, hovered or
+  listed because they were never sent. Snapshot + Refresh (decision): live
+  replay would mean a second render/state path (forbidden).
+- **Side bug found by the audit and fixed:** WS connect reveal used the classic
+  FOG_R radius REGARDLESS of darkness — a D87 light-budget bypass at reconnect
+  (dark rooms revealed 6 cells of memory from nothing). It now defers to
+  `viewer_visible_cells` (the one light-aware function) when the plane is dark.
+- **Rule-variant documentation (not implemented):** the model knows ONE
+  darkness — the ordinary kind that light defeats (D89's standing decision).
+  "Magical darkness that ignores light" does not exist as a state and was NOT
+  silently invented; darkvision remains a private sense that only matters
+  where light fails (D89), and gear-granted `darkvision_ft` stays sheet-level.
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **725 passed, 1 skipped, 0 failed** (baseline 711 + `tests/test_d104_lights_preview.py`
+  14; two source pins updated to the preview accessor loop head — D102
+  precedent; layout-z pin satisfied by reusing `--z-movehud`).
+- **Honest limits:** the preview is a moment-image (Refresh re-fetches; a
+  vanished character exits the preview honestly); managing lights while a
+  preview is open only affects the preview after Refresh; the panel cannot
+  express dm_only-lamps per plane yet (checkbox exists in the editor tool, not
+  in the panel); no falling/feeling mechanics for darkness; connect reveal in
+  dark rooms now reveals exactly the light's reach — a player whose lantern sat
+  lit before disconnecting may legitimately re-learn that map area.

@@ -605,6 +605,63 @@ def delete_room(code: str, request: Request):
     return {"ok": True, "deleted": code}
 
 
+def _viewer_token_view(room, user, tokens_all, view_floor, mp):
+    """D104 — THE player-view token/fog decision of the REST snapshot, in ONE
+    function: /state's player branch and the DM's view_as preview share this
+    exact code. A second visibility logic must never exist — the preview's
+    security promise (it IS the server's character sight, not a cosmetic
+    dimming) is anchored here. Pure read: nothing is written, revealed or
+    broadcast; explored fog and ghost memory are only READ."""
+    uid = user["id"]
+    visible = ws.viewer_visible_cells(room["id"], uid, mp, floor=view_floor)
+    # D86: which planes this viewer stands on (floors of own/operated
+    # tokens). Tokens on other planes are ELSEWHERE, not hidden — they
+    # must not even be listed, so their plane leaks nothing either.
+    planes = {(t.get("floor") or "") for t in tokens_all
+              if t["owner_user_id"] == uid
+              or t.get("controller_user_id") == uid}
+    _plane_cache = {"": (mp, visible)}
+    def _plane(fl):
+        # D88: sight must be evaluated on the map the token STANDS ON —
+        # never decide a crypt token's visibility from the tavern's fog.
+        if fl not in _plane_cache:
+            mp_p = room_net.get_map(room["id"], fl)
+            _plane_cache[fl] = (mp_p, ws.viewer_visible_cells(room["id"], uid,
+                                                              mp_p, floor=fl))
+        return _plane_cache[fl]
+    def _visible_token(t):
+        fl = t.get("floor") or ""
+        if fl not in planes:
+            return False                      # D86: different plane = elsewhere
+        if t["owner_user_id"] == uid or t.get("controller_user_id") == uid:
+            return True                       # D82: controllers always see their token
+        mp_p, vis_p = _plane(fl)
+        origin, side = footprint.occupied_origin(mp_p, t)
+        return any((i := mapmodel.flat_idx(mp_p, x, y)) is not None and i in vis_p
+                   for (x, y) in footprint.origin_cells(mp_p, origin, side))   # D72
+    tokens = [t for t in tokens_all if _visible_token(t)]
+    for t in tokens:                                   # NPC stat blocks are DM-only
+        t["npc"] = None
+        if (t.get("character_id") is None and t.get("owner_user_id") is None
+                and t.get("controller_user_id") != uid):   # D83 duty: controllers keep the shape
+            t.pop("disposition", None)
+            t.pop("size", None)
+            t.pop("fw", None)                    # D81: hidden tokens leak no footprint
+            t.pop("fh", None)
+            t.pop("vw", None)                    # D82: nor the visual silhouette
+            t.pop("vh", None)
+            t.pop("rot", None)
+            t.pop("controller_user_id", None)    # D82: nor who leads it
+            t.pop("image", None)                 # D85: nor what artwork it wears
+            t.pop("floor", None)                 # D86: nor which plane it stands on
+            t.pop("light", None)                 # D87: nor how brightly it burns
+            t.pop("darkvision", None)            # D89: nor how well it sees
+    last = ws._last_seen.get(room["id"], {}).get(uid, {})
+    vis_ids = {t["id"] for t in tokens}
+    ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]
+    return tokens, ghosts, visible
+
+
 @router.get("/rooms/{code}/state")
 def room_state(code: str, request: Request):
     user, room = room_of(request, code)
@@ -638,58 +695,13 @@ def room_state(code: str, request: Request):
             or [t for t in tokens_all if t.get("controller_user_id") == user["id"]]
         view_floor = (pool[0].get("floor") or "") if pool else ""
     mp = room_net.get_map(room["id"], view_floor)
-    visible = set()
     if room["_role"] == "dm":
-        tokens, ghosts = tokens_all, []
+        tokens, ghosts, visible = tokens_all, [], set()
         for t in tokens:                                   # DM sees full stat blocks
             t["npc"] = db.j(t.get("npc"), None) or None
     else:
-        visible = ws.viewer_visible_cells(room["id"], user["id"], mp, floor=view_floor)
-        # D86: which planes this viewer stands on (floors of own/operated
-        # tokens). Tokens on other planes are ELSEWHERE, not hidden — they
-        # must not even be listed, so their plane leaks nothing either.
-        planes = {(t.get("floor") or "") for t in tokens_all
-                  if t["owner_user_id"] == user["id"]
-                  or t.get("controller_user_id") == user["id"]}
-        _plane_cache = {"": (mp, visible)}
-        def _plane(fl):
-            # D88: sight must be evaluated on the map the token STANDS ON —
-            # never decide a crypt token's visibility from the tavern's fog.
-            if fl not in _plane_cache:
-                mp_p = room_net.get_map(room["id"], fl)
-                _plane_cache[fl] = (mp_p, ws.viewer_visible_cells(room["id"], user["id"],
-                                                                  mp_p, floor=fl))
-            return _plane_cache[fl]
-        def _visible_token(t):
-            fl = t.get("floor") or ""
-            if fl not in planes:
-                return False                      # D86: different plane = elsewhere
-            if t["owner_user_id"] == user["id"] or t.get("controller_user_id") == user["id"]:
-                return True                       # D82: controllers always see their token
-            mp_p, vis_p = _plane(fl)
-            origin, side = footprint.occupied_origin(mp_p, t)
-            return any((i := mapmodel.flat_idx(mp_p, x, y)) is not None and i in vis_p
-                       for (x, y) in footprint.origin_cells(mp_p, origin, side))   # D72
-        tokens = [t for t in tokens_all if _visible_token(t)]
-        for t in tokens:                                   # NPC stat blocks are DM-only
-            t["npc"] = None
-            if (t.get("character_id") is None and t.get("owner_user_id") is None
-                    and t.get("controller_user_id") != user["id"]):   # D83 duty: controllers keep the shape
-                t.pop("disposition", None)
-                t.pop("size", None)
-                t.pop("fw", None)                    # D81: hidden tokens leak no footprint
-                t.pop("fh", None)
-                t.pop("vw", None)                    # D82: nor the visual silhouette
-                t.pop("vh", None)
-                t.pop("rot", None)
-                t.pop("controller_user_id", None)    # D82: nor who leads it
-                t.pop("image", None)                 # D85: nor what artwork it wears
-                t.pop("floor", None)                 # D86: nor which plane it stands on
-                t.pop("light", None)                 # D87: nor how brightly it burns
-                t.pop("darkvision", None)            # D89: nor how well it sees
-        last = ws._last_seen.get(room["id"], {}).get(user["id"], {})
-        vis_ids = {t["id"] for t in tokens}
-        ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]
+        tokens, ghosts, visible = _viewer_token_view(room, user, tokens_all,
+                                                     view_floor, mp)
     for t in tokens:                                   # conditions/death ride with visible tokens
         t["conds"] = C.load(t)
         t["death"] = D.load(t)
@@ -717,6 +729,43 @@ def room_state(code: str, request: Request):
                                      (room["id"],))]
                       if room["_role"] == "dm" else []),
     }
+
+
+@router.get("/rooms/{code}/view_as/{cid}")
+def room_view_as(code: str, cid: int, request: Request):
+    """D104 — DM preview: THE server-side sight of one character, read-only.
+    Runs the same _viewer_token_view the character's own /state runs — the
+    same LOS, the same dark/lamp/darkvision decision (it lives inside
+    viewer_visible_cells), the same hidden-token strips, the same fog
+    masking. Nothing is written: explored fog, ghost memory, broadcasts and
+    every real viewer's state stay untouched — the DM sees what the player
+    sees, and NOTHING gains what the DM sees. DM-only channel; to anyone
+    else it answers like a floor that does not exist (no oracle)."""
+    user, room = room_of(request, code)
+    if room["_role"] != "dm":
+        raise HTTPException(404, "Not found")
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (cid,))
+    owner = db.q1("SELECT * FROM users WHERE id=?", (ch["user_id"],)) if ch else None
+    tok = db.q1("SELECT * FROM tokens WHERE room_id=? AND character_id=?",
+                (room["id"], cid)) if ch else None
+    if owner is None or tok is None or not db.q1(
+            "SELECT 1 AS hit FROM room_members WHERE room_id=? AND user_id=?",
+            (room["id"], owner["id"])):
+        raise HTTPException(404, "Not found")
+    view_floor = tok.get("floor") or ""            # the preview FOLLOWS the character
+    tokens_all = db.q("SELECT * FROM tokens WHERE room_id=? ORDER BY id", (room["id"],))
+    mp = room_net.get_map(room["id"], view_floor)
+    tokens, ghosts, visible = _viewer_token_view(room, owner, tokens_all,
+                                                 view_floor, mp)
+    for t in tokens:
+        t["conds"] = C.load(t)
+        t["death"] = D.load(t)
+    return {"as": {"user_id": owner["id"], "username": owner["username"],
+                   "character_id": ch["id"], "character": ch["name"],
+                   "token_id": tok["id"]},
+            "view_floor": view_floor, "dark": bool(mp.get("dark")),
+            "grid": mapmodel.visible_map(mp, owner["id"], False, visible),
+            "tokens": tokens, "ghosts": ghosts}
 
 
 class FloorIn(BaseModel):

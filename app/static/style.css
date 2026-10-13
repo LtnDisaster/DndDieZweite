@@ -170,6 +170,13 @@ body.dbg-on .dbg { display: inline-block; font: 11px/1.4 ui-monospace, monospace
            box-shadow: 0 4px 16px rgba(0,0,0,.5); }
 #movehud.hidden { display: none; }
 #mh-text { color: var(--gold); font-size: .85rem; min-width: 90px; }
+/* ---- D104 DM player-view preview banner ---- */
+#previewbar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); z-index: var(--z-movehud);
+              display: flex; align-items: center; gap: .5rem; background: rgba(22,15,42,.94);
+              border: 1px solid #8f6fe0; border-radius: 10px; padding: .35rem .7rem;
+              box-shadow: 0 4px 16px rgba(0,0,0,.55); }
+#previewbar.hidden { display: none; }
+#pv-text { color: #cbb3ff; font-size: .85rem; font-weight: 600; white-space: nowrap; }
 /* ---- inventory ---- */
 .inv { margin-top: .5rem; }
 .inv-row { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; padding: .2rem 0;

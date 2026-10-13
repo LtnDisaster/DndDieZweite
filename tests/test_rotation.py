@@ -198,7 +198,7 @@ def test_tactical_rotates_body_but_not_text():
     and RESTORES it before the upright label/bar text (mirrors 15B-style
     loop-scope pins)."""
     src = (ROOT / "app/static/js/50_canvas.js").read_text()
-    loop = src[src.index("for (const t of state.tokens){"):src.index("function evtPos")]
+    loop = src[src.index("for (const t of viewTokens()){"):src.index("function evtPos")]
     rot_at = loop.index("ctx.rotate(")
     restore_at = loop.index("ctx.restore()", rot_at)
     label_at = loop.index("ctx.fillText(t.label,")

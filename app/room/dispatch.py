@@ -18,6 +18,7 @@ from .dice import (handle_cast, handle_long_rest, handle_npc_attack, handle_reso
 from .items import handle_attune, handle_identify, handle_recharge, handle_use_item
 from .fog import handle_fog_edit, handle_fog_toggle
 from .interact import handle_interact
+from .lights import handle_lamp                          # D104: DM light management
 from .inv import (handle_inv_adjust, handle_inv_container, handle_inv_equip,
                   handle_inv_grant, handle_inv_grip, handle_inv_money, handle_inv_remove, handle_inv_transfer,
                   handle_item_def)
@@ -132,6 +133,7 @@ HANDLERS = {
     "fog_edit": handle_fog_edit,
     "fog_toggle": handle_fog_toggle,
     "map_edit": handle_map_edit,
+    "lamp": handle_lamp,                                 # D104: DM-only lamp add/update/remove
     "add_token": handle_add_token,
     "del_token": handle_del_token,
     "update_npc": handle_update_npc,

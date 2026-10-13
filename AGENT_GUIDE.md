@@ -98,6 +98,7 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/room/combat.py` | Initiative and HP handlers | `handle_init_start()`, `handle_init_next()`, `handle_hp()` |
 | `app/room/movement.py` | Walks, stop, trap auto-stop, path previews | `handle_move()`, `handle_stop_move()`, `handle_path_preview()`, `walk()` |
 | `app/room/fog.py` | DM manual exploration edits + room-wide fog on/off | `handle_fog_edit()`, `handle_fog_toggle()` |
+| `app/room/lights.py` | D104 DM lamp management over the D89 object model | `handle_lamp()` (add/update/remove — DM-only, plane-scoped) |
 | `app/room/tokens.py` | Token add/remove/NPC edits | `handle_add_token()`, `handle_update_npc()` |
 | `app/room/items.py` | Item use/attune/identify/recharge | `handle_use_item()`, `handle_attune()` |
 | `app/room/traps.py` | Trap and loot resolution | `hit_trap()`, `take_loot()` |
@@ -255,6 +256,8 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 - Server:
   - `app/los.py` — conservative integer DDA wall/door LOS.
   - `app/room/visibility.py` — per-viewer token filtering and ghost retention.
+  - `app/room/lights.py` — D104: the DM's lamp management channel; mutates the
+    SAME objects list the editor saves, then `reevaluate_visibility` (D87/D89).
   - `app/room/fog.py` — DM-only batch `explored` reveal/hide.
   - `app/mapmodel.py`
   - `app/room/movement.py`
@@ -516,6 +519,33 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 - **Fog off:** `fog_toggle` persists `fog_off` in the map (sanitize owns the
   field; editor snapshots cannot reset it). Terrain+traps visible to all
   members; `visible_map` keeps the live-token LOS pipeline untouched.
+- **Lights & darkness (D87/D89/D104):** ONE model — the plane's `mp["dark"]`
+  flag (🕯 via `map_edit`'s `dark` field), lamps as world OBJECTS
+  (`interact.op.kind:"lamp"`, `bright` cells 0..30, `state.on`), token
+  `light`/`darkvision`. In darkness sight comes from light ALONE:
+  `visibility._lit_cells` = own footprint + max(light,darkvision) + every lamp's
+  own LOS on THAT plane (plane-local; walls block glow through the engine's own
+  LOS, never a light copy). The DM management channel is `lamp`
+  (`room/lights.py`: add/update(bright,label,on,x,y)/remove by id; DM-only;
+  `floor` arg with the D102 save rule; same object canon, same id-state-merge,
+  same `reevaluate_visibility`; the "Lights" DM panel toggles SILENTLY —
+  player-run lamp interacts keep their chronicle, management does not fake one).
+  WS connect reveal defers to `viewer_visible_cells` on dark planes (D104:
+  no classic-radius light-budget bypass on reconnect). NOT in the model, by
+  documented decision: magical darkness that ignores light — ordinary light
+  DOES defeat ordinary darkness (D89), variants stay documentation.
+- **DM peek (D104):** `GET /api/rooms/{code}/view_as/{character_id}` answers
+  with THE character's own `/state` sight — `rooms._viewer_token_view` is the
+  extracted player branch both endpoints share (a second visibility logic is
+  forbidden; the equivalence is pinned byte-for-byte). Read-only: explored
+  bytes, ghost memory and broadcasts stay untouched (pinned). DM-only (member
+  404, outsider 403 like `/state`, character without a token here 404), and it
+  follows the character's plane. The client swaps RENDER DATA only
+  (`viewG/viewTokens/viewGhosts`); live state keeps receiving events
+  underneath; all canvas input is dead during preview, diorama is blocked, and
+  tokens invisible to the character are ABSENT from the payload — nothing
+  hidden is clickable, hoverable or listable. Snapshot + Refresh; live replay
+  would mean a second state path (forbidden).
 - **NPC blocks:** `clean_npc` is the ONE normalizer and persists
   `abilities`/`resources`/`notes`; whitelists in `add_token`/`update_npc` and
   `CreatureIn`/`_creature_block` carry them (bestiary + spawn round-trip);
@@ -600,6 +630,7 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `knock_prone` | `room.conditions.handle_knock_prone` | DM | no | D83 generic forced-state op applying the EXISTING prone condition (D80); server entry `knock_prone()` for future trap/fall hooks; no height math |
 | `fog_edit` | `room.fog.handle_fog_edit` | DM | no | batch reveal/hide shared `explored` memory |
 | `fog_toggle` | `room.fog.handle_fog_toggle` | DM | no | room-wide `fog_off` flag: terrain+static visible to all, live NPCs stay LOS-filtered (D60) |
+| `lamp` | `room.lights.handle_lamp` | DM | no | D104 lamp add/update(bright,label,on,move)/remove on a plane — same canon + reevaluate as lamp-interact/map-edit; silent administration |
 | `map_edit` | `dispatch.handle_map_edit` | DM | no | map model sanitized; preserves trap/loot/fog runtime state; resize carries `explored` overlap |
 | `door` | `room.doors.handle_door` | DM or adjacent player | no | closed/locked edges block movement and LOS |
 | `token_span` | `room.tokens.handle_token_span` | owner or DM | no | mechanical resize; complete rect must fit at the CURRENT anchor or it is rejected unchanged (D81/15B) |
@@ -986,6 +1017,7 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_browser_flow.py` | real-JS tactical flow against the live WS stack: tactical draw, rectangular-token hit test, preview→confirm over the wire, refresh persistence — the documented NO-BROWSER harness |
 | `tests/test_d102_floors.py` | D102 floors: trap/toggle saves stay ON their plane (never clobber primary), connect/assign reveals land on the token's plane, reveal/fog patches carry `floor` and reach plane viewers only, `token_floor` DM-only while stairs stay the player route, floor RENAME moves registry+map+tokens and retargets stair destinations (refusals included), player `/state` delivered on the token's plane |
 | `tests/test_d103_editor_assets.py` | D103: void(5) blocks movement/teleport/placement but NOT vision/light; brush edits never touch wall/door/trap entities; void is plane-local (crypt pit ≠ primary); registry/sanitize keep legacy maps byte-identical; player map_edit refused; canonical `/assets/<id>` serves exactly like `/api/assets/<id>` (owner 200 PNG+nosniff, riding-DM 200, stranger/junk 404); assigned artwork roundtrip keeps DB canon; client brush/canvas wiring pinned |
+| `tests/test_d104_lights_preview.py` | D104: `lamp` channel roundtrip (add/update/off/remove, radius in/out, walls block glow like sight), darkness = memory+footstep only, darkvision effective, lamps plane-local AND plane-lighting, non-DM refused; `view_as` byte-equal to the player's own `/state`, leak-free (hidden NPC/traps/dm_only/secret doors/op payloads), purity (explored & player state unchanged), auth matrix (member 404/outsider 403/foreign char 404); reconnect reveals exactly by the light's reach; legacy rooms classic; toggled-off survives later map_edit; preview client wiring pinned |
 | `tests/test_d101_prep.py` | D101 prep screen: content `options` (member read, non-member/anon refused, empty room), `characters.background` roundtrip + no-PUT-wipe guard, `starting-gear` (resolves/skips/idempotent, authz mirrors build API, missing-data reported, `inv_changed` broadcast), `apply` broadcasts `snapshot` (reload-bug fix), and the prep UI wiring (source asserts — no browser runner) |
 | `tests/test_abilities.py` | DC/attack derivation, save-half, resist/immune through defense pipeline, death-pipeline entry, heal, condition, concentration flag, slot+resource consumption, upcast validation, attack-vs-AC+crit, footprint flank, LOS/door, range authority, actor spoofing refusal, hidden-token non-leak |
 | `tests/test_diorama_parity.py` | confirmed-path revalidation refusal (`route_invalid`), shared camera-space click math (Node vm), view-aware click/token/double-click, tool parity, sheet-crash guard |
@@ -1195,6 +1227,9 @@ Inspect:
 - `app/room/gamelog.py`
 - `app/room/chat.py`
 - `app/rooms.py::room_state()`
+- `app/rooms.py::_viewer_token_view()` — the player branch shared with
+  `room_view_as()` (D104): live delivery and `/state` replay must match, and
+  the DM preview must be the same computation — one function, no drift.
 
 Live delivery and `/state` replay must match.
 

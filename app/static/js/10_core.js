@@ -186,6 +186,10 @@ function saveViewMode(){
 }
 function setViewMode(mode){
   const next = normalizeViewMode(mode);
+  // D104: the preview is a TACTICAL-only, data-swapped render — the diorama
+  // renderer reads the live DM state, so switching to it mid-preview would
+  // show everything the preview must hide.
+  if (state.preview && next === "diorama"){ toast("Preview is tactical-view only"); return; }
   if (next === state.viewMode) return;
   // Each renderer frames its own camera; the shared state.cam must be saved
   // into the outgoing mode's slot and restored from the incoming one, or a

@@ -554,3 +554,49 @@ what the human eye sees — walk this list in a real browser to ACCEPT or REJECT
 - [ ] Assign the same art on a token on a NAMED floor → renders there too.
 - [ ] A room/map/token untouched since before D103 behaves exactly as in the
       Sprint 29/30/31 checklists (no migration happened; old maps have no 🕳️ cells).
+
+## D104 — Lights manageable + DM player-view peek (manual browser acceptance)
+
+Automated tests (725/1/0) pin the lamp channel, the light/LOS semantics and the
+peek's server-truth + purity. They CANNOT pin the felt usability — walk this to
+ACCEPT or REJECT:
+
+### DM — Lights panel (viewed plane)
+- [ ] 🕯 darkness on → the tactical canvas goes (nearly) black for players while
+      YOU still see everything (as designed: dark = no free sight). Your own
+      token still shows its ring — you always "feel" your cell.
+- [ ] DM tab "Lights": "＋ Lamp" drops a lit lamp at your view centre; the panel
+      lists it (💡 name, radius). Toggle the checkbox → 🌑: players lose the lit
+      area IMMEDIATELY (no reload needed), no chronicle entry for anyone.
+- [ ] Radius field 5→12 → the visible circle grows accordingly for players;
+      >30 is clamped; a lamp behind a wall does NOT shine through it (stand
+      your token behind the wall as a player and check).
+- [ ] ➜ move mode then click a cell → the lamp travels; its light moves with it;
+      a RELOAD keeps the new position. ✕ removes it (players see the area die).
+- [ ] The panel lists only the VIEWED plane: view a named floor → its lamps (or
+      the honest empty line); toggling there changes nothing on ⬛ primary and
+      vice versa. A player standing on the lit plane can click the lamp and
+      tend it themselves (chronicle message stays — player actions still speak).
+
+### DM — peek ("View as")
+- [ ] "Peek" panel → choose a player character → 👁 View as: banner
+      "👁 DM preview: sight of {name}" over a canvas showing EXACTLY what that
+      player's screen shows (compare side-by-side in a second browser — dark
+      areas, fog memory, visible tokens must match; unseen NPCs absent).
+- [ ] While previewing: token click / drag / right-click roll / interact /
+      double-click map / diorama switch — ALL refused with a hint; camera pan
+      works; Refresh re-fetches (walk the player somewhere first: the new
+      position appears only after Refresh — moment-image by design); ✕ Exit
+      restores the full DM view untouched.
+- [ ] Flip a light (panel) while previewing → nothing changes until Refresh
+      (honest), Exit → your DM view was never altered.
+- [ ] A character moved to another floor while previewed: Refresh follows the
+      character to that plane (banner names it).
+- [ ] Player-side sanity: while the DM peeks, the player's own screen changes
+      NOTHING (no flicker, no reveal, no fog edits in the room log).
+- [ ] Reconnect test: as a player in a dark room WITH a lamp — log out, log in:
+      you re-learn exactly the lamp's reach (explored = light + old memory),
+      no more; without lamp you re-learn only your footprint + old memory.
+- [ ] Old room (created before D104, never dark): "View as" works and matches
+      the player exactly; classic fog behaviour untouched (D101–103 checks
+      still pass).

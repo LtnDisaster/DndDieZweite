@@ -218,6 +218,11 @@ window.addEventListener("unhandledrejection", function(ev){
   </header>
   <main class="room-grid">
     <div class="mapwrap">
+      <div id="previewbar" class="hidden">
+        <span id="pv-text">👁 DM preview</span>
+        <button id="pv-refresh" class="ghost" title="Re-fetch what this character sees right now">↻ Refresh</button>
+        <button id="pv-exit" class="ghost" title="Back to the full DM view">✕ Exit preview</button>
+      </div>
       <canvas id="map"></canvas>
       <div id="toast"></div>
       <div id="narrative-overlay" class="narrative-overlay" aria-live="polite" data-style="overlay">
@@ -453,6 +458,22 @@ window.addEventListener("unhandledrejection", function(ev){
           <button id="btn-floor-add" class="primary" title="Add another occupancy plane to this room">＋ Add</button>
         </div>
         <div class="row"><small class="meta" style="opacity:.6">Planes are independent: own map, own fog, own tokens. Players change planes at a stair object; only the DM moves tokens between floors.</small></div>
+      </div>
+      <div class="panel hidden" id="lightpanel" data-tab="dm">
+        <h2>Lights</h2>
+        <div id="light-list" class="journal-list"></div>
+        <div class="row">
+          <button id="btn-lamp-add" class="primary" title="Place a new lamp (bright 5) at the centre of your view">💡 ＋ Lamp</button>
+        </div>
+        <div class="row"><small class="meta" style="opacity:.6">Lamps light THEIR plane only, walls block the glow (the same LOS as sight). Toggling here is silent DM administration — players experience the world change, not a fake action. 🕯 toggles room-wide darkness; a token's own light/darkvision lives in its sheet.</small></div>
+      </div>
+      <div class="panel hidden" id="peekpanel" data-tab="dm">
+        <h2>Peek</h2>
+        <div class="row">
+          <select id="peek-who" style="flex:1"></select>
+          <button id="btn-peek" class="primary" title="See exactly what this character sees — server-computed, read-only">👁 View as</button>
+        </div>
+        <div class="row"><small class="meta" style="opacity:.6">The preview is the character's real server-side sight (fog, darkness, light, hidden tokens) — a moment-image; Refresh re-fetches it. Nothing you see here changes what anyone sees.</small></div>
       </div>
       <div class="panel hidden" id="dmtools" data-tab="dm">
         <h2>DM Tools</h2>

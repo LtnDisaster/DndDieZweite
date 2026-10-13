@@ -38,7 +38,9 @@ def _canvas():
 
 def test_render_loop_never_shadows_the_viewport_dimensions():
     src = _canvas()
-    start = src.index("for (const t of state.tokens){")
+    # D104 moved the loop head behind the preview-data accessor; the pinned
+    # shadowing class lives in the SAME loop body and is unchanged.
+    start = src.index("for (const t of viewTokens()){")
     # D86 adds a floor-plane skip with its own continue BEFORE the viewport
     # culling; this pin is about the CULLING continue (the shadowing class).
     culled = src.index("continue;", src.index("tx > w + r + 40", start))

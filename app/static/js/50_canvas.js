@@ -11,6 +11,13 @@ function renderFogToggle(){
 }
 const cv = $("map"), ctx = cv.getContext("2d");
 function cellSize(){ return state.grid ? state.grid.cell : 50; }
+// D104: THE accessor trio for what the canvas RENDERS. A DM preview replaces
+// the render DATA and nothing else: interaction is blocked at the input
+// handlers, and the live state keeps receiving WS updates underneath — the
+// preview is an honest moment-image of the server-side player sight.
+function viewG(){ return state.preview ? state.preview.grid : state.grid; }
+function viewTokens(){ return state.preview ? state.preview.tokens : state.tokens; }
+function viewGhosts(){ return state.preview ? state.preview.ghosts : state.ghosts; }
 /* D85 token artwork: t.image is ONLY ever a server-generated "/assets/<id>"
    URL (never client-typed), drawn inside the token's own rotate frame — one
    rotation, aspect preserved, clipped to the body ellipse. Loaded once per
@@ -206,7 +213,11 @@ function tick(){
   requestAnimationFrame(tick);
 }
 function visibleHere(i){
-  const g = state.grid; if (!g || i == null || i < 0) return false;
+  const g = viewG(); if (!g || i == null || i < 0) return false;
+  // D104: a DM preview is masked SERVER-side — cells the character may not
+  // see are null; the preview must be evaluated like a player, never like
+  // the DM's own unrestricted sight.
+  if (state.preview) return g.cells && g.cells[i] !== null && g.cells[i] !== undefined;
   if (state.room && state.room.role === "dm") return true;
   return g.cells && g.cells[i] !== null && g.cells[i] !== undefined;
 }
@@ -216,13 +227,14 @@ function visibleHere(i){
 function draw(){
   if (!ctx || !state.room) return;
   try {
-    if (state.viewMode === "diorama" && !state.editing){ drawDiorama(); return; }
+    if (state.viewMode === "diorama" && !state.editing && !state.preview){ drawDiorama(); return; }
     drawTactical();
   } catch (e){ dbgErr(e, state.viewMode); throw e; }   // visible in ?debug, still fatal (no silent breakage)
 }
 function drawTactical(){
   const { w, h } = view(), c = cellSize(), cam = state.cam;
-  const gm = state.editing && state.editMap ? state.editMap : state.grid;
+  const gm = state.preview ? state.preview.grid
+             : (state.editing && state.editMap ? state.editMap : state.grid);
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#0a0b10"; ctx.fillRect(0, 0, w, h);
   const ox = gm ? gridOrigin(gm)[0] : 0, oy = gm ? gridOrigin(gm)[1] : 0;
@@ -324,8 +336,8 @@ function drawTactical(){
     for (const pt of state.aoe.cells){ const rx = pt.x*c + cam.ox, ry = pt.y*c + cam.oy;   // WORLD cells
       ctx.fillRect(rx, ry, c, c); }
   }
-  for (const gh of state.ghosts){
-    if (!onPlane(gh)) continue;                   // D86: fog memories of the wrong plane stay put
+  for (const gh of viewGhosts()){
+    if (!state.preview && !onPlane(gh)) continue;   // D86/D104: preview arrives plane-filtered
     const gx = gh.x + cam.ox, gy = gh.y + cam.oy;
     if (gx < -40 || gy < -40 || gx > w+40 || gy > h+40) continue;
     ctx.save(); ctx.globalAlpha = .32;
@@ -357,8 +369,8 @@ function drawTactical(){
     ctx.strokeStyle = p.color || "#f1c40f"; ctx.lineWidth = 4; ctx.stroke();
     ctx.restore();
   }
-  for (const t of state.tokens){
-    if (!onPlane(t)) continue;                    // D86: other planes are elsewhere
+  for (const t of viewTokens()){
+    if (!state.preview && !onPlane(t)) continue;  // D86/D104: preview arrives plane-filtered
     // tw/th NEVER w/h: this loop's scope owns the viewport dimensions w/h —
     // shadowing them here made the culling check drop every token offscreen (15B).
     const [tw, th] = tokenSpan(t);
@@ -406,7 +418,7 @@ function drawTactical(){
       ctx.strokeStyle = "#c0392b"; ctx.lineWidth = 2; ctx.stroke(); }
     // D82 facing wedge: a rotated circle/square visual would otherwise be
     // indistinguishable — the gold nose shows where the creature faces.
-    if (state.grid && state.grid.dark && (t.light | 0) > 0 && !dth?.dead){
+    if (viewG() && viewG().dark && (t.light | 0) > 0 && !dth?.dead){
       // D87: an operating light is visible even in the dark it fights
       ctx.beginPath(); ctx.arc(0, 0, Math.min(r + 6, r + (t.light | 0) * 3), 0, Math.PI * 2);
       ctx.strokeStyle = "rgba(255,214,102,.5)"; ctx.lineWidth = 2; ctx.stroke();
@@ -804,6 +816,16 @@ function onDown(e){
   if (!state.room) return;
   const p = evtPos(e);
   if (e.button === 1 || e.button === 2){ state.pan = { x: p.x - state.cam.ox, y: p.y - state.cam.oy }; e.preventDefault(); return; }
+  // D104: the DM preview is INSPECTION ONLY — no selection, no drag, no
+  // roll, no interact, nothing reachable that the previewed player could
+  // not reach. (Camera panning above stays allowed: presentation only.)
+  if (state.preview){ toast("Preview is view-only — exit it to interact"); return; }
+  if (state.lightMoveId && state.room.role === "dm"){      // D104 lamp-move tool
+    const { cx, cy } = clickCell(p);
+    const id = state.lightMoveId; state.lightMoveId = null;
+    wsSend({ type: "lamp", action: "update", floor: state.viewFloor || "", id, x: cx, y: cy });
+    toast("Lamp moved"); return;
+  }
   // Armed DM tools take the click in BOTH views (resolved via the view-aware
   // clickCell); only unarmed diorama clicks are select/move gestures.
   const toolArmed = state.rulerArmed || state.aoeArmed || state.pingArmed ||
@@ -934,7 +956,7 @@ function clickToken(p){
   return tokenAt(p.x - state.cam.ox, p.y - state.cam.oy);
 }
 function onDbl(e){
-  if (state.editing) return;
+  if (state.editing || state.preview) return;               // D104: preview is view-only
   const p = evtPos(e), { cx, cy } = clickCell(p);
   const g = state.grid;
   if (g && !inWorld(g, cx, cy)) return;

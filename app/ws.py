@@ -73,9 +73,19 @@ async def ws_room(ws: WebSocket, code: str):
         by_floor.setdefault(tk.get("floor") or "", []).append(tk)
     for fl, toks in by_floor.items():
         mpj = get_map(room_id, fl)
-        newly = []
-        for tk in toks:
-            newly += _reveal_token(mpj, tk)
+        if mpj.get("dark"):
+            # D104: connect reveal obeys DARKNESS too. The classic FOG_R
+            # radius here predated D87 and handed a connecting player light-
+            # budget memory they were never entitled to (dark = light only).
+            # viewer_visible_cells is the ONE light-aware function — lamps,
+            # token light and darkvision reveal at connect exactly what they
+            # reveal in play; no second light rule.
+            newly = mapmodel.reveal_cells(
+                mpj, viewer_visible_cells(room_id, user["id"], mpj, floor=fl))
+        else:
+            newly = []
+            for tk in toks:
+                newly += _reveal_token(mpj, tk)
         if newly:
             set_map(room_id, mpj, fl)
             await send_to_plane_viewed(room_id, fl, "explored",

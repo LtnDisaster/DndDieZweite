@@ -11,6 +11,7 @@ async function openRoom(code){
   state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || [];
   state.floors = s.floors || [""];
   state.grid = s.grid; state.editing = false; state.editMap = null; state.sel = null;
+  state.preview = null; state.lightMoveId = null;   // D104: no preview survives a room switch
   state.plan = null; state.planRequest = null; state.moving = new Set();
   state.pings = []; state.ruler = null; state.rulerArmed = false; state.pingArmed = false; state.aoe = null;
   state.online = new Set([state.me.username]);
@@ -81,6 +82,7 @@ function renderViewFloor(){
     }
   }
   if (typeof renderFloorPanel === "function") renderFloorPanel();   // D102
+  if (typeof renderLightsPanel === "function") renderLightsPanel(); // D104: lamps of the VIEWED plane
 }
 
 /* ---------- D102 floor manager (DM side panel) ---------- */
@@ -152,6 +154,98 @@ function editFloor(method, old, newName){
                     renderFloorPanel(); renderViewFloor(); });
 }
 
+/* ---------- D104 light manager (DM side panel) + peek (DM preview) ---------- */
+function _lamps(){
+  const g = state.grid; if (!g) return [];
+  return (g.objects || []).filter(o => ((o.interact || {}).op || {}).kind === "lamp");
+}
+function _pvEsc(s){ return String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
+function renderLightsPanel(){
+  const panel = $("lightpanel"), list = $("light-list");
+  if (!panel || !list) return;
+  if (!(state.room && state.room.role === "dm")) return;
+  const fl = state.viewFloor || "";
+  const lamps = _lamps();
+  list.innerHTML = lamps.length ? ""
+    : `<div class="row"><small class="meta" style="opacity:.6">No lamps on ${fl ? "“" + _pvEsc(fl) + "”" : "the primary plane"}.</small></div>`;
+  for (const o of lamps){
+    const on = !((o.state || {}).on === false);
+    const b = ((o.interact || {}).op || {}).bright | 0;
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML =
+      `<label style="display:flex;align-items:center;gap:5px;flex:1;min-width:0">` +
+      `<input type="checkbox" ${on ? "checked" : ""} title="active / inactive">` +
+      `<span>${on ? "💡" : "🌑"}</span>` +
+      `<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_pvEsc(o.label || "Lamp")}</span></label>` +
+      `<input type="number" min="0" max="30" value="${b}" style="width:54px" title="Bright radius in cells — walls block the glow">` +
+      `<button class="ghost pv-move" title="Move: then click the destination cell">➜</button>` +
+      `<button class="ghost pv-del" title="Remove this lamp">✕</button>`;
+    const [chk, num] = row.querySelectorAll("input");
+    chk.onchange = () => wsSend({type:"lamp", action:"update", floor: fl, id: o.id, on: chk.checked});
+    num.onchange = () => wsSend({type:"lamp", action:"update", floor: fl, id: o.id, bright: +num.value});
+    row.querySelector(".pv-move").onclick = () => {
+      state.lightMoveId = o.id; toast("Click the lamp's destination cell"); };
+    row.querySelector(".pv-del").onclick = () => {
+      if (!confirm(`Remove lamp “${o.label || "Lamp"}”?`)) return;
+      wsSend({type:"lamp", action:"remove", floor: fl, id: o.id}); };
+    list.appendChild(row);
+  }
+  const add = $("btn-lamp-add");
+  if (add) add.onclick = () => {
+    const cv = $("map"); if (!cv || !toCell) return;
+    const { cx, cy } = toCell(cv.clientWidth / 2, cv.clientHeight / 2);
+    wsSend({type:"lamp", action:"add", floor: fl, x: cx, y: cy, bright: 5, label: "Lamp"});
+  };
+}
+function renderPeek(){
+  const sel = $("peek-who");
+  if (!sel || !(state.room && state.room.role === "dm")) return;
+  const cands = (state.room.members || []).filter(m => m.role !== "dm" && m.character_id);
+  sel.innerHTML = cands.map(m => {
+    const nm = m.char && m.char.name ? m.char.name : m.username;
+    return `<option value="${m.character_id}">${_pvEsc(nm)}${m.char && m.char.name ? " (" + _pvEsc(m.username) + ")" : ""}</option>`;
+  }).join("") || `<option value="">no player characters</option>`;
+  const b = $("btn-peek");
+  if (b) b.onclick = startPeek;
+}
+function renderPreviewBar(){
+  const bar = $("previewbar"); if (!bar) return;
+  const rf = $("pv-refresh"), ex = $("pv-exit");
+  if (rf) rf.onclick = refreshPeek;
+  if (ex) ex.onclick = endPreview;
+  bar.classList.toggle("hidden", !state.preview);
+  if (!state.preview) return;
+  const p = state.preview;
+  $("pv-text").textContent = `👁 DM preview: sight of ${p.as.character || p.as.username}`
+    + ` · ${p.view_floor ? "floor “" + p.view_floor + "”" : "⬛ primary"}`
+    + (p.dark ? " · 🕯 dark" : "");
+}
+async function startPeek(){
+  const sel = $("peek-who"); if (!sel || !sel.value) return;
+  if (state.editing){ toast("Save or cancel the map editor first"); return; }
+  try {
+    const p = await api(`/rooms/${state.room.code}/view_as/${sel.value}`);
+    p._cid = +sel.value;
+    state.preview = p;
+    state.sel = null; if (typeof clearPlan === "function") clearPlan();
+    state.lightMoveId = null;
+    if (state.viewMode === "diorama") setViewMode("tactical");
+    renderPreviewBar(); draw();
+    toast(`Previewing ${p.as.character || p.as.username} — view-only`);
+  } catch(e){ toast(e.message); }
+}
+async function refreshPeek(){
+  if (!state.preview) return;
+  const cid = state.preview._cid;
+  try {
+    const p = await api(`/rooms/${state.room.code}/view_as/${cid}`);
+    p._cid = cid; state.preview = p; renderPreviewBar(); draw();
+  } catch(e){ toast(e.message); endPreview(); }   // character vanished: honest exit
+}
+function endPreview(){ if (!state.preview) return;
+  state.preview = null; renderPreviewBar(); draw(); }
+
 async function refreshRoom(){
   const s = await api(`/rooms/${state.room.code}/state`
                       + (state.viewFloor ? `?floor=${encodeURIComponent(state.viewFloor)}` : ""));
@@ -162,6 +256,8 @@ async function refreshRoom(){
   if (state.plan && !state.tokens.find(t => t.id === state.plan.token_id)) state.plan = null;
   updateMoveHud();
   renderParty(); renderInit(); renderMyChars();
+  if (typeof renderPeek === "function") renderPeek();             // D104: character list
+  if (typeof renderPreviewBar === "function") renderPreviewBar(); // D104: a preview survives refreshes
   state.quests = s.quests || []; renderQuests();
   state.itemDefs = s.item_defs || []; renderInv();   // D92: inventory window
   state.messages = s.messages || []; state.chat = s.chat || [];

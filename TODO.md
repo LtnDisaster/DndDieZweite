@@ -724,3 +724,39 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       untouched); concurrent editors stay last-writer-wins (D88 class); artwork
       `max-age=86400` can outlive access revocation in a warm cache; no automatic
       "fall into void" simulation — the server only refuses occupancy.
+
+## Done — Sprint 33: D104 Lights manageable + DM player-view peek (Lichtquellen-bedienung, DM-Spielersicht) (2026-10-13, D104)
+
+- [x] **Light management on the ONE existing lamp model:** new DM-only `lamp`
+      WS channel (`room/lights.py`) — add/update(bright,label,on,move)/remove by
+      id on a named plane, same canon + id-merge as the object sanitizer, same
+      `reevaluate_visibility` as lamp-interact/map-edit. Silent administration
+      (no fake chronicle). New DM panels: **Lights** (viewed plane: toggle/
+      radius/rename/move-by-click/delete/add-at-centre) — the editor's place/
+      remove tools finally got the list they never had.
+- [x] **DM peek `GET /rooms/{code}/view_as/{cid}`:** the /state player branch
+      EXTRACTED to `rooms._viewer_token_view`, shared by both callers — zero
+      second visibility logic; read-only (explored/ghost/broadcast untouched,
+      pinned); DM-only (member 404 / outsider 403 / foreign-character 404).
+      Client: `viewG/viewTokens/viewGhosts` render accessors, dead canvas input
+      while previewing, diorama blocked, plane filter server-side, banner
+      "👁 DM preview: sight of …", Snapshot + Refresh (approved design).
+- [x] **Audit find fixed:** WS connect reveal ignored darkness (classic FOG_R
+      light-budget bypass on reconnect) — now defers to `viewer_visible_cells`
+      on dark planes; rule variants (magical darkness) documented, NOT invented.
+- [x] `tests/test_d104_lights_preview.py` (14): lamp roundtrip radius/off, walls
+      block light exactly like sight, darkness = memory+footstep only,
+      darkvision effective, plane isolation of lamp + light, non-DM refused,
+      view_as byte-equal to the player's own /state, leak-free (hidden NPC/
+      undiscovered traps/dm_only/secret doors/op-payload), purity (explored +
+      player state unchanged), auth matrix, reconnect reveals by light's reach,
+      legacy rooms classic, toggled-off survives later map_edit, client wiring
+      source pins. Two loop-head source pins followed to the accessors (D102
+      precedent), z-pin satisfied via `--z-movehud`. Canonical close:
+      `docker compose run --rm test` → **725 passed, 1 skipped, 0 failed**.
+      Docs: D104, AGENT_GUIDE (lights section, view_as security, test map),
+      MANUAL checklist D104.
+- [ ] **Follow-ups (honest limits):** preview = moment-image (Refresh);
+      dm_only-lamps not panel-editable yet (editor tool only); no magical-
+      darkness state (documented variant); no falling mechanics; managing
+      lights mid-preview only shows after Refresh.
