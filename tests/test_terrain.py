@@ -43,8 +43,8 @@ def column(m, x, v):
 def test_sanitize_accepts_the_extended_vocabulary_and_clamps():
     m = mapmodel.sanitize({"w": 8, "h": 6, "cells": [3, 4] + [0] * 46})
     assert m["cells"][:2] == [3, 4]
-    m = mapmodel.sanitize({"w": 8, "h": 6, "cells": [9, -3, 5, 1] + [0] * 44})
-    assert m["cells"][:4] == [4, 0, 4, 1]
+    m = mapmodel.sanitize({"w": 8, "h": 6, "cells": [9, -3, 6, 1] + [0] * 44})
+    assert m["cells"][:4] == [5, 0, 5, 1]          # D103: clamp target is 5 (void)
 
 
 def test_registry_semantics():

@@ -23,7 +23,10 @@ AUTO_GROW = os.environ.get("DNDTABLE_AUTO_GROW", "0") == "1"
 # 0 floor, 1 wall (classic), 2 difficult terrain,
 # 3 barrier  — blocks movement, does NOT block vision, climbable,
 # 4 low_obstacle — passable but costs double (5e knee-high/undergrowth), climbable,
-#                does not block vision.
+#                does not block vision,
+# 5 void (D103) — NO FLOOR: impassable and not climbable, sight passes over it
+#                (a pit is not a wall). Never migrates old maps: nothing stored
+#                uses 5 until a DM paints it; terrain(None) stays floor (fog).
 # app/wall.py exposes the same facts as cell/edge queries; path, los, movecost and
 # footprint all consult this registry — never a hard-coded cell value again.
 TERRAIN = {
@@ -37,6 +40,8 @@ TERRAIN = {
         "blocks_movement": True,  "blocks_vision": False, "height": 1, "climbable": True},
     4: {"name": "low_obstacle", "walk": True, "difficult": True,
         "blocks_movement": False, "blocks_vision": False, "height": 0, "climbable": True},
+    5: {"name": "void",         "walk": False, "difficult": False,
+        "blocks_movement": True,  "blocks_vision": False, "height": 0, "climbable": False},
 }
 TERRAIN_MAX = max(TERRAIN)
 

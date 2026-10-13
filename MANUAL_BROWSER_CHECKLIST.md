@@ -519,3 +519,38 @@ These confirm the D102 floor UX in a real browser (the mechanics are automated i
       floor does not paint anything into your crypt view (and vice versa).
 - [ ] A room created BEFORE D102 (everything on primary) is untouched: same map,
       same fog, no floors listed, table behaves as in the Sprint 29/30 checklists.
+
+## D103 — Map editor truth + PNG display (manual browser acceptance)
+
+Automated tests (711/1/0) pin the server/registry/route semantics. They CANNOT pin
+what the human eye sees — walk this list in a real browser to ACCEPT or REJECT:
+
+### Map editor — floor, void, erase
+- [ ] ⬜ floor brush: drag a rectangle on blank ground → the cells VISIBLY change
+      (two-tone tiled floor vs the dark background) and the change survives a reload.
+- [ ] 🕳️ void brush: paint a 3-cell line across a corridor → dark hatched holes;
+      a token walked/teleported INTO the line refuses ("no path"/"invalid teleport"),
+      and a NEW token dropped on it lands on the nearest real floor cell beside it.
+- [ ] Sight passes the pit: with fog on, stand your token beside the void line with
+      an NPC/token directly behind it — you SEE it (and its cells explore), even
+      though nobody can walk through.
+- [ ] 🧹 erase on a trap/loot cell still clears THAT item and paints walkable
+      floor (old meaning — erase must never dig holes); ⬜ over void restores floor
+      and the token can cross again.
+- [ ] Walls/doors/traps elsewhere are byte-untouched by any brush stroke; the void
+      line on a NAMED floor (view a floor in the Floors panel, paint, save) never
+      appears on ⬛ primary or another floor — and vice versa.
+- [ ] Diorama view: the void cells render as flat floor (known cosmetic limit —
+      NOT a bug to report); tactical view is the source of truth.
+
+### Token artwork (PNG) — display path
+- [ ] DM/player uploads a PNG for a token → the portrait renders as an IMAGE on the
+      canvas immediately (not the grey initial-disc fallback) — first try, no reload.
+- [ ] Hard-reload (Ctrl+Shift+R) → still the image; DevTools→Network: the
+      `/assets/<id>` request is 200 image/png (this request 404'd before D103).
+- [ ] A stranger account in ANOTHER room cannot load that url by pasting it (404,
+      no hint); a private asset un-assigned from any token only serves its owner;
+      the DM of a room the art rides in may load it.
+- [ ] Assign the same art on a token on a NAMED floor → renders there too.
+- [ ] A room/map/token untouched since before D103 behaves exactly as in the
+      Sprint 29/30/31 checklists (no migration happened; old maps have no 🕳️ cells).

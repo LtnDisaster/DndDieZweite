@@ -261,6 +261,8 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   - `app/room/doors.py`
 - Client:
   - `app/static/js/50_canvas.js` — renders server-known cells and fog brushes.
+    D103: floor 0 renders as visible tiling, the 🕳️ void brush paints 5, 🧹 erase
+    keeps its old meaning (0 + clear entities at the cell).
   - `app/static/js/40_ws.js` — handles `fog_changed`.
   - `app/static/js/60_main.js` — fog brush UI wiring.
 - Tests:
@@ -274,8 +276,19 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 - Server:
   - `app/mapmodel.py` — cell vocabulary via **TERRAIN registry** (D69): 0 floor,
     1 wall, 2 difficult, 3 barrier (move✗/vision✓, climbable), 4 low_obstacle
-    (move✓ ×2 cost, climbable); `elev` integer layer -6..6 (D70, missing = flat,
+    (move✓ ×2 cost, climbable), 5 void (D103: move✗/vision✓, NOT climbable — a pit
+    is not a wall; nothing stores a 5 until a DM paints it, `terrain(None)` stays
+    floor, sanitize clamps 6+ to 5); `elev` integer layer -6..6 (D70, missing = flat,
     fog-gated in `visible_map`); `grow_map`/`growth_needed` (D67).
+  - `app/assets.py` — token artwork (D85): uploads validated as REAL PNG (magic,
+    Pillow re-encode strips metadata, caps), 16-hex ids, private assets serve only
+    owner / room DM / token rider via `serve_allowed`, uniform 404 (no oracle).
+    D103: `tokens.image` canon is `/assets/<id>` and the canvas loads it VERBATIM —
+    `media_router` (no prefix) routes that exact url to the same `get_asset` as
+    `/api/assets/<id>` does. Clients never re-derive a url from an asset id;
+    servers never store anything but the canonical form. FastAPI ≥0.142 defers
+    include_router into `_IncludedRouter` wrappers — pin routing behaviour in tests,
+    do not scan `app.routes`.
   - `app/wall.py` — semantics facade: blocks_movement/blocks_vision/climbable/
     height_units per cell; never re-encode cell values in features.
   - `app/room/movement.py` — triggers traps/loot on walk and stops movement on a trap.
@@ -972,6 +985,7 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_sprint20_security.py` | D90: caster-plane ability truth, cross-plane refusal no-oracle, hidden-token cond gate, plane-scoped aoe/ping (+darkvision/asset/floor/mount/lamp/state sweeps), editor resize pin/elev carry (Node vm) |
 | `tests/test_browser_flow.py` | real-JS tactical flow against the live WS stack: tactical draw, rectangular-token hit test, preview→confirm over the wire, refresh persistence — the documented NO-BROWSER harness |
 | `tests/test_d102_floors.py` | D102 floors: trap/toggle saves stay ON their plane (never clobber primary), connect/assign reveals land on the token's plane, reveal/fog patches carry `floor` and reach plane viewers only, `token_floor` DM-only while stairs stay the player route, floor RENAME moves registry+map+tokens and retargets stair destinations (refusals included), player `/state` delivered on the token's plane |
+| `tests/test_d103_editor_assets.py` | D103: void(5) blocks movement/teleport/placement but NOT vision/light; brush edits never touch wall/door/trap entities; void is plane-local (crypt pit ≠ primary); registry/sanitize keep legacy maps byte-identical; player map_edit refused; canonical `/assets/<id>` serves exactly like `/api/assets/<id>` (owner 200 PNG+nosniff, riding-DM 200, stranger/junk 404); assigned artwork roundtrip keeps DB canon; client brush/canvas wiring pinned |
 | `tests/test_d101_prep.py` | D101 prep screen: content `options` (member read, non-member/anon refused, empty room), `characters.background` roundtrip + no-PUT-wipe guard, `starting-gear` (resolves/skips/idempotent, authz mirrors build API, missing-data reported, `inv_changed` broadcast), `apply` broadcasts `snapshot` (reload-bug fix), and the prep UI wiring (source asserts — no browser runner) |
 | `tests/test_abilities.py` | DC/attack derivation, save-half, resist/immune through defense pipeline, death-pipeline entry, heal, condition, concentration flag, slot+resource consumption, upcast validation, attack-vs-AC+crit, footprint flank, LOS/door, range authority, actor spoofing refusal, hidden-token non-leak |
 | `tests/test_diorama_parity.py` | confirmed-path revalidation refusal (`route_invalid`), shared camera-space click math (Node vm), view-aware click/token/double-click, tool parity, sheet-crash guard |

@@ -61,6 +61,7 @@ async def unhandled_exception(request: Request, exc: Exception):
 
 app.include_router(rooms.router)
 app.include_router(assets.router)
+app.include_router(assets.media_router)          # D103: canonical /assets/<id> url
 app.include_router(content_api.router)
 app.include_router(charbuild_api.router)
 app.include_router(ws.router)

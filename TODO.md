@@ -694,3 +694,33 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       not block plane separation); stale editor snapshots can resurrect an old floor
       name via their objects (editor-merge caveat, D88 class); no per-plane token
       counts in the panel; stairs remain the only player-facing plane transition.
+
+## Done — Sprint 32: D103 Map editor truth + PNG display (Karten-Editor: echtes "kein Boden", Bildchen laden im Browser) (2026-10-13, D103)
+
+- [x] **PNG root cause fixed at the route, not the pipeline:** the DB canon
+      `/assets/<id>` (loaded verbatim by the canvas) was NEVER routed — only
+      `/api/assets/<id>` existed, so artwork 404'd in every real browser (and the
+      onerror blacklisted it in the art cache). New prefix-free `media_router`
+      delegates to the SAME `get_asset`: identical auth, no-oracle 404, clean
+      re-encode, `nosniff`. `/api` form unchanged; zero pipeline edits.
+- [x] **"Kein Boden" became a real state:** terrain registry 5 = void (impassable,
+      not climbable, sight passes). All engines refuse it automatically via the D69
+      registry (path/LOS/placement/collision/preview) — no engine edits. Old maps
+      byte-compatible (no 5 exists until painted; fog `None` stays floor; sanitize
+      clamps 6→5, still rejects fog nulls). D102's ⬜-backlog resolved honestly:
+      new 🕳️ brush paints 5 (drag included), ⬜ keeps 0 and finally RENDERs as
+      floor (two-tone tiling), 🧹 semantics unchanged.
+- [x] `tests/test_d103_editor_assets.py` (8): void blocks movement/teleport/
+      placement but not vision/light (one map, one column, both proofs), paint
+      preserves walls/doors/traps, void is plane-local (crypt pit ≠ primary),
+      registry/sanitize/legacy semantics, player map_edit refusal, canonical asset
+      url serves for owner AND riding-token DM while strangers/junk get 404 on BOTH
+      urls, assigned-artwork roundtrip, client brush/canvas wiring pins. Two D69
+      clamp tests updated (5 legitimate, 6+ clamps).
+      Canonical close: `docker compose run --rm test` → **711 passed, 1 skipped,
+      0 failed**. Docs: D103, AGENT_GUIDE (registry 0..5, asset routing, brushes),
+      MANUAL checklist D103.
+- [ ] **Follow-ups (honest limits):** diorama renders void as a flat tile (D97 file
+      untouched); concurrent editors stay last-writer-wins (D88 class); artwork
+      `max-age=86400` can outlive access revocation in a warm cache; no automatic
+      "fall into void" simulation — the server only refuses occupancy.

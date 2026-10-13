@@ -2048,4 +2048,48 @@ lines name conditions by design (public table record, D90).
   name through that snapshot's objects (editor merge caveat, same class as D88's
   stale-lamp case); floor rows carry no per-plane token counts in the panel; the
   DM browse select and the panel share `state.viewFloor` but the panel intentionally
-  carries the management actions — the canvas stays the single map surface.
+  carries the management actions   — the canvas stays the single map surface.
+
+## D103 — The map editor paints truth: a real "no floor" state, and PNG artwork that loads in the browser
+
+- **Context:** browser findings named two broken surfaces. (1) Token artwork: uploads,
+  auth and serving all worked — yet every portrait stayed a grey disc in a real browser.
+  (2) The map editor: "Boden malen/löschen funktioniert nicht" and the missing answer
+  to the most basic map question — what does a cell with NO FLOOR even mean here?
+- **PNG root cause: the url the browser was told to load was never routed.** The DB
+  canon for `tokens.image` is `/assets/<id>` (since D85, stored in rows — immutable
+  without touching data) and the canvas loads it verbatim (`img.src = t.image`), but
+  FastAPI only ever routed `/api/assets/<id>`; the asset router's prefix hides it. So
+  artwork looked perfect in REST tests (they use the /api form) and 404'd in browsers —
+  where the onerror handler then BLACKLISTED the url in the session's art cache, making
+  even later successes stay grey. Fix is one second router WITHOUT the prefix delegating
+  to the same `get_asset` handler: identical auth (`serve_allowed`), identical
+  no-oracle 404, identical clean-re-encode + `nosniff` headers. The `/api` form stays
+  the documented REST surface. No pipeline rework — the pipeline was sound.
+- **"No floor" was a missing STATE, not a broken brush.** The cell mechanics (save,
+  per-plane isolation, fog) were intact (D102 pinned them); but the terrain registry
+  had no impassable-but-visible cell: the eraser and ⬜ both paint 0 (always walkable),
+  and floor 0 rendered at #151823 on a #0a0b10 page — two hex steps from the
+  background, so even correct painting LOOKED like nothing happened. Decision (asked,
+  approved): extend the D69 registry with **5 = void** — blocks movement, NOT climbable,
+  sight passes over it (a pit is not a wall). Because every engine (path, LOS,
+  footprint placement, collision, preview) already asks the registry, the refusal
+  propagates with zero engine edits. Old maps cannot contain a 5, `terrain(None)`
+  stays floor (fog semantics untouched), sanitize clamps 6+ to 5 and still rejects fog
+  nulls — byte-compatibility is the invariant, no migration.
+- **Editor:** new 🕳️ brush paints 5 (drag included); ⬜ keeps painting 0 and now
+  RENDERS as floor (quiet two-tone tiling); 🕳️ renders as a dark hatched hole. 🧹
+  keeps its old meaning (0 + clear trap/loot/objects at the cell) — erase must not
+  silently create impassable world edges. The diorama file is untouched (D97 rule):
+  a void simply extrudes as a flat tile there — cosmetic only.
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **711 passed, 1 skipped, 0 failed** (baseline 703 + `tests/test_d103_editor_assets.py`
+  8; two D69 vocabulary-clamp tests updated — 5 is now legitimate, 6+ clamps). One
+  discovery for the toolbox: FastAPI 0.142 defers `include_router` into opaque
+  `_IncludedRouter` wrappers, so route-table scans are version-dependent — the asset
+  tests pin BEHAVIOUR (both urls serve, auth-gated) instead.
+- **Honest limits:** the diorama shows void as a flat floor tile until D97-territory
+  work happens; concurrent editors remain last-writer-wins on save (D88 class);
+  served artwork carries `max-age=86400`, so a revoked private asset may survive in a
+  warm browser cache for a day; "void kills a standing token" is intentionally NOT
+  automated — the server refuses occupancy of void but does not simulate falling.

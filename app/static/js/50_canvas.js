@@ -249,7 +249,16 @@ function drawTactical(){
       else if (ter === 4){ ctx.fillStyle = "#26231b"; ctx.fillRect(sx, sy, c, c);
         ctx.fillStyle = "#4a4232"; ctx.beginPath();
         ctx.arc(sx+c*0.35, sy+c*0.6, c*0.13, 0, 7); ctx.arc(sx+c*0.65, sy+c*0.42, c*0.16, 0, 7); ctx.fill(); }
-      else { ctx.fillStyle = "#151823"; ctx.fillRect(sx, sy, c, c); }
+      else if (ter === 5){                          // D103 void: a hole, not a wall
+        ctx.fillStyle = "#04050a"; ctx.fillRect(sx, sy, c, c);
+        ctx.strokeStyle = "#2b3145"; ctx.beginPath();
+        ctx.moveTo(sx+3, sy+c-9); ctx.lineTo(sx+c-9, sy+3);
+        ctx.stroke(); }
+      // D103: a plain floor cell must READ as painted floor — the old flat
+      // fill sat within two hex steps of the background, so the ⬜ brush
+      // looked like a no-op. Quiet two-tone tiling, tokens still stand out.
+      else { ctx.fillStyle = ((gx + gy) & 1) ? "#1d2433" : "#191f2c";
+        ctx.fillRect(sx, sy, c, c); }
       const el = gm.elev && gm.elev[i];
       if (el){ ctx.fillStyle = el > 0 ? "#8fb3ff" : "#b0785a";
         ctx.font = `${Math.max(8, c/4)}px sans-serif`;
@@ -583,6 +592,7 @@ function paint(cx, cy){
   const b = state.brush;
   if (b === "wall") gm.cells[i] = 1;
   else if (b === "floor") gm.cells[i] = 0;
+  else if (b === "void") gm.cells[i] = 5;          // D103: no floor (impassable)
   else if (b === "rough") gm.cells[i] = 2;
   else if (b === "barrier") gm.cells[i] = 3;
   else if (b === "low") gm.cells[i] = 4;
@@ -883,7 +893,7 @@ function onMove(e){
   const d = state.drag; if (!d) return;
   const p = evtPos(e);
   if (d.paint){ const { cx, cy } = toCell(p.x, p.y);
-    if (["wall","floor","rough","erase","reveal","refog"].includes(state.brush)) paint(cx, cy); return; }
+    if (["wall","floor","void","rough","erase","reveal","refog"].includes(state.brush)) paint(cx, cy); return; }
   const t = state.tokens.find(t => t.id === d.id);
   if (!t) return;
   const wx = p.x - state.cam.ox, wy = p.y - state.cam.oy;
