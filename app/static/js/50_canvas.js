@@ -456,9 +456,12 @@ function canMove(t){
 }
 /* D86 floors: the viewer stands on the plane of their own token. Tokens and
    ghosts on other planes are elsewhere — not rendered, not clickable.
-   (The DM has no token and therefore sees every plane.) */
+   D102: the DM BROWSES planes (viewFloor) — a plane's map shows exactly that
+   plane's tokens, not every plane's tokens floating over one another. The
+   server /state still lists all planes for the DM's tables; the canvas obeys
+   the viewed plane. */
 function viewerPlane(){
-  if (state.room && state.room.role === "dm") return null;
+  if (state.room && state.room.role === "dm") return String(state.viewFloor || "");
   const mine = (state.tokens || []).find(t => state.me && t.owner_user_id === state.me.id);
   return (mine && mine.floor) || "";
 }
@@ -468,7 +471,8 @@ function onPlane(t){
 }
 function tokenAt(x, y){
   const c = cellSize();
-  return [...state.tokens].reverse().find(t => {
+  // D102: off-plane tokens (invisible to this viewer) are also not clickable.
+  return state.tokens.filter(onPlane).reverse().find(t => {
     const [w, h] = tokenSpan(t), side = Math.max(w, h);
     const ox = t.x + ((w - 1) * c / 2), oy = t.y + ((h - 1) * c / 2);
     // D82/D83: clicking the visible ARTWORK selects the token — the hit area

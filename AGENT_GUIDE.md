@@ -42,7 +42,10 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   6. `app/static/js/55_diorama.js` — client-local isometric diorama renderer.
   7. `app/static/js/60_main.js` — DOM wiring and boot.
   8. `app/static/js/70_content.js` — DM CSV rule-package import/export panel (D95).
-  9. `app/static/js/99_boot.js` — bundle-integrity gate; runs LAST and is the only
+  9. `app/static/js/80_prep.js` — room-preparation screen + guided character
+     build wizard (D101); talks to `/api/content/{code}/options` and the
+     existing build/assign/starting-gear routes, holds NO class rules.
+  10. `app/static/js/99_boot.js` — bundle-integrity gate; runs LAST and is the only
      caller of `appBoot()` (D78). Any new script module must be added to its
      `MODULES` list, stamp itself, and (if it exposes a boot entrypoint) be added
      to `REQUIRED` — see `tests/test_frontend_bundle.py`.
@@ -100,6 +103,7 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/room/traps.py` | Trap and loot resolution | `hit_trap()`, `take_loot()` |
 | `app/room/doors.py` | Door permissions incl. dm_only/secret (D63) | `handle_door()` |
 | `app/room/authz.py` | The single token-control authority question (owner/controller/DM, D82) | `controls()`, `controlled_rows()` |
+| `app/floors.py` | Floor registry: named occupancy/visibility planes per room (D86/D88/D102) | `parse()`, `exists()`, `add()`, `rename()`, `remove()` |
 | `app/room/interact.py` | World-object interaction over allowlisted ops (D82) | `handle_interact()` |
 | `app/room/visibility.py` | Footprint LOS token delivery and ghosts | `viewer_visible_cells()`, `send_token_event()`, `broadcast_token_add()` |
 | `app/static/js/10_core.js` | Global `state`, API helper, toast | `state`, `api()`, `esc()`, `toast()` |
@@ -134,8 +138,10 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   - `app/static/js/30_room.js`
   - `app/static/js/40_ws.js` — `room_deleted` case: leave to lobby, never
     reconnect (reconnect is also guarded by `state.roomDeleted`)
-  - `app/static/js/60_main.js` — `btn-back` is the permanent "← Lobby" escape
-    (works in Tactical AND Diorama; kills reconnect + ws)
+  - `app/static/js/60_main.js` — `btn-back` is the permanent escape from the
+    table (works in Tactical AND Diorama; kills reconnect + ws). D101: it now
+    returns to the room's PREPARATION screen via `backToPrep()` (80_prep.js);
+    the lobby is one level further back via the prep screen's "← Lobby".
 - Tests:
   - `tests/test_integration.py`
   - `tests/test_room_delete.py` — authorization matrix, cascade, idempotency,
@@ -280,6 +286,47 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 - Tests:
   - `tests/test_mapmodel.py`
   - `tests/test_integration.py`
+
+## Floors / planes (D86/D88, operated since D102)
+
+- Concept: one room, one world frame, INDEPENDENT planes. The primary floor
+  (`""`) is the legacy `room_state.map_json` byte-for-byte; every named floor
+  has its own `floor_maps` row (own terrain/traps/objects/fog), tokens carry
+  `tokens.floor`. No migration, no second map engine — one map model.
+- Server:
+  - `app/floors.py` — the registry (`rooms.floors` JSON, MAX 8, name rules) +
+    D102 `rename()` (registry + plane map + tokens move together).
+  - `app/room/net.py` — the map seam `get_map(room_id, floor)` /
+    `set_map(..., floor)`; **an un-floored `set_map` writes the PRIMARY** —
+    the classic D102 bug: every save must pass the floor of the map it holds.
+    `fog_patch(mp, newly, floor)` labels every reveal; `send_to_plane` (strict
+    map truth) vs `send_to_plane_viewed` (+ token-less observers on primary).
+  - `app/rooms.py` — REST: POST/DELETE + **PATCH `/api/rooms/{code}/floors/
+    {name}`** (D102 rename: FLOOR.rename, then stair `op.floor` references are
+    retargeted across ALL plane maps, then `floors_changed` + `map_changed`).
+    `/state` derives `view_floor`: DM browses via `?floor=`, a player is
+    DELIVERED on their token's plane. `assign_char` reveals on the TOKEN's
+    plane (D102).
+  - `app/ws.py` — connect reveal runs per token floor on that plane's map.
+  - `app/room/tokens.py` — `handle_token_floor` is **DM-only since D102**;
+    players change planes through the validated stair object
+    (`interact` kind `stair` → `apply_forced_move`, destination checked on the
+    target plane) — never by self-service hop.
+  - `app/room/movement.py` / `moveforced.py` / `doors.py` / `fog.py` — every
+    plane-scoped save/broadcast carries its floor.
+- Client:
+  - `app/static/js/30_room.js` — `renderViewFloor()` (DM plane browse select)
+    + D102 `renderFloorPanel()`/`editFloor()` (DM Floors panel: add / view /
+    rename / delete; delete-refusals show the server reason); sheet floor row
+    is read-only for players.
+  - `app/static/js/50_canvas.js` — `viewerPlane()`/`onPlane()` (DM compares
+    the VIEWED plane, players their token's plane; off-plane tokens are not
+    rendered and not clickable).
+  - `app/static/js/40_ws.js` — `explored`/`fog_changed` carry `payload.floor`
+    and are only applied when it equals `state.viewFloor`; a mismatch means
+    the patch belongs to a plane this client is not looking at.
+- Tests: `tests/test_floors.py`, `tests/test_floor_maps.py`,
+  `tests/test_d102_floors.py` (integrity, isolation, DM management).
 
 ## Combat / initiative / HP / typed damage
 
@@ -799,6 +846,39 @@ Frontend filtering may improve presentation but may not be the security boundary
   The UI is the room sheet, not the lobby — one rule, one transport.
 - The client holds NO class logic: it renders the chronology and POSTs a choices
   object; `charbuild` re-validates every rule server-side.
+- D101: a successful `POST /api/build/{code}/{cid}/apply` broadcasts a `snapshot`
+  (like the `class_levels` transport) — every client then refetches state and
+  re-renders its open sheet. The apply handler in `30_room.js` ALSO re-renders
+  locally after `refreshRoom()`; neither alone is enough (the browser-confirmed
+  "stays unbuilt until reload" bug needed both). Never remove either without a
+  real-browser re-check.
+
+## Room preparation & guided build (Sprint 30, D101)
+
+- The landing screen between join and table: `#view-prep` + `80_prep.js`
+  (`openPrep(code)`). Joining/creating a room and clicking one in the lobby
+  land HERE; the table is reached via "Open the table"/`openRoom()` and the
+  table's ⚙/back buttons return here. The classic lobby "Bring" path still
+  jumps straight to the table (legacy flow preserved).
+- `GET /api/content/{code}/options` (`app/content_api.py`) — id+name catalogue
+  of the room's rule pack for the species/class/background dropdowns, readable
+  by EVERY room member (names only, never row payloads). import/export/kinds
+  stay DM-only. Levels of class/subclass collapse to one entry per id.
+- `characters.background` — additive bookkeeping column; `CharIn.background`
+  defaults to `None` = "leave stored value untouched" so legacy PUT clients
+  (the lobby editor) cannot wipe it; `""` is an explicit reset.
+- `POST /api/rooms/{code}/starting-gear` (`app/rooms.py`) — grants the chosen
+  background's `starting_items` from THIS room's rule pack through
+  `app/inventory.py` (the SSOT); only tokens that resolve to a room item
+  definition are granted, unresolvable CSV text is REPORTED as skipped, never
+  invented. Idempotent via a deterministic `op_id` (`starting-gear-<bg>`,
+  D94 inv_ops replay → `"already"`, never a double grant). Authz mirrors the
+  build API EXACTLY (owner, or DM of a character assigned to the room).
+- The guided wizard derives EVERY field from `charbuild.plan` (`needs`) — skill
+  options, subclass, per-level feat/ASI, spell picks — and labels ids with the
+  `options` catalogue. Decision types the form cannot render are surfaced with
+  an explicit expert-mode hint, never skipped. No list of classes/skills is
+  hardcoded in the client; the shipped pack is data.
 
 ## Audio source safety
 
@@ -891,6 +971,8 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_effects.py` | point/line/cone/circle/square geometry, clipping, determinism, server≡client `aoeCells` parity (Node vm) |
 | `tests/test_sprint20_security.py` | D90: caster-plane ability truth, cross-plane refusal no-oracle, hidden-token cond gate, plane-scoped aoe/ping (+darkvision/asset/floor/mount/lamp/state sweeps), editor resize pin/elev carry (Node vm) |
 | `tests/test_browser_flow.py` | real-JS tactical flow against the live WS stack: tactical draw, rectangular-token hit test, preview→confirm over the wire, refresh persistence — the documented NO-BROWSER harness |
+| `tests/test_d102_floors.py` | D102 floors: trap/toggle saves stay ON their plane (never clobber primary), connect/assign reveals land on the token's plane, reveal/fog patches carry `floor` and reach plane viewers only, `token_floor` DM-only while stairs stay the player route, floor RENAME moves registry+map+tokens and retargets stair destinations (refusals included), player `/state` delivered on the token's plane |
+| `tests/test_d101_prep.py` | D101 prep screen: content `options` (member read, non-member/anon refused, empty room), `characters.background` roundtrip + no-PUT-wipe guard, `starting-gear` (resolves/skips/idempotent, authz mirrors build API, missing-data reported, `inv_changed` broadcast), `apply` broadcasts `snapshot` (reload-bug fix), and the prep UI wiring (source asserts — no browser runner) |
 | `tests/test_abilities.py` | DC/attack derivation, save-half, resist/immune through defense pipeline, death-pipeline entry, heal, condition, concentration flag, slot+resource consumption, upcast validation, attack-vs-AC+crit, footprint flank, LOS/door, range authority, actor spoofing refusal, hidden-token non-leak |
 | `tests/test_diorama_parity.py` | confirmed-path revalidation refusal (`route_invalid`), shared camera-space click math (Node vm), view-aware click/token/double-click, tool parity, sheet-crash guard |
 | `tests/test_downed_movement.py` | 0-HP preview/move/teleport refusal, per-step downed stop, NPC corpse DM-drag stays allowed |

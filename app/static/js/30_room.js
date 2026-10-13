@@ -3,7 +3,11 @@
 async function openRoom(code){
   const s = await api(`/rooms/${code}/state`);
   state.room = s; state.roomDeleted = false;   // fresh visit — re-arms auto-reconnect
-  state.viewFloor = "";                        // D88: DM plane browsing starts at primary
+  // D88/D102: the SERVER is the view SSOT — the DM starts at primary (s comes
+  // without ?floor=), a PLAYER is delivered on their token's plane; a player
+  // on a named floor must have viewFloor match, or plane-guarded events
+  // (reveals, pings, AoE, editor saves) all address the wrong plane.
+  state.viewFloor = s.view_floor || "";
   state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || [];
   state.floors = s.floors || [""];
   state.grid = s.grid; state.editing = false; state.editMap = null; state.sel = null;
@@ -19,6 +23,8 @@ async function openRoom(code){
   $("room-role").style.background = s.role === "dm" ? "var(--gold)" : "#2c3e50";
   for (const o of document.querySelectorAll(".dm-only")) o.style.display = s.role === "dm" ? "" : "none";
   $("dmtools").classList.toggle("hidden", s.role !== "dm");
+  if ($("floorpanel")) $("floorpanel").classList.toggle("hidden", s.role !== "dm");
+  renderViewFloor();   // D102: plane row + floor panel exist from the first render
   $("init-btns").classList.toggle("hidden", s.role !== "dm");
   state.messages = s.messages || []; state.chat = s.chat || [];
   const savedFeed = localStorage.getItem("vtt-feed");
@@ -64,14 +70,86 @@ function applySideTab(){
 function renderViewFloor(){
   // D88: the selector only earns its place once the room has planes to browse
   const row = $("view-floor-row"), sel = $("view-floor");
-  if (!row || !sel) return;
-  const many = state.room && state.room.role === "dm" && (state.floors || [""]).length > 1;
-  row.classList.toggle("hidden", !many);
-  if (!many) return;
+  if (row && sel){
+    const many = state.room && state.room.role === "dm" && (state.floors || [""]).length > 1;
+    row.classList.toggle("hidden", !many);
+    if (many){
+      const cur = state.viewFloor || "";
+      sel.innerHTML = (state.floors || [""]).map(f =>
+        `<option value="${f.replace(/"/g,"&quot;")}" ${f===cur?"selected":""}>${f===""?"⬛ primary":f}</option>`).join("");
+      sel.onchange = () => { state.viewFloor = sel.value; refreshRoom(); };
+    }
+  }
+  if (typeof renderFloorPanel === "function") renderFloorPanel();   // D102
+}
+
+/* ---------- D102 floor manager (DM side panel) ---------- */
+function renderFloorPanel(){
+  const panel = $("floorpanel"), list = $("floor-list");
+  if (!panel || !list) return;
+  if (!(state.room && state.room.role === "dm")) return;
   const cur = state.viewFloor || "";
-  sel.innerHTML = (state.floors || [""]).map(f =>
-    `<option value="${f.replace(/"/g,"&quot;")}" ${f===cur?"selected":""}>${f===""?"⬛ primary":f}</option>`).join("");
-  sel.onchange = () => { state.viewFloor = sel.value; refreshRoom(); };
+  list.innerHTML = (state.floors || [""]).map(f => {
+    const act = f === cur;
+    const label = f === "" ? "⬛ Ground (primary)" : esc(f);
+    const tools = f === ""
+      ? `<span class="tiny" title="The primary floor always exists — it cannot be removed or renamed">fixed</span>`
+      : `<button class="ghost fl-ren" data-f="${esc(f)}" title="Rename floor">✏️</button>`
+        + `<button class="ghost fl-del" data-f="${esc(f)}" title="Delete floor (refused while tokens stand on it)">🗑</button>`;
+    return `<div class="row"${act ? ' style="background:rgba(241,196,15,.10)"' : ""}>`
+      + `<button class="ghost fl-view" data-f="${esc(f)}" title="Browse this plane — nobody is moved">${label}${act ? " ← viewing" : ""}</button>`
+      + tools + `</div>`;
+  }).join("");
+  for (const b of list.querySelectorAll(".fl-view"))
+    b.onclick = () => { state.viewFloor = b.dataset.f; refreshRoom(); };
+  for (const b of list.querySelectorAll(".fl-del"))
+    b.onclick = () => editFloor("DELETE", b.dataset.f, null);
+  for (const b of list.querySelectorAll(".fl-ren"))
+    b.onclick = () => startFloorRename(b.dataset.f, b);
+  const add = $("btn-floor-add"), inp = $("floor-new");
+  if (add && inp) add.onclick = () => {
+    const name = inp.value.trim(); if (!name) return;
+    fetch(`/api/rooms/${encodeURIComponent(state.room.code)}/floors`,
+          { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }) })
+      .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
+        .then(j => { throw new Error((j && j.detail) || "Cannot add floor"); }))
+      .then(j => { inp.value = ""; state.floors = j.floors || state.floors;
+                   renderFloorPanel(); renderViewFloor(); })
+      .catch(err => toast(err.message || "Cannot add floor"));
+  };
+}
+function startFloorRename(old, btn){
+  const row = btn.closest(".row"); if (!row) return;
+  row.innerHTML = `<input id="fl-rename-in" maxlength="24" value="${esc(old)}">`
+    + `<button class="ghost" id="fl-rename-ok" title="Rename">✓</button>`
+    + `<button class="ghost" id="fl-rename-no" title="Cancel">✗</button>`;
+  const inp = $("fl-rename-in"); if (inp) inp.focus();
+  const done = () => { const v = inp.value.trim();
+                       if (v && v !== old) editFloor("PATCH", old, v);
+                       else renderFloorPanel(); };
+  $("fl-rename-ok").onclick = done;
+  $("fl-rename-no").onclick = renderFloorPanel;
+  inp.onkeydown = e => { if (e.key === "Enter") done(); if (e.key === "Escape") renderFloorPanel(); };
+}
+function editFloor(method, old, newName){
+  const prev = state.viewFloor || "";
+  // Set the view BEFORE asking: the server broadcasts land while the fetch is
+  // still in flight, and a refresh must never request the floor that is about
+  // to stop existing under the name the server is leaving behind.
+  if (method === "PATCH" && prev === old) state.viewFloor = newName;
+  if (method === "DELETE" && prev === old) state.viewFloor = "";
+  const url = `/api/rooms/${encodeURIComponent(state.room.code)}/floors/${encodeURIComponent(old)}`;
+  fetch(url, { method,
+               headers: method === "PATCH" ? { "Content-Type": "application/json" } : undefined,
+               body: method === "PATCH" ? JSON.stringify({ name: newName }) : undefined })
+    .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
+      .then(j => { throw new Error((j && j.detail) || "Floor operation failed"); }))
+    .then(j => { state.floors = j.floors || state.floors;
+                 renderFloorPanel(); renderViewFloor(); refreshRoom(); })
+    .catch(err => { toast(err.message || "Floor operation failed");
+                    state.viewFloor = prev;
+                    renderFloorPanel(); renderViewFloor(); });
 }
 
 async function refreshRoom(){
@@ -900,12 +978,18 @@ function _floorRowHtml(tok){
   const fls = state.floors && state.floors.length ? state.floors : [""];
   const cur = tok.floor || "";
   const isDM = state.room && state.room.role === "dm";
+  const label = cur === "" ? "Ground (primary)" : esc(cur);
+  if (!isDM)
+    // D102: plane changes are the DM's and the stairs' — players READ their
+    // plane; the validated stair object remains their route.
+    return `<div class="row" title="Floor (D86): planes are independent — different floors never collide and are not visible to each other. Take the stairs (or wait for the DM) to change planes.">`
+      + `<span class="tiny"><b>Floor</b></span><span>${label}</span></div>`;
   const opts = fls.map(f => `<option value="${esc(f)}"${f === cur ? " selected" : ""}>${f === "" ? "Ground (primary)" : esc(f)}</option>`).join("");
-  return `<div class="row" title="Floor (D86): planes are independent — different floors never collide and are not visible to each other. Changing floor is an explicit stair/ladder move, not a walked one.">`
+  return `<div class="row" title="Floor (D86): planes are independent — different floors never collide and are not visible to each other. Changing floor is an explicit move, not a walked one (D102: DM only — players use stairs).">`
     + `<span class="tiny"><b>Floor</b></span><select id="fl-pick" style="max-width:120px">${opts}</select>`
     + `<button id="fl-go">Go</button>`
-    + (isDM ? `<input id="fl-new" placeholder="new floor" maxlength="24" style="width:90px">`
-             + `<button id="fl-add" title="Add a floor to this room">＋</button>` : ``) + `</div>`;
+    + `<input id="fl-new" placeholder="new floor" maxlength="24" style="width:90px">`
+    + `<button id="fl-add" title="Add a floor to this room">＋</button></div>`;
 }
 function wireFloorRow(tok){
   const go = $("fl-go"); if (!go) return;
@@ -1257,7 +1341,11 @@ function renderSheet(tok){
           { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ class_id: b.cls, to: b.to, choices }) });
       const j = await r.json();
-      if (j.ok) { toast("Built to level " + j.result.level); await refreshRoom(); }
+      // D101 bug fix: refreshRoom() alone re-fetched the state but never RE-RENDERED
+      // the open sheet — the panel kept showing "unbuilt" + old skills until a full
+      // browser reload. Same re-render the snapshot WS handler does (40_ws.js).
+      if (j.ok) { toast("Built to level " + j.result.level); await refreshRoom();
+        if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel) || null); }
       else if (j.needs_choice) out.innerHTML = `<span style="color:#f1c40f">choices still needed</span><br><small>${esc(JSON.stringify(j.needs_choice))}</small>`;
       else out.innerHTML = `<span style="color:#e74c3c">${esc(j.error || j.reason || "refused")}</span>`;
     } catch (e) { out.textContent = e.message; } };

@@ -51,7 +51,7 @@ async function loadLobby(){
       };
       d.appendChild(del);
     }
-    d.onclick = () => openRoom(r.code);
+    d.onclick = () => openPrep(r.code);   // D101: rooms open on the preparation screen
     rl.appendChild(d);
   }
   show("lobby");

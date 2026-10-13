@@ -6,7 +6,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import db, footprint, floors as FLOOR, gear, los, mapmodel, progression, ratelimit, ws
+from . import content as CONTENT, db, footprint, floors as FLOOR, gear, inventory as INV, los, mapmodel, progression, ratelimit, ws
 from . import quests as questlog
 from . import conditions as C
 from . import npc
@@ -15,6 +15,7 @@ from .room import death as D
 from . import events as game_events
 from .room import gamelog
 from .room import net as room_net
+from .room.net import sys_msg
 from .auth import COOKIE, cookie_secure, hash_pw, make_token, require_user, room_of, verify_pw
 
 router = APIRouter(prefix="/api")
@@ -32,6 +33,9 @@ class CharIn(BaseModel):
     name: str = Field(min_length=1, max_length=48)
     race: str = ""
     char_class: str = ""
+    # D101: None = "leave the stored background untouched" — a PUT from a client
+    # that predates the field must never wipe it; "" is an explicit reset.
+    background: str | None = None
     level: int = Field(1, ge=1, le=20)
     stats: dict = {}
     hp: int = Field(10, ge=-999, le=9999)
@@ -264,9 +268,9 @@ def list_chars(user=Depends(require_user)):
 @router.post("/characters")
 def create_char(ch: CharIn, user=Depends(require_user)):
     cid = db.x(
-        "INSERT INTO characters (user_id,name,race,char_class,level,stats,hp,max_hp,ac,speed,notes,weapons,items,skills,spells,spell_slots,saves,resources,defenses,hit_die) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (user["id"], ch.name, ch.race, ch.char_class, ch.level,
+        "INSERT INTO characters (user_id,name,race,char_class,background,level,stats,hp,max_hp,ac,speed,notes,weapons,items,skills,spells,spell_slots,saves,resources,defenses,hit_die) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (user["id"], ch.name, ch.race, ch.char_class, ch.background or "", ch.level,
          db.json_dumps(ch.stats), ch.hp, ch.max_hp, ch.ac, ch.speed, ch.notes,
          db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(gear.clean_items(ch.items)),
          db.json_dumps(gear.clean_skills(ch.skills)), db.json_dumps(gear.clean_spells(ch.spells)),
@@ -287,9 +291,11 @@ def update_char(cid: int, ch: CharIn, user=Depends(require_user)):
     # and the WS rest/ability/progression handlers. DMs never hit this endpoint at all
     # (_load_char is owner-scoped). Everything else on the sheet stays editable.
     db.x(
-        "UPDATE characters SET name=?,race=?,char_class=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,"
+        "UPDATE characters SET name=?,race=?,char_class=?,background=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,"
         "weapons=?,items=?,skills=?,saves=?,defenses=?,resources=?,hit_die=? WHERE id=?",
-        (ch.name, ch.race, ch.char_class, db.json_dumps(ch.stats),
+        (ch.name, ch.race, ch.char_class,
+         ch.background if ch.background is not None else (cur.get("background") or ""),
+         db.json_dumps(ch.stats),
          ch.hp, ch.max_hp, ch.ac, ch.speed, ch.notes,
          db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(gear.clean_items(ch.items)),
          db.json_dumps(gear.clean_skills(ch.skills)),
@@ -737,6 +743,32 @@ async def remove_floor_route(code: str, name: str, request: Request):
     return {"floors": [""] + res}
 
 
+@router.patch("/rooms/{code}/floors/{name}")
+async def rename_floor_route(code: str, name: str, body: FloorIn, request: Request):
+    """D102 — rename a floor. Registry, plane map and tokens move atomically
+    in FLOOR.rename; stair destinations naming the old floor live INSIDE map
+    contents on every plane, so they are rewritten here before the room is
+    told anything changed. This handler awaits nothing between the rename and
+    the rewrites — the event loop is the serialiser against concurrent walks."""
+    user, room = _room_dm(request, code)
+    ok, res = FLOOR.rename(room["id"], name, body.name)
+    if not ok:
+        raise HTTPException(400, res)
+    for fl in [""] + res:
+        mp = room_net.get_map(room["id"], fl)
+        hits = False
+        for o in (mp.get("objects") or []):
+            op = (o.get("interact") or {}).get("op") or {}
+            if op.get("kind") == "stair" and str(op.get("floor") or "") == name:
+                op["floor"] = body.name
+                hits = True
+        if hits:
+            room_net.set_map(room["id"], mp, fl)
+    await room_net.broadcast(room["id"], "floors_changed", {"floors": [""] + res})
+    await room_net.broadcast(room["id"], "map_changed", None)
+    return {"floors": [""] + res}
+
+
 @router.post("/rooms/{code}/assign")
 def assign_char(code: str, body: AssignIn, request: Request):
     user, room = room_of(request, code)
@@ -748,6 +780,9 @@ def assign_char(code: str, body: AssignIn, request: Request):
                   (ch["id"], room["id"], user["id"]))
         tok = c.execute("SELECT * FROM tokens WHERE room_id=? AND owner_user_id=?",
                         (room["id"], user["id"])).fetchone()
+        # footprint.* read via .get() — a raw Row (the SECOND bring for one user,
+        # i.e. any re-seat with an existing token) has no .get and 500'd there.
+        tok = dict(tok) if tok else None
         if tok:
             c.execute("UPDATE tokens SET character_id=?, label=?, color=? WHERE id=?",
                       (ch["id"], ch["name"], color, tok["id"]))
@@ -756,8 +791,18 @@ def assign_char(code: str, body: AssignIn, request: Request):
             c.execute("INSERT INTO tokens (room_id,owner_user_id,character_id,label,color,x,y) "
                       "VALUES (?,?,?,?,?,400,300)", (room["id"], user["id"], ch["id"], ch["name"], color))
             px, py = 400, 300
+        # D102: reveal on the plane the token STANDS ON — a re-seat onto a
+        # named floor must not poke holes into the primary map's fog.
+        fl = (tok.get("floor") or "") if tok else ""
         strow = c.execute("SELECT map_json FROM room_state WHERE room_id=?", (room["id"],)).fetchone()
-        mp = mapmodel.load(strow["map_json"] if strow else "")
+        base = mapmodel.load(strow["map_json"] if strow else "")
+        if fl:
+            frow = c.execute("SELECT map_json FROM floor_maps WHERE room_id=? AND floor=?",
+                             (room["id"], fl)).fetchone()
+            mp = mapmodel.fit(mapmodel.load(frow["map_json"] if frow else None), base)
+            mp["fog_off"] = bool(base.get("fog_off")) if frow else False
+        else:
+            mp = base
         size = tok["size"] if tok else "Medium"
         span = footprint.token_span(tok) if tok else footprint.token_span({"size": size})
         desired = footprint.origin_from_pixel(px, py, mp["cell"], mp)
@@ -780,11 +825,73 @@ def assign_char(code: str, body: AssignIn, request: Request):
         source = footprint.player_source_cells(mp, [tok_for_reveal])
         visible_indices = los.visible_cells(mp, source)
         if mapmodel.reveal_cells(mp, visible_indices):
-            c.execute("UPDATE room_state SET map_json=? WHERE room_id=?", (db.json_dumps(mp), room["id"]))
+            if fl:
+                c.execute("INSERT INTO floor_maps(room_id,floor,map_json) VALUES(?,?,?) "
+                          "ON CONFLICT(room_id,floor) DO UPDATE SET map_json=excluded.map_json",
+                          (room["id"], fl, db.json_dumps(mp)))
+            else:
+                c.execute("UPDATE room_state SET map_json=? WHERE room_id=?",
+                          (db.json_dumps(mp), room["id"]))
             revealed = True
     if revealed:
         ws.notify(room["id"], "map_changed", None)
     return {"ok": True}
+
+
+@router.post("/rooms/{code}/starting-gear")
+async def starting_gear_route(code: str, body: AssignIn, request: Request):
+    """D101: grant the character's background starting_items from THIS room's
+    rule pack. No invented items: every token in the CSV field must resolve to
+    an item definition of this room (the content-import projection); anything
+    else is REPORTED as skipped, never silently dropped. Idempotent: the op_id
+    is derived from the background, so a replayed grant answers as "already"
+    through the D94 inv_ops replay guard instead of double-granting.
+    Authorisation mirrors the build API EXACTLY (owner, or DM of an assigned
+    character) — mutation still runs through app/inventory.py, the one SSOT."""
+    user, room = room_of(request, code)
+    ch = db.q1("SELECT id, user_id, name, background FROM characters WHERE id=?",
+               (body.character_id,))
+    if ch is None:
+        raise HTTPException(404, "Unknown character")
+    if ch["user_id"] != user["id"]:
+        if room.get("_role") != "dm" or db.q1(
+                "SELECT 1 AS ok FROM room_members WHERE room_id=? AND character_id=?",
+                (room["id"], ch["id"])) is None:
+            raise HTTPException(403, "Not your character")
+    ratelimit.limit("starting-gear", request, max_n=10, window=60)
+    bg_id = (ch.get("background") or "").strip()
+    if not bg_id:
+        return {"ok": False, "error": "This character has no background set"}
+    bg = next((r for r in CONTENT.load("background", room["id"])
+               if r.get("id") == bg_id or (r.get("name") or "").lower() == bg_id.lower()),
+              None)
+    if bg is None:
+        return {"ok": False,
+                "error": f"Background '{bg_id}' is not in this room's rule pack"}
+    tokens = [t.strip() for t in str(bg.get("starting_items") or "").split(",") if t.strip()]
+    if not tokens:
+        return {"ok": False,
+                "error": "This background lists no starting_items in the rule pack"}
+    entries, skipped = [], []
+    for tok in tokens:
+        d = db.q1("SELECT * FROM item_defs WHERE id=? AND room_id=?", (tok[:24], room["id"]))
+        if d is not None:
+            entries.append(INV.entry_from_def(d, 1))
+        else:
+            skipped.append(tok)
+    if not entries:
+        return {"ok": True, "granted": [], "skipped": skipped, "already": False}
+    op = f"starting-gear-{bg['id']}"[:40]
+    try:
+        res = INV.grant(room["id"], ch["id"], entries, op)
+    except INV.InvError as ex:
+        raise HTTPException(400, str(ex))
+    if res == "replay":
+        return {"ok": True, "granted": [], "skipped": skipped, "already": True}
+    await room_net.broadcast(room["id"], "inv_changed", None)
+    names = ", ".join(f"{r['qty']} × {r['name']}" for r in res)
+    sys_msg(room["id"], f"🎒 {ch['name']} receives starting equipment: {names}.")
+    return {"ok": True, "granted": res, "skipped": skipped, "already": False}
 
 
 @router.delete("/rooms/{code}/members/{uid}")

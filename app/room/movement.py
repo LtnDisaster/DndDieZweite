@@ -10,7 +10,8 @@ from .. import db, footprint, gear, los, mapmodel, movecost
 from ..path import find_path, path_footprint_cost, step_legal
 from .growth import maybe_grow_map
 from . import authz, combat as CB
-from .net import broadcast, fog_patch, get_map, map_lock, send_to, set_map
+from .net import (broadcast, fog_patch, get_map, map_lock, send_to,
+                  send_to_plane_viewed, set_map)
 from .traps import at_cell, hit_trap, take_loot
 from .visibility import (broadcast_token_step, viewer_visible_cells,
                          send_presence_event)
@@ -219,14 +220,18 @@ async def handle_move(ws, room_id, user, is_dm, msg):
             await carry_riders(room_id, tok["id"])         # D83: riders come along
         # Only a player-owned token lifts fog; NPC/DM tokens never reveal for players.
         if tok["owner_user_id"] is not None:
+            fl_tp = tok.get("floor") or ""                        # D88 plane
             async with map_lock(room_id):
-                mp = get_map(room_id, tok.get("floor") or "")
+                mp = get_map(room_id, fl_tp)
                 visible, _ = _reveal_player_token(mp, tok)
                 newly = mapmodel.reveal_cells(mp, visible)
                 if newly:
-                    set_map(room_id, mp, tok.get("floor") or "")
+                    set_map(room_id, mp, fl_tp)
             if newly:
-                await broadcast(room_id, "explored", fog_patch(mp, newly))
+                # D102: plane-scoped — a walk on one plane reveals fog on THAT
+                # plane's map only; sockets standing elsewhere must not receive it.
+                await send_to_plane_viewed(room_id, fl_tp, "explored",
+                                           fog_patch(mp, newly, fl_tp))
         await maybe_grow_map(room_id, tok)
         return
 
@@ -350,7 +355,9 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk")
                     # Otherwise a refresh triggered during resolution can briefly
                     # reload the old hidden trap and make it appear to vanish.
                     trap["discovered"] = True
-                    set_map(room_id, mp)
+                    # D102: save the PLANE you walked — an un-floored save here
+                    # clobbered the primary map with this plane's content.
+                    set_map(room_id, mp, fl_walk)
                     stop_reason = "trap" if await hit_trap(room_id, tok, trap) else stop_reason
                     map_dirty = True
                 loot = at_cell(mp["loot"], cx, cy)
@@ -360,7 +367,8 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk")
                 if newly or map_dirty:
                     set_map(room_id, mp, fl_walk)
             if newly:
-                await broadcast(room_id, "explored", fog_patch(mp, newly))
+                await send_to_plane_viewed(room_id, fl_walk, "explored",
+                                           fog_patch(mp, newly, fl_walk))
             if map_dirty:
                 await broadcast(room_id, "map_changed", None)
             if stop_reason:

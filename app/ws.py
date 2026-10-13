@@ -13,7 +13,8 @@ from . import auth, db, footprint, los, mapmodel
 from .room.dispatch import handle
 from .room.movement import _walks
 from .room.net import (_clients, attach_ws, broadcast, clients, detach_ws,
-                       fog_patch, get_map, notify, send_to, set_map, sys_msg)
+                       fog_patch, get_map, notify, send_to,
+                       send_to_plane_viewed, set_map, sys_msg)
 from .room.visibility import (_last_seen, prune_viewer_last_seen, token_cell,
                               viewer_source_cells, viewer_visible_cells)
 
@@ -62,14 +63,23 @@ async def ws_room(ws: WebSocket, code: str):
     socks = clients(room_id).setdefault(user["id"], set())
     first = not socks
     socks.add(ws)
-    mpj = get_map(room_id)
-    newly = []
-    for tk in db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id FROM tokens WHERE room_id=? AND owner_user_id=?",
+    # D102: reveal on the plane each token STANDS ON — never on the primary map
+    # regardless of floor (that leaked a crypt's layout into the tavern and
+    # persisted fog the party never walked).
+    by_floor: dict[str, list] = {}
+    for tk in db.q("SELECT id, x, y, owner_user_id, size, fw, fh, rot, mount_token_id, floor "
+                   "FROM tokens WHERE room_id=? AND owner_user_id=?",
                    (room_id, user["id"])):
-        newly += _reveal_token(mpj, tk)
-    if newly:
-        set_map(room_id, mpj)
-        await broadcast(room_id, "explored", fog_patch(mpj, newly))
+        by_floor.setdefault(tk.get("floor") or "", []).append(tk)
+    for fl, toks in by_floor.items():
+        mpj = get_map(room_id, fl)
+        newly = []
+        for tk in toks:
+            newly += _reveal_token(mpj, tk)
+        if newly:
+            set_map(room_id, mpj, fl)
+            await send_to_plane_viewed(room_id, fl, "explored",
+                                       fog_patch(mpj, newly, fl))
     if first:
         sys_msg(room_id, f"{user['username']} connected.")
         await broadcast(room_id, "presence", {"username": user["username"], "online": True})

@@ -47,7 +47,9 @@ function connectWS(code){
       }
       case "fog_changed": {
         const g = state.grid;
-        if (g){
+        // D102 plane guard: a fog brush stroke lands on ITS plane — painting it
+        // into a different plane's grid would invent terrain and fog memory.
+        if (g && String(p.floor || "") === String(state.viewFloor || "")){
           for (const idx in p.cells){ const i = +idx;
             g.explored[i] = p.cells[idx];
             if (p.terrain && p.terrain[idx] !== undefined) g.cells[i] = p.terrain[idx];
@@ -61,8 +63,10 @@ function connectWS(code){
         appendGameLogMessage({ type:"system", body: `${p.username} ${p.online ? "connected" : "disconnected"}` });
         break;
       case "explored": { const g = state.grid;
-        if (g && p.cells) for (const i of p.cells){ g.explored[i] = 1;
-          if (p.terrain && p.terrain[i] !== undefined) g.cells[i] = p.terrain[i]; }
+        // D102 plane guard: reveals belong to the plane that was walked.
+        if (g && p.cells && String(p.floor || "") === String(state.viewFloor || ""))
+          for (const i of p.cells){ g.explored[i] = 1;
+            if (p.terrain && p.terrain[i] !== undefined) g.cells[i] = p.terrain[i]; }
         break; }
       case "map_changed": refreshRoom(); break;
       case "map_expanded": {

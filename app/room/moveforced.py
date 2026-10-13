@@ -14,7 +14,8 @@ toward {tx,ty} as far as requested, stopping on obstacles.
 """
 from .. import db, footprint, mapmodel
 from .movement import _cancel_walk, _carries_riders, _cell_elev, _reveal_player_token, carry_riders
-from .net import broadcast, fog_patch, get_map, map_lock, send_to, set_map, sys_msg
+from .net import (broadcast, fog_patch, get_map, map_lock, send_to,
+                  send_to_plane_viewed, set_map, sys_msg)
 from .visibility import broadcast_token_step
 
 KINDS = ("push", "pull", "shove", "knockback", "throw", "teleport")
@@ -120,7 +121,8 @@ async def apply_forced_move(room_id, tok, kind, dest, notify_ws=None, floor=None
             newly = mapmodel.reveal_cells(mp, visible)
             if newly:
                 set_map(room_id, mp, fl)
-                await broadcast(room_id, "explored", fog_patch(mp, newly))
+                await send_to_plane_viewed(room_id, fl, "explored",
+                                           fog_patch(mp, newly, fl))
         squares = max(abs(final[0] - origin[0]), abs(final[1] - origin[1]))
         if chronicle:
             sys_msg(room_id, chronicle)

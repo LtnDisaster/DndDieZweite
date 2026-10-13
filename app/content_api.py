@@ -78,6 +78,30 @@ def export_content(request: Request, code: str,
                              "X-Content-Type-Options": "nosniff"})
 
 
+OPTION_KINDS = ("species", "class", "subclass", "background", "feat", "spell", "item")
+
+
+@router.get("/{code}/options")
+def content_options(request: Request, code: str, user=Depends(require_user)):
+    """D101: the rule pack's id+name catalogue that drives the guided character
+    dropdowns. Readable by every room MEMBER (import/export/kinds stay DM-only)
+    — it carries NAMES ONLY, never row payloads, so it exposes nothing a member
+    may not already see on a sheet. Class/subclass level-rows collapse to one
+    entry per class id."""
+    _, room = room_of(request, code)
+    out = {}
+    for kind in OPTION_KINDS:
+        seen = {}
+        for r in content.load(kind, room["id"]):
+            cid = str(r.get("id") or "")
+            if not cid or cid in seen:
+                continue
+            seen[cid] = str(r.get("name") or cid)
+        out[kind] = [{"id": k, "name": seen[k]}
+                     for k in sorted(seen, key=lambda k: (seen[k].lower(), k))]
+    return {"options": out}
+
+
 @router.get("/{code}/kinds")
 def content_kinds(request: Request, code: str, user=Depends(require_user)):
     """Per-kind counts for the DM panel (how much is loaded in this room)."""

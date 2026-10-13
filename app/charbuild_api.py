@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from . import charbuild, db, ratelimit
 from .auth import require_user, room_of
+from .room import net as room_net
 
 router = APIRouter(prefix="/api/build")
 
@@ -47,5 +48,9 @@ async def build_apply(request: Request, code: str, cid: int, user=Depends(requir
     ok, result = charbuild.apply(cid, body.get("class_id", ""), body.get("to", 0),
                                  body.get("choices") or {}, room["id"])
     if ok:
+        # D101: the build changed sheets the table is showing — notify every
+        # client exactly like the DM class_levels transport, so the sheet
+        # updates WITHOUT a browser reload (the confirmed D101 browser bug).
+        await room_net.broadcast(room["id"], "snapshot", None)
         return {"ok": True, "result": result}
     return {"ok": False, **result}

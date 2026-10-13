@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS characters (
     name TEXT NOT NULL,
     race TEXT DEFAULT '',
     char_class TEXT DEFAULT '',
+    background TEXT DEFAULT '',
     level INTEGER DEFAULT 1,
     stats TEXT DEFAULT '{}',
     hp INTEGER DEFAULT 10,
@@ -310,6 +311,10 @@ def init_db():
     migrate("messages", "style", "style TEXT DEFAULT ''")
     migrate("room_state", "audio_json", "audio_json TEXT DEFAULT '{}'")
     migrate("characters", "class_levels", "class_levels TEXT DEFAULT ''")
+    # D101: background id/name chosen in the guided character flow (rule-pack
+    # ``background`` row). Pure bookkeeping — it seeds nothing mechanically by
+    # itself; starting gear flows through the authorised starting-gear route.
+    migrate("characters", "background", "background TEXT DEFAULT ''")
     migrate("characters", "abilities", "abilities TEXT DEFAULT '[]'")
     # D92: explicit EQUIPMENT slots (main_hand/off_hand/armor/acc1..acc3 → item id).
     # '{}' = no explicit rig ⇒ gear.compute_ac keeps the legacy auto-derivation.

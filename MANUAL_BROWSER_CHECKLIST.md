@@ -268,6 +268,11 @@ Darkness (DM candle button 🕯 in the brush bar):
 
 ## History
 
+- Sprint 30: D101 section added (room preparation screen, guided character build
+  from the room's CSV content, background starting-gear grant, and the apply→sheet
+  refresh fix). Canonical close: 694 passed + 1 skipped (node 22 runs the real-JS
+  tests). No real browser runtime — the guided UI is additionally pinned by source
+  asserts in `tests/test_d101_prep.py`; walk the checkboxes below in a real browser.
 - Sprint 20: D90 section added (caster-plane ability truth, plane-scoped AoE/ping,
   resize pin/elev carry). Canonical close: 499 passed + 17 skipped. The
   "browser flow" automation is a Node-vm harness — no real browser runtime
@@ -421,3 +426,96 @@ automated tests (`tests/test_d100_integration.py`); do them here to see the UX i
 > the canonical Docker test run (node 22 added to the test stage), so the shipped
 > client JS — including `55_diorama.js`, which is only READ there — is verified in CI
 > rather than skipped.
+
+## ROOM PREPARATION & GUIDED BUILD (Sprint 30, D101)
+
+These confirm the D101 UX in a real browser (the flow itself is automated in
+`tests/test_d101_prep.py`, but the source-assert style cannot prove the CLICK
+PATHS render). Import a rule pack first (DM tab → 📚 Rule packages, or the prep
+screen's own upload) — with NO content the dropdowns are legitimately empty and
+the amber "no imported content" hint is the CORRECT behaviour, not a failure.
+
+### DM — preparation + rule pack status
+- [ ] Create a room → you land on the PREPARATION screen (not the canvas). Right card
+      shows the rule-pack badge counts and an import row. Upload the 8 shipped CSVs
+      (mode = Apply) → the badge counts rise and the report shows per-file ok/errors.
+- [ ] The DM roster lists every member with their character + built/unbuilt/at-table
+      badges; reload the page, reopen the room from the lobby → you land on prep again.
+- [ ] Click "Open the table" → the canvas + WS connect normally (Tactical and Diorama
+      both work). The topbar ⚙ and "← Prep" bring you back to the prep screen.
+
+### Player — guided create → build → seat → table (the core D101 path)
+- [ ] In a second browser (player, not DM): join by code → prep screen. The species /
+      class / background dropdowns list the DM's imported pack (e.g. Scout, Adept,
+      Scholar, Urchin) — NOT free-text and NOT raw ids. Pick name + species + class +
+      background → Create → the character appears selected.
+- [ ] Target level 1 → 🧭 Plan → the wizard shows a "Choose N skills" checkbox list (the
+      class's skill_options) and any subclass/level choices as selects. Pick 4 skills →
+      "All guided choices collected ✔". Leave one skill short → "Still missing: skills".
+- [ ] ⬆ Apply → success toast AND the sheet/checklist immediately reads
+      "built to 1" with the new skills — WITHOUT pressing F5 (this is the confirmed
+      D101 bug: previously it stayed "unbuilt" + old skills until a full reload).
+- [ ] "Seat character at the table" → a token appears at the table; reload the page,
+      reopen the room → still built to 1, still seated (server truth, not client state).
+- [ ] 🎒 Grant starting equipment (pick the Urchin background, which lists
+      "sword_plus1, coin purse") → "Granted: 1 × Sword +1" and an honest note that
+      "coin purse" has no item definition in this pack (nothing invented). Press it
+      AGAIN → "Already granted earlier — nothing duplicated" and the inventory still
+      holds exactly one Sword +1.
+
+### Player — level-up an existing character + refusals
+- [ ] Select the built character, set target level higher (e.g. 3), Plan → Apply → the
+      subclass/skill fields re-appear only for the NEW decisions; the level-1 skills are
+      remembered (no re-asking). Sheet updates without reload.
+- [ ] Open Expert mode, paste a garbage choices JSON, Apply → a red parse/server error is
+      shown and NOTHING is written (reload → the sheet is unchanged, still unbuilt/old).
+- [ ] A room member who is NOT the character's owner sees the guided flow but cannot
+      build/seat another player's private character (server refuses; the DM can for a
+      character assigned to the room).
+
+### Room without content + old rooms
+- [ ] Join a room whose DM imported NOTHING → prep shows the amber "no imported content"
+      hint; the dropdowns are empty by design; creating a character still works (identity
+      fields optional) and the build's Plan answers "no level-1 row in this room", not a
+      crash.
+- [ ] A room/character created BEFORE D101 opens in prep with its stored race/class/level
+      intact; the table behaves exactly as in the Sprint 29 checklist.
+
+## FLOORS / STOCKWERKE operable (Sprint 31, D102)
+
+These confirm the D102 floor UX in a real browser (the mechanics are automated in
+`tests/test_floors.py`, `tests/test_floor_maps.py`, `tests/test_d102_floors.py`).
+
+### DM — the Floors panel (was: no way to manage floors at all)
+- [ ] Open a table as DM → the side panel's **DM tab shows a "Floors" panel even
+      with only the primary floor**. Type a name → ＋ Add → the floor appears in the
+      list AND in the DM Tools "Viewing plane" select (which now also appeared).
+- [ ] Click a floor in the panel → the canvas switches to that plane's (blank) map
+      with "← viewing" on the row; nothing moved, no token teleported. The ✏️ on a
+      row renames inline (✓/✗, Enter/Escape) — try the same name as an existing
+      floor or a junk name → the server reason appears as a toast, nothing changed.
+- [ ] 🗑 on an EMPTY floor deletes it; with a token standing on it the delete refuses
+      with the honest reason ("Tokens still stand on this floor"); the primary row
+      says "fixed" — it can neither be deleted nor renamed.
+- [ ] Edit map while a named floor is being VIEWED (any brush) → only that plane
+      changes: switch back to ⬛ primary → its terrain/fog is exactly what it was.
+
+### DM — moving tokens between planes
+- [ ] Select a token → the sheet's Floor row (DM) has the picker + Go: move the token
+      to "crypt" → the token vanishes from the primary canvas; with the crypt VIEWED
+      it appears at the same coordinates on the crypt map. Bring it back → gone from
+      crypt, back on primary. (This channel is DM-only by decision.)
+- [ ] Author a stair: map editor on primary place an object whose interact op targets
+      the crypt → with the crypt viewed, tokens that stand on OTHER planes are not
+      rendered and not clickable on this canvas.
+
+### Player — plane truth without admin power
+- [ ] With your character ON the crypt (DM moved you): reload → you are delivered
+      on the crypt map directly (no manual switching); your sheet's Floor row is a
+      plain label now — no picker, no Go (players take the stairs).
+- [ ] Stand your token ON a stair object cell and interact → "🪜 … takes the
+      Stair to crypt", your view follows you to the crypt automatically.
+- [ ] While you are on the crypt, a fog brush stroke by the DM ON THE PRIMARY
+      floor does not paint anything into your crypt view (and vice versa).
+- [ ] A room created BEFORE D102 (everything on primary) is untouched: same map,
+      same fog, no floors listed, table behaves as in the Sprint 29/30 checklists.

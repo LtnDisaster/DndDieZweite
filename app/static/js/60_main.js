@@ -173,19 +173,17 @@ function wire(){
   };
   const summ = document.querySelector("#char-editor summary");
   if (summ) summ.onclick = () => { if (!$("char-editor").open) setTimeout(() => openCharForm(null), 0); };
+  // D101: create/join lands on the room PREPARATION screen, not directly at the
+  // table — the table itself stays exactly where it was (⚙ / "Open the table").
   $("btn-room-create").onclick = async () => {
     try { const r = await api("/rooms","POST",{ name: $("rm-name").value.trim() || "Adventure" });
-      $("rm-name").value=""; await openRoom(r.code); } catch(e){ err("lobby-err", e); }
+      $("rm-name").value=""; await openPrep(r.code); } catch(e){ err("lobby-err", e); }
   };
   $("btn-room-join").onclick = async () => {
     try { const r = await api("/rooms/join","POST",{ code: $("rm-code").value.trim() });
-      $("rm-code").value=""; await openRoom(r.code); } catch(e){ err("lobby-err", e); }
+      $("rm-code").value=""; await openPrep(r.code); } catch(e){ err("lobby-err", e); }
   };
-  $("btn-back").onclick = () => {
-    clearTimeout(state.reconnectTimer);
-    if (state.ws){ state.ws.onclose=null; state.ws.close(); state.ws=null; }
-    state.room = null; editorClose(); loadLobby();
-  };
+  $("btn-back").onclick = () => backToPrep();
   $("btn-chat").onclick = sendChat;
   $("chat-in").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
   const _withMod = (base) => {
@@ -303,6 +301,7 @@ async function appBoot(){
   wireQuestUI();
   wireRoomAtmosphere();
   wireContent();
+  wirePrep();
   clearPings();
   if (typeof DEBUG !== "undefined" && DEBUG) document.body.classList.add("dbg-on");
   try { await loadLobby(); }

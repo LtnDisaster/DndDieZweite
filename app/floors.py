@@ -5,9 +5,9 @@ Design (deliberately minimal foundation): every room has a PRIMARY floor
 without any data migration. A DM may add further named floors. Floors are
 INDEPENDENT planes: tokens on different floors never collide, never block
 pathfinding, and are not visible to viewers standing on another floor.
-Moving between floors is an explicit token_floor operation (stairs, ladders,
-teleports), not a costed move — positioning within a floor stays the D80-D84
-contract untouched.
+Moving between floors is explicit, never a costed walk — D102 tightened it to
+two doors: the DM's token_floor operation, and the validated stair object the
+players walk to. Positioning within a floor stays the D80-D84 contract.
 """
 import json
 import re
@@ -56,6 +56,35 @@ def add(room_id, value):
         return False, f"At most {MAX_FLOORS} extra floors"
     floors.append(name)
     db.x("UPDATE rooms SET floors=? WHERE id=?", (json.dumps(floors), room_id))
+    return True, floors
+
+
+def rename(room_id, old, value):
+    """D102 — rename a named floor. The plane's own map (floor_maps) and the
+    tokens standing on it follow the new name here, atomically with the floor
+    list. CROSS-PLANE REFERENCES (stair objects on other planes whose
+    destination names this floor) are map contents — the caller rewrites those
+    in the same breath, or every stair to the old name silently dangles.
+    -> (ok, floors_or_message). DM checked by the caller."""
+    name = clean_name(value)
+    if name is None:
+        return False, "Floor name must be 1-24 plain characters"
+    old = str(old or "")
+    if not old:
+        return False, "The primary floor cannot be renamed"
+    room = db.q1("SELECT floors FROM rooms WHERE id=?", (room_id,))
+    if room is None or old not in parse(room):
+        return False, "No such floor"
+    if name == old:
+        return False, "That is its current name"
+    if name in parse(room):
+        return False, "That floor already exists"
+    floors = [name if f == old else f for f in parse(room)]
+    db.x("UPDATE rooms SET floors=? WHERE id=?", (json.dumps(floors), room_id))
+    db.x("UPDATE floor_maps SET floor=? WHERE room_id=? AND floor=?",
+         (name, room_id, old))
+    db.x("UPDATE tokens SET floor=? WHERE room_id=? AND floor=?",
+         (name, room_id, old))
     return True, floors
 
 

@@ -92,7 +92,7 @@ async def handle_interact(ws, room_id, user, is_dm, msg):
             st = dict(obj.get("state") or {})
             st["on"] = not st.get("on")
             obj["state"] = st
-            set_map(room_id, mp)
+            set_map(room_id, mp, fl)   # D102: save the plane the lever lives on
         elif kind == "door":
             door = _linked_door(mp, op)
             if door is None:

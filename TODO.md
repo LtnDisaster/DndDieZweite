@@ -612,3 +612,85 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       now refused, not fixed); server-authorise ability SCORES/saves (still owner-editable
       sheet fields, no confirmed exploit); `POST /characters` stays the trusted authoring/
       seed surface; content-configurable currency table (carried from Phase E).
+
+## Done — Sprint 30 Phase 1-4: D101 Room Preparation & Guided Build (2026-10-13, D101)
+
+- [x] **Room preparation screen** (`#view-prep` + `app/static/js/80_prep.js`, D78-stamped,
+      in `MODULES`/`REQUIRED`): create/join/room-click land here; DM sees rule-pack status +
+      CSV import (reuses `ctPost/ctRender`) + roster; player picks/creates a character,
+      prepares, seats it and opens the table via the EXISTING `openRoom()`. Table back →
+      `backToPrep()`; lobby "Bring" shortcut untouched. No server-side "phase" invented.
+- [x] **`GET /api/content/{code}/options`** — room-member-readable id+name catalogue of the
+      room's rule pack (class/subclass level-rows collapse per id); drives every dropdown.
+      import/export/kinds stay DM-only; names only, never row payloads.
+- [x] **Guided build wizard** derives ALL fields from `charbuild.plan` `needs` (skills,
+      subclass, per-level feat/ASI, known-model spell picks), labels ids via the options
+      catalogue, counts missing decisions, refuses nothing client-side — the server stays
+      the validator. Raw choices JSON remains as opt-in EXPERT mode; unsupported decision
+      types are flagged visibly there, never skipped. No hardcoded class lists.
+- [x] **`characters.background`** (additive column; `None` on PUT = keep stored value so
+      legacy lobby saves cannot wipe it) + **`POST /api/rooms/{code}/starting-gear`**:
+      background `starting_items` granted through `app/inventory.py` only, per-room
+      item-def resolution, unresolvable CSV text REPORTED as skipped, deterministic
+      `op_id` → replay answers "already" (no double grant). Authz mirrors the build API.
+- [x] **The confirmed reload bug is fixed at both ends**: `build_apply` broadcasts
+      `snapshot` (all clients refresh + re-render sheets, DM included) AND the sheet's
+      apply handler re-renders the selected token locally after `refreshRoom()`.
+      No browser reload needed; pinned server-side and as a UI regression assert.
+- [x] **Latent bug fixed:** re-seat of a user's second character 500'd (`sqlite3.Row`
+      into `footprint.*` `.get()` in `assign_char`) — now `dict(tok)`, pinned by test.
+- [x] `tests/test_d101_prep.py` (13): options access + empty room, background roundtrip
+      + wipe guard, starting-gear (grant/skip/idempotent/authz/missing-data/`inv_changed`),
+      apply→`snapshot`, manipulated choices refuse-and-write-nothing, prep UI wiring,
+      apply re-render, legacy flows untouched. Canonical close:
+      `docker compose run --rm test` → **694 passed, 1 skipped, 0 failed**.
+      Docs: D101, AGENT_GUIDE (frontend list, prep section, test map), MANUAL checklist D101.
+- [ ] **Follow-ups (honest limits):** species ability bonuses from `species.csv` are still
+      not mechanically applied (engine decision, out of D101 scope); starting gear is bound
+      by D100's GLOBAL `item_defs` id (second room importing the same pack gets refused
+      projections → those items list as skipped until the per-room key rebuild happens);
+      lobby editor stays legacy free-text (guided flow is room-scoped because content is);
+      public room browser intentionally NOT built (join-by-code preserved).
+
+## Done — Sprint 31: D102 Floors operable (Stockwerke: Integrität, Isolierung, DM-Verwaltung) (2026-10-13, D102)
+
+- [x] **Plane-integrity bugs fixed (the actual "Stockwerke kaputt" reports):** trap
+      discovery (`room/movement.py` walk) and the `toggle` op (`room/interact.py`)
+      saved the VIEWED PLANE's map with an un-floored `set_map` → that overwrote the
+      PRIMARY map's content (terrain, objects, fog). Both save with the floor they
+      hold. WS-connect reveal groups tokens by floor and reveals on EACH token's own
+      plane map; `assign_char` (re-seat) likewise loads/writes the token's plane —
+      the primary blob is only ever written by writes that mean it. No migration.
+- [x] **Visibility isolation:** `explored`/`fog_changed` payloads carry `floor`;
+      clients apply them only while they match `state.viewFloor` (the aoe/ping guard
+      pattern); walk/connect reveals deliver via `send_to_plane_viewed` (token
+      holders + DM + token-less observers on primary). DM canvas filtering corrected
+      to the VIEWED plane (`viewerPlane()` → `viewFloor` for the DM; off-plane tokens
+      not rendered AND not clickable). `openRoom` honours the server's `view_floor`
+      from the first frame (player on a named floor: guards, brushes and saves
+      address the right plane immediately).
+- [x] **Plane changes: DM + validated stairs (operator decision).** `token_floor`
+      is DM-only ("Only the DM moves tokens between floors"); the stair object
+      remains the players' route with the target plane fully checked; sheet floor
+      row read-only for players. D88/Sprint-20/19 tests that encoded the old
+      owner-may-hop policy were re-pointed to the DM socket (behavior checks kept).
+- [x] **The floor manager exists** (it never did — that was "nicht bedienbar"):
+      DM side panel "Floors" (own panel, DM tab): browse/add/rename/delete with
+      server refusal reasons surfaced (primary, tokens standing there). NEW
+      `PATCH /api/rooms/{code}/floors/{name}` — `FLOOR.rename` moves registry,
+      `floor_maps` row and `tokens.floor` together, then stair `op.floor`
+      references are retargeted on every plane map (rename without it dangles
+      stairs); `floors_changed` + `map_changed` follow.
+- [x] `tests/test_d102_floors.py` (9): trap/toggle cross-plane save pins, connect/
+      assign reveal on the standing plane, plane-labelled + plane-scoped reveal and
+      fog-edit delivery, DM-only hop with stairs still open, rename (registry/map/
+      tokens/stairs + same-name/unknown/duplicate/non-DM refusals), player snapshot
+      delivered on the token's plane. Two node-harness hit-test extractions extended
+      (tokenAt now filters by onPlane). Canonical close:
+      `docker compose run --rm test` → **703 passed, 1 skipped, 0 failed**.
+      Docs: D102, AGENT_GUIDE (floors section,
+      module table, test map), MANUAL checklist D102.
+- [ ] **Follow-ups (honest limits):** ⬜-brush backlog untouched (paints cell 0, does
+      not block plane separation); stale editor snapshots can resurrect an old floor
+      name via their objects (editor-merge caveat, D88 class); no per-plane token
+      counts in the panel; stairs remain the only player-facing plane transition.

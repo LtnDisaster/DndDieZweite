@@ -148,7 +148,7 @@ async function api(path, method="GET", body) {
   return d;
 }
 function esc(s){ const d=document.createElement("div"); d.textContent = s==null?"":String(s); return d.innerHTML; }
-function show(view){ for (const v of ["auth","lobby","room"]) $("view-"+v).classList.toggle("hidden", v!==view); }
+function show(view){ for (const v of ["auth","lobby","prep","room"]) $("view-"+v).classList.toggle("hidden", v!==view); }
 function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show");
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), 2500); }
 function err(id, e){ $(id).textContent = e.message || String(e); }

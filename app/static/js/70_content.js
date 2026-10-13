@@ -18,8 +18,8 @@ async function ctPost(file, mode) {
   return d;
 }
 
-function ctRender(rep) {
-  const box = $("ct-report"); if (!box) return;
+function ctRender(rep, boxId) {
+  const box = $(boxId || "ct-report"); if (!box) return;   // D101: prep screen re-uses this renderer
   const parts = [];
   for (const f of (rep.files || [])) {
     const head = document.createElement("div");

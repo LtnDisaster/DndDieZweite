@@ -125,5 +125,5 @@ async def door_toggled(room_id, actor_id, door, floor=""):
                             actor_id=actor_id, x=door["x"], y=door["y"], dir=door["dir"],
                             locked=bool(door["locked"])))
     if newly:
-        await send_to_plane(room_id, floor, "explored", fog_patch(mp, newly))
+        await send_to_plane(room_id, floor, "explored", fog_patch(mp, newly, floor))
     await broadcast(room_id, "map_changed", None)

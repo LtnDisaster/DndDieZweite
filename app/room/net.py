@@ -209,8 +209,11 @@ async def send_to_plane_viewed(room_id, floor, kind, payload):
             await send_to(sock, kind, payload)
 
 
-def fog_patch(mp, newly):
-    return {"cells": newly, "terrain": {str(i): mp["cells"][i] for i in newly}}
+def fog_patch(mp, newly, floor=""):
+    # D102: the patch carries its plane — a client guards on it so a wrong-plane
+    # patch can never paint cells/explored into the grid the viewer is looking at.
+    return {"cells": newly, "terrain": {str(i): mp["cells"][i] for i in newly},
+            "floor": str(floor or "")}
 
 
 def save_map_and_notify(room_id, mp, floor=""):

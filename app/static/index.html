@@ -122,11 +122,88 @@ window.addEventListener("unhandledrejection", function(ev){
   </main>
 </section>
 
+<!-- ============ ROOM PREPARATION (D101) ============ -->
+<section id="view-prep" class="view hidden">
+  <header class="topbar">
+    <div class="row">
+      <button id="prep-back" class="ghost">← Lobby</button>
+      <h1 id="prep-title">Room</h1>
+      <span id="prep-code" class="code" title="Click to copy the join code"></span>
+      <span id="prep-role" class="badge"></span>
+    </div>
+  </header>
+  <main class="lobby-grid">
+    <div class="card">
+      <h2>My table</h2>
+      <div id="prep-check" class="meta" style="opacity:.85"></div>
+      <div class="row"><select id="prep-char" style="flex:1" title="One of my characters"></select></div>
+      <div class="row"><button id="prep-new-toggle" class="ghost">＋ New character</button></div>
+      <div id="prep-new" class="row hidden"><input id="prep-name" placeholder="Character name" maxlength="48"></div>
+      <div class="row">
+        <select id="prep-species" title="Species — from this room's imported rule pack"></select>
+        <select id="prep-class" title="Class — from this room's imported rule pack"></select>
+      </div>
+      <div class="row">
+        <select id="prep-bg" title="Background — from this room's imported rule pack"></select>
+        <button id="prep-id-save" class="ghost" title="Store species/class/background on this character">💾 Identity</button>
+        <button id="prep-create" class="primary hidden">Create character</button>
+      </div>
+      <p id="prep-char-msg" class="meta" style="opacity:.75"></p>
+      <details id="prep-wizbox">
+        <summary>⬆️ Build &amp; level-up (guided)</summary>
+        <div class="row">
+          <label class="tiny">to level</label>
+          <input id="prep-to" type="number" min="1" max="20" value="1" style="width:56px">
+          <button id="prep-plan" class="ghost">🧭 Plan</button>
+          <button id="prep-apply" class="primary">⬆ Apply</button>
+        </div>
+        <div id="prep-wiz" class="meta"></div>
+        <div class="row"><label class="tiny" title="Raw choices JSON for decision types the guided form cannot show">
+          <input id="prep-expert" type="checkbox"> Expert mode (raw choices JSON)</label></div>
+        <div class="row hidden" id="prep-choices-row">
+          <textarea id="prep-choices" spellcheck="false" placeholder='{"skills":["stealth"],"subclass":"…","levels":{"4":{"feat":"…"}}}'
+            style="width:100%;min-height:56px;font-size:.72rem"></textarea>
+        </div>
+        <div id="prep-out" class="meta"></div>
+      </details>
+      <div class="row">
+        <button id="prep-assign" class="primary">📌 Seat character at the table</button>
+      </div>
+      <div class="row">
+        <button id="prep-gear" class="ghost" title="Give the background's listed starting items (only items this room's pack defines)">🎒 Grant starting equipment</button>
+      </div>
+      <div id="prep-gear-out" class="meta"></div>
+      <div class="row"><button id="prep-table" class="primary">🎲 Open the table</button></div>
+    </div>
+    <div class="card">
+      <h2>Room overview</h2>
+      <div id="prep-content-hint" class="meta hidden" style="opacity:.8"></div>
+      <div id="prep-roster"></div>
+      <details id="prep-dm-block" class="hidden">
+        <summary>📚 Rule packages (DM)</summary>
+        <div class="row" id="prep-kinds" style="opacity:.85">Loading…</div>
+        <div class="row"><input type="file" id="prep-ct-file" accept=".csv,.zip" multiple></div>
+        <div class="row">
+          <select id="prep-ct-mode" title="Import mode">
+            <option value="preview">Preview (validate only)</option>
+            <option value="apply">Apply (keep conflicts)</option>
+            <option value="replace">Replace (overwrite)</option>
+          </select>
+          <button id="prep-ct-upload" class="primary">Upload</button>
+        </div>
+        <div id="prep-ct-report" class="journal-list" style="max-height:170px;overflow:auto"></div>
+        <div class="row"><small class="meta" style="opacity:.6">Guide: <code>docs/CSV_CONTENT_GUIDE.md</code></small></div>
+      </details>
+    </div>
+  </main>
+</section>
+
 <!-- ============ ROOM ============ -->
 <section id="view-room" class="view hidden">
   <header class="topbar">
     <div class="row">
-      <button id="btn-back" class="ghost">← Lobby</button>
+      <button id="btn-back" class="ghost">← Prep</button>
+      <button id="btn-prep" class="ghost" title="Room preparation: rule packs, characters, build">⚙</button>
       <h1 id="room-title">Room</h1>
       <span id="room-code" class="code"></span>
       <button id="btn-help" class="ghost" title="Help &amp; keyboard shortcuts (?)">?</button>
@@ -367,6 +444,15 @@ window.addEventListener("unhandledrejection", function(ev){
           <button id="btn-hp-apply">Apply</button>
           <label title="Apply critical damage to selected token"><input id="hp-crit" type="checkbox"> crit</label>
         </div>
+      </div>
+      <div class="panel hidden" id="floorpanel" data-tab="dm">
+        <h2>Floors</h2>
+        <div id="floor-list" class="journal-list"></div>
+        <div class="row">
+          <input id="floor-new" placeholder="New floor name" maxlength="24">
+          <button id="btn-floor-add" class="primary" title="Add another occupancy plane to this room">＋ Add</button>
+        </div>
+        <div class="row"><small class="meta" style="opacity:.6">Planes are independent: own map, own fog, own tokens. Players change planes at a stair object; only the DM moves tokens between floors.</small></div>
       </div>
       <div class="panel hidden" id="dmtools" data-tab="dm">
         <h2>DM Tools</h2>
@@ -615,6 +701,7 @@ window.addEventListener("unhandledrejection", function(ev){
 <script src="/static/js/55_diorama.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/60_main.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/70_content.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/80_prep.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/99_boot.js?v=__BUILDTOKEN__"></script>
 </body>
 </html>

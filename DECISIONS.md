@@ -1936,3 +1936,116 @@ lines name conditions by design (public table record, D90).
   owner-editable sheet fields (lower-severity, no confirmed exploit, the build is the
   intended author of a fresh sheet's scores); and the global `item_defs` id means two
   rooms independently choosing the same item id collide by design and are refused.
+
+## D101 — Room preparation screen, guided character build, background starting gear, apply-refresh fix
+
+- **Context:** browser findings (12.10.2026): DnDTable worked but presented like a test
+  tool — joining landed directly on the canvas, species/class/background were free-text
+  fields, the build demanded raw class ids and hand-written choices JSON, and after a
+  SUCCESSFUL build apply the sheet kept showing `unbuilt` + old skills until a full
+  browser reload. Goal: the flow Login → room → room preparation → table must read like
+  a usable app WITHOUT a second character/content/auth engine, without stockwerk/map
+  editor work, and without new mechanics.
+- **Decision — one new screen, everything else re-used.** `#view-prep` +
+  `app/static/js/80_prep.js` is the landing screen for create/join/room-click;
+  "Open the table" IS the existing `openRoom()`, the table's back button is now
+  `backToPrep()`, and the legacy lobby "Bring" shortcut still enters the table
+  directly. The DM block re-uses `ctPost/ctRender` (D95) for CSV import and the DM-only
+  `kinds` counts; the player block re-uses `/rooms/{code}/state`, `POST /assign`,
+  `/characters` CRUD and `charbuild.plan/apply` exactly as they are. No room "phase"
+  was invented server-side — preparation is a client view over existing truth.
+- **Dropdowns are data, never lists.** New `GET /api/content/{code}/options` gives every
+  ROOM MEMBER the id+name catalogue of the room's rule pack (species/class/background/
+  subclass/feat/spell/item; class level-rows collapse per id). The wizard derives every
+  field from `charbuild.plan`'s `needs` (skill options, subclass, per-level feat/ASI,
+  spell picks) and never hardcodes classes or skills; decision types the guided form
+  cannot show are surfaced explicitly with an expert-mode JSON field — never skipped.
+- **Background is a column; starting gear is one authorised route.** Additive
+  `characters.background` (D101); `CharIn.background=None` means "keep stored value",
+  so legacy lobby PUTs cannot wipe it. `POST /api/rooms/{code}/starting-gear` grants the
+  background's `starting_items` through `app/inventory.py` only, resolves each CSV token
+  strictly against THIS room's item definitions (grants what is unambiguous, REPORTS the
+  rest — nothing is invented), and is idempotent by D94 `inv_ops` (deterministic
+  `starting-gear-<bg>` op → a replay answers "already", never doubles). Authz mirrors
+  the build API exactly (owner, or DM of an assigned character).
+- **The reload bug had TWO causes and got BOTH fixes.** Server: `charbuild.apply` over
+  REST broadcast NOTHING, so open sheets on every client aged silently — it now emits
+  `snapshot` (the `class_levels` precedent). Client: even the apply caller's own
+  `refreshRoom()` never re-rendered an OPEN sheet (only the WS `snapshot` handler did)
+  — the handler now re-renders the selected token's sheet itself, mirroring
+  `40_ws.js`. Pinned by `tests/test_d101_prep.py` (server broadcast + client source).
+- **Found and fixed on the way:** re-seating a user's second character (any assign with
+  an existing token) 500'd — `assign_char` passed a raw `sqlite3.Row` into
+  `footprint.*`, which read it via `.get()`. Now `dict(tok)`; the exact preparation-
+  screen path that exposed it is pinned as a test.
+- **Consequences:** the canonical suite is `694 passed, 1 skipped` (Docker, node 22
+  included; baseline 682 + `tests/test_d101_prep.py` 13). UI text stays English as
+  decided for this sprint (the task's "UI Deutsch" was scoped down by the operator);
+  internal ids and CSV fields were always English. No DB migration data — one additive
+  column with defaults; every old room/character/URL keeps working.
+- **Honest limits:** the lobby editor stays the legacy trusted surface (free-text
+  race/class, now background-preserving); species rows are still bookkeeping only
+  (ability bonuses from `species.csv` are not mechanically applied — that is an
+  existing engine decision D101 did not touch); starting gear covers only what a
+  background lists AND this room's import projected (D100's global `item_defs` id can
+  refuse a second room's projection, and then those items surface as skipped); a
+  background change after a grant only re-grants under a DIFFERENT background id
+  (the replay guard is per background, 1-day `inv_ops` TTL otherwise); the guided
+  form covers skills/subclass/feat/ASI/known-spells — anything new a future pack
+  introduces falls back to the visible expert-mode hint until a form exists.
+
+## D102 — Floors become operable: plane-integrity fixes, DM-only plane changes, the floor manager
+
+- **Context:** browser findings repeated floor after floor — "Stockwerke funktionieren
+  nicht / sind nicht bedienbar". The D86/D88 foundation (named planes, per-plane maps,
+  validated stair connectors) was sound, but three server defects corrupted data across
+  planes (trap/toggle saves wrote the viewed PLANE's map into the PRIMARY blob; WS
+  connect and character seats revealed fog on the primary map regardless of the token's
+  floor), reveals/fog edits reached every client without naming their plane (the DM's
+  browser painted another plane's terrain into the grid it was looking at), and the
+  management UI was a chicken-and-egg trap: floors could only be CREATED from a token
+  sheet, the "Viewing plane" select appeared only once ≥2 floors existed, rename/delete
+  had no UI at all — and renaming was impossible without dangling every stair that
+  pointed at the old name.
+- **Integrity first — one rule: a save carries the floor of the map it holds.**
+  `set_map(room_id, mp)` means the PRIMARY map; the trap branch
+  (`room/movement.py`) and the `toggle` op (`room/interact.py`) now pass the token's/
+  object's floor. Connect reveal groups tokens by floor and reveals each on ITS map;
+  `assign_char` loads and writes the token's plane map (same fit/blank semantics as the
+  `net.get_map` seam). No migration — the primary floor stays the legacy blob.
+- **Visibility isolation is double-keyed.** Every reveal/fog patch now carries
+  `payload.floor` (server `fog_patch` gains the argument) and the client applies it
+  only while it equals `state.viewFloor`; delivery itself is plane-scoped
+  (`send_to_plane_viewed` for walks/connects — token holders + DM + token-less
+  observers on primary). The DM canvas obeys the VIEWED plane (`viewerPlane()` returns
+  `viewFloor` for the DM): browsing one floor shows exactly that floor's tokens — no
+  more sprites floating over another plane's map.
+- **Plane changes are a DM/stairs decision (operator decision).** Players may no
+  longer hop planes via `token_floor` ("Only the DM moves tokens between floors") —
+  the free self-service hop skipped every destination check. The validated STAIR
+  object stays their route (terrain + occupants checked on the target plane, view
+  follows the mover via `grid_reveal`). The sheet's floor row became read-only for
+  players. D88/Sprint-20 tests that encoded the old policy were updated, not deleted.
+- **The missing manager got built.** New DM side panel "Floors" (own panel in the
+  DM tab): list with active-plane highlight, add, view (browse without moving
+  anyone), rename, delete — delete refuses with the server's reason (primary,
+  occupied). New `PATCH /api/rooms/{code}/floors/{name}`: registry, `floor_maps`
+  row and `tokens.floor` move atomically in `FLOOR.rename`, then stair
+  destinations naming the OLD floor are retargeted across ALL plane maps —
+  otherwise renaming silently dangles every stair. The view is re-labelled
+  client-side BEFORE the fetch so no in-flight refresh can request a floor that
+  stops existing mid-request. `openRoom` now honours the server's `view_floor`
+  (a player joining a token on a named floor is delivered ON that plane and the
+  plane guards address the right one from the first frame).
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **703 passed, 1 skipped, 0 failed** (baseline 694 + `tests/test_d102_floors.py`
+  9; two node-harness tests updated because `tokenAt` now filters by `onPlane`).
+  Two D101-relevant behaviours stay intact and are pinned: join lands in prep, and
+  `map_changed`/`refreshRoom` remain the view SSOT (`state.viewFloor = s.view_floor`).
+- **Honest limits:** the ⬜ "floor" brush backlog (it paints cell 0, unrelated to
+  plane separation) was NOT touched — it does not block per-floor separation;
+  renaming while an editor session holds a stale snapshot can re-introduce the old
+  name through that snapshot's objects (editor merge caveat, same class as D88's
+  stale-lamp case); floor rows carry no per-plane token counts in the panel; the
+  DM browse select and the panel share `state.viewFloor` but the panel intentionally
+  carries the management actions — the canvas stays the single map surface.

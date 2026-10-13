@@ -169,30 +169,30 @@ def test_floor_change_rejects_occupied_destination_and_cross_plane_mount(client)
         wsd.send_json({"type": "token_mount", "token_id": rider, "mount_token_id": blocker})
         assert recv_until(wsd, "error", fail_on_error=False)["payload"]["msg"] \
             == "Mount and rider must share a floor"
-    with ws_connect(client, player, code) as wsp:
-        wsp.send_json({"type": "token_floor", "token_id": mine["id"], "floor": "crypt"})
-        err = recv_until(wsp, "error", fail_on_error=False)
+    # D102: the token_floor channel is DM-only — the destination check runs
+    # the same, so this L4 race check drives it through the DM socket.
+    with ws_connect(client, dm, code) as wsd:
+        wsd.send_json({"type": "token_floor", "token_id": mine["id"], "floor": "crypt"})
+        err = recv_until(wsd, "error", fail_on_error=False)
         assert err["kind"] == "error" and "room" in err["payload"]["msg"].lower()
         st = state_of(client, player, code)
         row = [t for t in st["tokens"] if t["id"] == mine["id"]][0]
         assert (row.get("floor") or "") == ""          # refused = unchanged
         # free the destination, then the same stairs are legal
-        with ws_connect(client, dm, code) as wsd:
-            wsd.send_json({"type": "forced_move", "token_id": blocker,
-                           "kind": "teleport", "tx": cx + 6, "ty": cy + 6})
-            # DETERMINISTIC FLUSH (kills the historical flake): a chat echoed on
-            # the acting DM socket is processed on the DM loop only AFTER
-            # handle_forced_move has fully returned — i.e. the blocker's new cell
-            # is committed. Without this barrier the player's next token_floor can
-            # win the race and still see the destination occupied. Closing the DM
-            # socket here would drop that guarantee, so flush BEFORE closing.
-            wsd.send_json({"type": "chat", "text": "flush-freed"})
-            drain_events(wsd, "chat")
-        wsp.send_json({"type": "token_floor", "token_id": mine["id"], "floor": "crypt"})
-        assert recv_until(wsp, "token_floor")["payload"]["floor"] == "crypt"
-        assert (state_of(client, player, code)["tokens"] and
-                [t for t in state_of(client, player, code)["tokens"]
-                 if t["id"] == mine["id"]][0]["floor"] == "crypt")
+        wsd.send_json({"type": "forced_move", "token_id": blocker,
+                       "kind": "teleport", "tx": cx + 6, "ty": cy + 6})
+        # DETERMINISTIC FLUSH (kills the historical flake): a chat echoed on
+        # the acting DM socket is processed on the DM loop only AFTER
+        # handle_forced_move has fully returned — i.e. the blocker's new cell
+        # is committed. Without this barrier the next token_floor can win the
+        # race and still see the destination occupied.
+        wsd.send_json({"type": "chat", "text": "flush-freed"})
+        drain_events(wsd, "chat")
+        wsd.send_json({"type": "token_floor", "token_id": mine["id"], "floor": "crypt"})
+        assert recv_until(wsd, "token_floor")["payload"]["floor"] == "crypt"
+    assert (state_of(client, player, code)["tokens"] and
+            [t for t in state_of(client, player, code)["tokens"]
+             if t["id"] == mine["id"]][0]["floor"] == "crypt")
 
 
 # ---------- L5 ----------

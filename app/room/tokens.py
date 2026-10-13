@@ -163,18 +163,21 @@ async def handle_token_image(ws, room_id, user, is_dm, msg):
 
 
 async def handle_token_floor(ws, room_id, user, is_dm, msg):
-    """D86 — change a token's floor plane (stairs, ladders, teleporters).
-    Explicit vertical move: no pathfinding, no cost — the positioning games
-    happen WITHIN a floor. A mount's riders ride along. The visibility plane
-    recomputes itself: viewers on the old plane receive token_leave, viewers
-    on the new plane receive token_add (the re-broadcast step does that)."""
+    """D86 — change a token's floor plane. D102 tightened the channel to the
+    DM: a plane change is a WORLD decision, and the free self-service hop let
+    a player bypass every destination check that the validated stair object
+    (interact "stair") performs. Players change planes by WALKING TO THE STAIR
+    — that route stays open to them and lands them on a checked destination.
+    Explicit vertical move: no pathfinding, no cost. A mount's riders ride
+    along. The visibility plane recomputes itself: viewers on the old plane
+    receive token_leave, viewers on the new plane receive token_add."""
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
                 (msg.get("token_id", -1), room_id))
     if tok is None:
         return
-    if not (is_dm or tok["owner_user_id"] == user["id"]
-            or tok.get("controller_user_id") == user["id"]):
-        await send_to(ws, "error", {"msg": "Not your token"})
+    if not is_dm:
+        # D102: refuse before revealing anything about floors or tokens.
+        await send_to(ws, "error", {"msg": "Only the DM moves tokens between floors"})
         return
     name = str(msg.get("floor") or "")
     if not floors.exists(room_id, name):
