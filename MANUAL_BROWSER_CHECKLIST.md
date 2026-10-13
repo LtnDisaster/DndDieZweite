@@ -600,3 +600,34 @@ ACCEPT or REJECT:
 - [ ] Old room (created before D104, never dark): "View as" works and matches
       the player exactly; classic fog behaviour untouched (D101–103 checks
       still pass).
+
+
+## D105 — Class kit, NPC gear, looting (manual browser acceptance)
+
+### Prep screen — Starting equipment
+- [ ] Character with class Scout: "🎒 Starting equipment" opens a report:
+      fixed items (Dagger of the Surge, 2 × Healing Draught) and the two
+      radio groups (weapon / kit). Nothing is granted yet.
+- [ ] "Grant equipment" without choosing → warns "Choose first: weapon, kit";
+      after choosing, grants exactly once; the result names both parts.
+- [ ] Click again → both parts answer already-granted; no duplicates appear
+      in the inventory tab. A character whose pack references a missing item
+      shows the error and grants NOTHING for the class part.
+
+### DM — NPC inventory
+- [ ] NPC sheet gains "🎒 Inventory": fill an item + coin, close/reopen —
+      contents persisted. Player's side tab shows no NPC data anywhere
+      (state/network log stays clean).
+- [ ] Player ws (devtools) sending npc_inv inspect → zero reply, sheet has
+      no NPC gear.
+
+### Looting
+- [ ] NPC at 0 HP: a player standing next to it sees "💰 Loot search" on the
+      token sheet → loot panel opens, Loot buttons move gear into the
+      character and the chronicle shows "💰 … loots …". Standing further
+      away: "Walk up to it first".
+- [ ] Heal the NPC above 0 → loot button answers "It isn't here."; heal to 0
+      again → lootable.
+- [ ] Delete the NPC token while its container has items → room stays
+      healthy, world chest containers unaffected, no phantom hoard returns
+      under a recreated token id (DB: containers row for tok:<id> gone).

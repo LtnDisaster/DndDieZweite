@@ -402,20 +402,61 @@ async function prepAssign(){
   } catch (e) { toast(e.message); }
 }
 
+/* D105: the gear step is server-driven. GET resolves the pack (names only,
+   errors included), choice groups arrive as radio fields, and ONE POST with
+   the picks is the only grant path — the client never names an item id. */
 async function prepGear(){
   const ch = prepSelChar(), out = $("prep-gear-out"); if (!ch) return toast("No character selected");
   try {
-    const j = await api(`/rooms/${state.prep.code}/starting-gear`, "POST", { character_id: ch.id });
-    if (!j.ok){ out.innerHTML = `<span style="color:#f1c40f">${esc(j.error || "nothing to grant")}</span>`; return; }
-    const granted = (j.granted || []).map(g => `${g.qty} × ${g.name}`).join(", ");
-    const lines = [];
-    if (j.already) lines.push("<i>Already granted earlier — nothing duplicated.</i>");
-    else if (granted) lines.push(`<span style="color:#9d9">Granted: ${esc(granted)}</span>`);
-    if ((j.skipped || []).length)
-      lines.push(`<small style="opacity:.8">Not grantable from this pack (no item definition for): ${esc(j.skipped.join(", "))}</small>`);
-    out.innerHTML = lines.join("<br>") || "<small style='opacity:.7'>The pack lists no grantable items for this background.</small>";
-    await prepRefresh();
+    state.prep.gearReport = await api(`/rooms/${state.prep.code}/starting-gear/${ch.id}`);
+    renderGearReport();
   } catch (e) { out.innerHTML = `<span style="color:#e74c3c">${esc(e.message)}</span>`; }
+}
+function renderGearReport(){
+  const p = state.prep, j = p.gearReport, out = $("prep-gear-out");
+  if (!j){ out.innerHTML = ""; return; }
+  const bg = j.background, cl = j.class, parts = [];
+  if (!bg) parts.push("<span style='opacity:.7'>No background set — only the class kit can be granted.</span>");
+  else if (bg.error) parts.push(`<span style="color:#f1c40f">${esc(bg.error)}</span>`);
+  else parts.push(`<b>Background</b> ${bg.items.map(i => `${i.qty} × ${esc(i.name)}`).join(", ") || "<i>nothing listed</i>"}` +
+    ((bg.skipped || []).length ? `<br><small style="opacity:.8">Not grantable from this pack (no item definition for): ${esc(bg.skipped.join(", "))}</small>` : ""));
+  if (cl && cl.status === "not_in_pack")
+    parts.push(`<small style="opacity:.8">Class '${esc(cl.id)}' is not in this room's rule pack — no class kit.</small>`);
+  else if (cl && cl.status === "already")
+    parts.push("<span style='color:#9d9'>Class kit already granted — the original choices stand, nothing will be added or changed.</span>");
+  else if (cl && cl.status === "invalid")
+    parts.push(`<span style="color:#e74c3c">Class kit incomplete — nothing will be granted until the pack is fixed: ${esc((cl.errors || []).join("; "))}</span>`);
+  else if (cl && ((cl.fixed || []).length || (cl.groups || []).length)){
+    parts.push(`<b>Class kit</b> ${(cl.fixed || []).map(i => `${i.qty} × ${esc(i.name)}`).join(", ") || "<i>nothing fixed</i>"}`);
+    for (const g of cl.groups || [])
+      parts.push(`<div class="row" style="flex-wrap:wrap"><b>${esc(g.label)}:</b> ` +
+        g.options.map(o => `<label class="tiny" style="margin:1px 6px"><input type="radio" name="gear-${esc(g.label)}" value="${esc(o.token)}"> ${o.qty} × ${esc(o.name)}${o.resolved ? "" : " ⚠"}</label>`).join("") + "</div>");
+  }
+  const ready = !!((bg && !bg.error) || (cl && (cl.status === "gear" || cl.status === "needs_choice")));
+  out.innerHTML = parts.join("<br>") +
+    `<div class="row"><button id="prep-gear-grant" class="primary" ${ready ? "" : "disabled"}>🎒 Grant equipment</button></div>` +
+    `<div id="prep-gear-result" class="meta"></div>`;
+  const g = $("prep-gear-grant"); if (g) g.onclick = prepGearGrant;
+}
+async function prepGearGrant(){
+  const p = state.prep, ch = prepSelChar(), res = $("prep-gear-result"); if (!ch || !res) return;
+  const picks = {};
+  for (const r of $("prep-gear-out").querySelectorAll("input[type=radio]:checked"))
+    picks[r.name.replace(/^gear-/, "")] = r.value;
+  try {
+    const j = await api(`/rooms/${p.code}/starting-gear`, "POST", { character_id: ch.id, class_choices: picks });
+    const gset = (rows, label) => (rows && rows.length)
+      ? `<span style="color:#9d9">${label}: ${rows.map(r => `${r.qty} × ${esc(r.name)}`).join(", ")}</span>` : "";
+    const lines = [gset(j.granted, "Background"), gset(j.class_granted, "Class kit")];
+    if (j.error) lines.push(`<small style="color:#f1c40f">${esc(j.error)}</small>`);
+    if (j.already) lines.push("<i>Background already granted earlier — nothing duplicated.</i>");
+    if (j.class_status === "already") lines.push("<i>Class kit already granted earlier — the original choices stand.</i>");
+    if (j.class_status === "needs_choice") lines.push(`<span style="color:#f1c40f">Choose first: ${esc((j.needs_choice || []).join(", "))}</span>`);
+    if (j.class_status === "invalid") lines.push(`<span style="color:#e74c3c">${esc((j.class_errors || []).join("; "))}</span>`);
+    if ((j.skipped || []).length) lines.push(`<small style="opacity:.8">Not grantable from this pack (no item definition for): ${esc(j.skipped.join(", "))}</small>`);
+    res.innerHTML = lines.filter(Boolean).join("<br>") || "<small style='opacity:.7'>Nothing to grant.</small>";
+    await prepRefresh();
+  } catch (e) { res.innerHTML = `<span style="color:#e74c3c">${esc(e.message)}</span>`; }
 }
 
 async function prepUpload(){
@@ -447,7 +488,7 @@ function backToPrep(){
 function wirePrep(){
   const p = () => state.prep;
   $("prep-back").onclick = () => { state.room = null; loadLobby().catch(() => show("auth")); };
-  $("prep-char").onchange = (e) => { if (p()){ p().selChar = +e.target.value || null; p().plan = null; p().wiz = { skills: [], subclass: "", levels: {} }; renderPrep(); } };
+  $("prep-char").onchange = (e) => { if (p()){ p().selChar = +e.target.value || null; p().plan = null; p().gearReport = null; p().wiz = { skills: [], subclass: "", levels: {} }; renderPrep(); } };
   $("prep-new-toggle").onclick = () => {
     const q = p(); if (!q) return;
     q.newMode = !q.newMode;

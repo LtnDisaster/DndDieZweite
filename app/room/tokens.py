@@ -562,6 +562,11 @@ async def handle_del_token(ws, room_id, user, is_dm, msg):
         db.x("UPDATE room_members SET character_id=NULL WHERE user_id=? AND room_id=?",
              (tok["owner_user_id"], room_id))
     db.x("DELETE FROM tokens WHERE id=?", (tok["id"],))
+    # D105: the token's synthetic loot container ("tok:<id>", see room/inv.py)
+    # dies with it — exactly that one row, so world containers sharing the
+    # table are never touched and no orphan hoard outlives the carcass.
+    db.x("DELETE FROM containers WHERE room_id=? AND object_id=?",
+         (room_id, f"tok:{tok['id']}"))
     sys_msg(room_id, f"DM removed token '{tok['label']}'.")
     await movement._cancel_walk(tok["id"])
     # Gone is a TRANSIENT sync event, not a stored state: forget_token clears the

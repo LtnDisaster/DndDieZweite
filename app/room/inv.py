@@ -431,3 +431,156 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
                                 object_id=oid, label=obj["label"],
                                 item=res["name"], qty=res["qty"],
                                 direction=res["direction"]))
+
+
+# ---------- D105: NPC inventories (carcass key tok:<token_id>) + looting ----------
+# An NPC token's gear lives in the SAME containers table as world chests, under
+# the synthetic key "tok:<token_id>". It never rides in a snapshot or token
+# payload — the only way to see it is an authorised inspect on this channel.
+
+def _tok_c(tok_id):
+    return f"tok:{int(tok_id)}"
+
+
+def _npc_dead(tok):
+    """A token carries NPC gear only if it is an NPC block WITHOUT a bound
+    character; loot is open exactly while its server-side hp is 0. Healing
+    above 0 re-locks it immediately — this reads the live row, never a cache."""
+    if tok is None or tok["character_id"] is not None:
+        return None
+    from .. import npc as NPC
+    block = NPC.load(tok)
+    if not isinstance(block, dict):
+        return None
+    try:
+        hp = int(block.get("hp", 1))
+    except (TypeError, ValueError):
+        hp = 1
+    return block if hp <= 0 else False      # False = NPC exists, alive
+
+
+async def handle_npc_inv(ws, room_id, user, is_dm, msg):
+    """DM manages an NPC token's inventory. inspect / fill / remove /
+    coins_fill / coins_remove — mutations go through app/inventory.py only.
+    Silent for non-DM (mirrors the dm_only world-container path)."""
+    if not is_dm:
+        return
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if _npc_dead(tok) is None:
+        return                                        # not an NPC: silent no-op
+    oid = _tok_c(tok["id"])
+    action = str(msg.get("action", "inspect"))
+
+    async def reply():
+        await send_to(ws, "inv_contents",
+                      {"object_id": oid, "label": tok["label"] or "NPC",
+                       "floor": tok["floor"] or "", "items": INV.container_peek(room_id, oid),
+                       "coins": INV.container_coins_peek(room_id, oid), "npc_token": tok["id"]})
+
+    if action == "inspect":
+        await reply()
+        return
+    try:
+        if action == "fill":
+            qty = int(msg.get("qty", 1))
+            if qty < 1 or qty > 9999:
+                raise INV.InvError("Quantity must be 1–9999")
+            d = db.q1("SELECT * FROM item_defs WHERE id=? AND room_id=?",
+                      (str(msg.get("def_id", ""))[:24], room_id))
+            if d is None:
+                raise INV.InvError("Pick an item definition of this room")
+            res = INV.container_fill(room_id, oid, [INV.entry_from_def(d, qty)], _op(msg))
+        elif action == "remove":
+            res = INV.container_remove(room_id, oid, str(msg.get("item_id", ""))[:16],
+                                       msg.get("qty", 1), _op(msg))
+        elif action == "coins_fill":
+            res = INV.container_fill_coins(room_id, oid, _coins_to_cp(msg), _op(msg))
+        elif action == "coins_remove":
+            res = INV.container_remove_coins(room_id, oid, _coins_to_cp(msg), _op(msg))
+        else:
+            return
+    except INV.InvError as ex:
+        await send_to(ws, "error", {"msg": str(ex)})
+        return
+    if res == "replay":
+        await send_to(ws, "whisper", {"text": "⚠️ That action was already applied."})
+        return
+    # No inv_changed broadcast: a living NPC's inventory is DM knowledge only;
+    # the DM client re-renders from the inv_contents reply.
+    await reply()
+
+
+async def handle_loot(ws, room_id, user, is_dm, msg):
+    """Loot a DOWNED npc token. Authorisation mirrors the D82/D92 container
+    path: same room, controlled token on the npc's plane, standing adjacent,
+    and the receiving character is yours (the DM may act for any seated
+    character). The corpse keeps sitting on the map — only its gear moves,
+    through one transaction per action, guarded by op_id."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    dead = _npc_dead(tok)
+    if dead is None:
+        return                                        # not an NPC: silent no-op
+    action = str(msg.get("action", "inspect"))
+    if dead is False:
+        await send_to(ws, "error",
+                      {"msg": "It isn't here." if not is_dm
+                              else "That creature is still standing."})
+        return
+    fl = str(tok["floor"] or "")
+    if not is_dm:
+        planes = {(t.get("floor") or "") for t in authz.controlled_rows(room_id, user["id"])}
+        if fl not in planes:
+            return                                    # nowhere near: nothing here
+        mp = get_map(room_id, fl)
+        # token x/y are PIXELS on the map (map-object coords are cells) — the
+        # reach comparison lives in cell space, so convert first.
+        cs = mp.get("cell") or 50
+        x0, y0 = int(tok["x"] // cs), int(tok["y"] // cs)
+        near = {(x0 + dx, y0 + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+        if not _reach_cells(room_id, user["id"], mp, fl) & near:
+            await send_to(ws, "error", {"msg": "Walk up to it first"})
+            return
+    oid = _tok_c(tok["id"])
+
+    async def reply():
+        await send_to(ws, "inv_contents",
+                      {"object_id": oid, "label": tok["label"] or "fallen creature",
+                       "floor": fl, "items": INV.container_peek(room_id, oid),
+                       "coins": INV.container_coins_peek(room_id, oid), "npc_token": tok["id"]})
+
+    if action == "inspect":
+        await reply()
+        return
+    ch = await _sheet_char(ws, room_id, user, is_dm, msg)
+    if ch is None:
+        return
+    try:
+        if action == "take":
+            res = INV.container_give(room_id, oid, ch["id"],
+                                     str(msg.get("item_id", ""))[:16],
+                                     msg.get("qty", 1), _op(msg))
+        elif action == "coins_take":
+            res = INV.container_take_coins(room_id, ch["id"], oid,
+                                           _coins_to_cp(msg), _op(msg))
+        else:
+            return
+    except INV.InvError as ex:
+        await send_to(ws, "error", {"msg": str(ex)})
+        return
+    if res == "replay":
+        await send_to(ws, "whisper", {"text": "⚠️ That action was already applied."})
+        return
+    await reply()
+    await broadcast(room_id, "inv_changed", None)     # the TAKING sheet must refresh
+    if action == "take":
+        sys_msg(room_id, f"💰 {user['username']} loots {res['qty']} × {res['name']}"
+                         f" from the fallen {tok['label'] or 'creature'}.")
+        events.emit(events.make("container_moved", room_id=room_id, actor_id=user["id"],
+                                object_id=oid, label=tok["label"] or "carcass",
+                                item=res["name"], qty=res["qty"], direction="from"))
+    else:
+        from .. import gear
+        sys_msg(room_id, f"🪙 {user['username']} takes {gear.cp_label(res['cp'])}"
+                         f" from the fallen {tok['label'] or 'creature'}.")

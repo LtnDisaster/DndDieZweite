@@ -98,6 +98,12 @@ SCHEMAS = {
         ("spell_first_level", False, "int:0-20", 0), ("spell_replace", False, "bool", False),
         ("class_resource_reset", False, "choices:|short|long", ""),
         ("manual", False, "text", ""),
+        # D105: level-1 starting equipment. 'starting_items' = fixed tokens
+        # ("id" or "id xN", comma-separated); 'starting_choices' = pick-one
+        # groups "Label=alt|alt xN;Label2=…" (each alt is a fixed token).
+        # Resolved ONLY through the starting-gear route's parser — never free
+        # item ids from a client.
+        ("starting_items", False, "text", ""), ("starting_choices", False, "text", ""),
     ],
     "subclass": [
         ("id", True, "id", ""), ("class_id", True, "id", ""),

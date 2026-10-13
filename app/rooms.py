@@ -887,19 +887,14 @@ def assign_char(code: str, body: AssignIn, request: Request):
     return {"ok": True}
 
 
-@router.post("/rooms/{code}/starting-gear")
-async def starting_gear_route(code: str, body: AssignIn, request: Request):
-    """D101: grant the character's background starting_items from THIS room's
-    rule pack. No invented items: every token in the CSV field must resolve to
-    an item definition of this room (the content-import projection); anything
-    else is REPORTED as skipped, never silently dropped. Idempotent: the op_id
-    is derived from the background, so a replayed grant answers as "already"
-    through the D94 inv_ops replay guard instead of double-granting.
-    Authorisation mirrors the build API EXACTLY (owner, or DM of an assigned
-    character) — mutation still runs through app/inventory.py, the one SSOT."""
+class GearIn(BaseModel):
+    character_id: int = 0
+    class_choices: dict | None = None
+
+
+def _gear_authz(request, code, cid):
     user, room = room_of(request, code)
-    ch = db.q1("SELECT id, user_id, name, background FROM characters WHERE id=?",
-               (body.character_id,))
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (cid,))
     if ch is None:
         raise HTTPException(404, "Unknown character")
     if ch["user_id"] != user["id"]:
@@ -907,40 +902,291 @@ async def starting_gear_route(code: str, body: AssignIn, request: Request):
                 "SELECT 1 AS ok FROM room_members WHERE room_id=? AND character_id=?",
                 (room["id"], ch["id"])) is None:
             raise HTTPException(403, "Not your character")
+    return user, room, ch
+
+
+def _gear_tokens(text):
+    """'dagger_surge, potion_heal x2' -> ([(item_id, qty)], [errors]). Strict:
+    lowercase id (≤24) plus an OPTIONAL ' xN' (1–999). A malformed token is an
+    ERROR, never a silently granted prefix or a dropped line (D105)."""
+    out, errs = [], []
+    for raw in str(text or "").split(","):
+        tok = raw.strip()
+        if not tok:
+            continue
+        m = re.fullmatch(r"([a-z0-9][a-z0-9_-]{0,23})(?: x([1-9]\d{0,2}))?", tok)
+        if not m:
+            errs.append(f"Malformed item token '{tok[:32]}'")
+            continue
+        out.append((m.group(1), int(m.group(2) or 1)))
+    return out, errs
+
+
+def _gear_choices(text):
+    """'weapon=bow_long|sword_versatile; kit=goggles_night|gloves_thief x2'
+    -> ([(label, [(item_id, qty), …])], [errors]). Each group needs at least
+    two alternatives; labels are unique and free of the group delimiters."""
+    groups, errs = [], []
+    for raw in str(text or "").split(";"):
+        grp = raw.strip()
+        if not grp:
+            continue
+        label, sep, rest = grp.partition("=")
+        label = label.strip()
+        if not sep or not label or len(label) > 24 or any(c in label for c in "|=,"):
+            errs.append(f"Malformed choice group '{grp[:32]}'")
+            continue
+        if any(g[0] == label.lower() for g in groups):
+            errs.append(f"Duplicate choice group '{label}'")
+            continue
+        opts, oerrs = _gear_tokens(rest.replace("|", ","))
+        errs.extend(oerrs)
+        if len(opts) < 2:
+            errs.append(f"Choice group '{label}' needs at least two alternatives")
+            continue
+        groups.append((label.lower(), opts))
+    return groups, errs
+
+
+def _class_gear_row(class_id, room_id):
+    cid = str(class_id or "").strip().lower()
+    if not cid:
+        return None
+    for r in CONTENT.load("class", room_id):
+        if int(r.get("level") or 0) != 1:
+            continue
+        if str(r.get("id") or "").lower() == cid or \
+                (r.get("name") or "").lower() == cid:
+            return r
+    return None
+
+
+def _class_gear_plan(row, picks):
+    """Resolve a class row's level-1 gear against the (optional) picks.
+    ALL-OR-NOTHING: returns (items, groups, errors, missing) where items is
+    populated ONLY when errors and missing are both empty — a broken or
+    unresolved definition can never mint a partial grant that the idempotency
+    claim would then freeze (D105)."""
+    fixed, errors = _gear_tokens(row.get("starting_items"))
+    groups, gerrs = _gear_choices(row.get("starting_choices"))
+    errors.extend(gerrs)
+    picks = picks if isinstance(picks, dict) else {}
+    labels = [g[0] for g in groups]
+    for key in picks:
+        if str(key).strip().lower() not in labels:
+            errors.append(f"Unknown choice group '{str(key)[:24]}'")
+    missing = []
+    for label, opts in groups:
+        pick = picks.get(label)
+        if pick is None:
+            pick = next((p for k, p in picks.items()
+                         if str(k).strip().lower() == label), None)
+        if pick is None:
+            missing.append(label)
+            continue
+        wanted = str(pick).strip().lower()
+        if not any(item == wanted for item, _q in opts):
+            errors.append(f"'{pick}' is not an offered alternative for '{label}'")
+            continue
+        fixed.append(next((item, qty) for item, qty in opts if item == wanted))
+    if errors or missing or not fixed:
+        return [], groups, errors, missing
+    return fixed, groups, errors, missing
+
+
+def _gear_report(room, ch):
+    """Server-side resolution of BOTH gear parts for one character — names and
+    problems only, never raw pack rows. The prep UI renders this; the POST
+    re-validates independently, so the report can never be a side channel."""
+    out = {"ok": True, "background": None, "class": None, "needs_choice": []}
+    bg_id = (ch.get("background") or "").strip()
+    if bg_id:
+        bg = next((r for r in CONTENT.load("background", room["id"])
+                   if r.get("id") == bg_id or (r.get("name") or "").lower() == bg_id.lower()),
+                  None)
+        if bg is None:
+            out["background"] = {"error": f"Background '{bg_id}' is not in this room's rule pack"}
+        else:
+            toks = [t.strip() for t in str(bg.get("starting_items") or "").split(",") if t.strip()]
+            items, skipped = [], []
+            for t in toks:
+                d = db.q1("SELECT name FROM item_defs WHERE id=? AND room_id=?", (t[:24], room["id"]))
+                if d is None:
+                    skipped.append(t)
+                else:
+                    items.append({"token": t[:24], "name": d["name"], "qty": 1})
+            out["background"] = {"id": bg["id"], "items": items, "skipped": skipped}
+    cls_id = (ch.get("char_class") or "").strip()
+    if cls_id:
+        row = _class_gear_row(cls_id, room["id"])
+        if row is None:
+            out["class"] = {"status": "not_in_pack", "id": cls_id}
+        else:
+            groups, gerrs = _gear_choices(row.get("starting_choices"))
+            fixed, ferrs = _gear_tokens(row.get("starting_items"))
+            errors = ferrs + gerrs
+            def named(iq):
+                item, qty = iq
+                d = db.q1("SELECT name FROM item_defs WHERE id=? AND room_id=?",
+                          (item, room["id"]))
+                return {"token": item, "name": d["name"] if d else item, "qty": qty,
+                        "resolved": d is not None}
+            unresolved = [i for i, _q in fixed if db.q1(
+                "SELECT 1 AS hit FROM item_defs WHERE id=? AND room_id=?",
+                (i, room["id"])) is None]
+            for label, opts in groups:
+                for item, _q in opts:
+                    if db.q1("SELECT 1 AS hit FROM item_defs WHERE id=? AND room_id=?",
+                             (item, room["id"])) is None:
+                        unresolved.append(item)
+            if unresolved:
+                errors.append("No item definition in this room's pack for: "
+                              + ", ".join(sorted(set(unresolved))))
+            groups_out = [{"label": label,
+                           "options": [named(iq) for iq in opts]} for label, opts in groups]
+            claimed = db.q1("SELECT 1 AS hit FROM inv_ops WHERE op_id=?",
+                            (f"{ch['id']}|class-gear-{row['id']}"[:40],)) is not None
+            out["class"] = {
+                "status": "already" if claimed else (
+                    "invalid" if errors else ("needs_choice" if groups_out else
+                          ("gear" if fixed else "none"))),
+                "id": row.get("id"),
+                "fixed": [named(iq) for iq in fixed],
+                "groups": groups_out,
+                "errors": errors,
+            }
+            if not errors and groups_out and not claimed:
+                out["needs_choice"] = [g["label"] for g in groups_out]
+    return out
+
+
+@router.get("/rooms/{code}/starting-gear/{cid}")
+def starting_gear_report(code: str, cid: int, request: Request):
+    """D105: the resolved gear report (fixed items, choice groups, AND every
+    error that the grant would refuse on) — shown BEFORE granting so a broken
+    pack fails visibly, never as a half-grant."""
+    _user, room, ch = _gear_authz(request, code, cid)
+    return _gear_report(room, ch)
+
+
+@router.post("/rooms/{code}/starting-gear")
+async def starting_gear_route(code: str, body: GearIn, request: Request):
+    """D101/D105: grant background AND class starting gear from THIS room's
+    rule pack — THE one grant path (no second route exists). Background part
+    keeps its D101 semantics (unresolvable tokens reported as skipped). The
+    class part is all-or-nothing: one malformed token, one missing item
+    definition or one unanswered group refuses the WHOLE class grant and
+    writes NO idempotency claim, so fixing the pack stays possible (D105).
+    Each part is exactly-once through the D94 inv_ops replay guard: a replay
+    answers 'already' and can never add items or overwrite the original
+    choice. Authorisation mirrors the build API EXACTLY (owner, or DM of an
+    assigned character) — mutation still runs through app/inventory.py, the
+    one SSOT."""
+    _user, room, ch = _gear_authz(request, code, body.character_id)
     ratelimit.limit("starting-gear", request, max_n=10, window=60)
+    resp = {"ok": None, "granted": [], "skipped": [], "already": False, "error": "",
+            "class_status": "none", "class_granted": [], "class_errors": [],
+            "needs_choice": []}
+
+    # ---- background part (D101 semantics unchanged) ----
+    bg_done = False
     bg_id = (ch.get("background") or "").strip()
     if not bg_id:
-        return {"ok": False, "error": "This character has no background set"}
-    bg = next((r for r in CONTENT.load("background", room["id"])
-               if r.get("id") == bg_id or (r.get("name") or "").lower() == bg_id.lower()),
-              None)
-    if bg is None:
-        return {"ok": False,
-                "error": f"Background '{bg_id}' is not in this room's rule pack"}
-    tokens = [t.strip() for t in str(bg.get("starting_items") or "").split(",") if t.strip()]
-    if not tokens:
-        return {"ok": False,
-                "error": "This background lists no starting_items in the rule pack"}
-    entries, skipped = [], []
-    for tok in tokens:
-        d = db.q1("SELECT * FROM item_defs WHERE id=? AND room_id=?", (tok[:24], room["id"]))
-        if d is not None:
-            entries.append(INV.entry_from_def(d, 1))
+        resp["error"] = "This character has no background set"
+    else:
+        bg = next((r for r in CONTENT.load("background", room["id"])
+                   if r.get("id") == bg_id or (r.get("name") or "").lower() == bg_id.lower()),
+                  None)
+        if bg is None:
+            resp["error"] = f"Background '{bg_id}' is not in this room's rule pack"
         else:
-            skipped.append(tok)
-    if not entries:
-        return {"ok": True, "granted": [], "skipped": skipped, "already": False}
-    op = f"starting-gear-{bg['id']}"[:40]
-    try:
-        res = INV.grant(room["id"], ch["id"], entries, op)
-    except INV.InvError as ex:
-        raise HTTPException(400, str(ex))
-    if res == "replay":
-        return {"ok": True, "granted": [], "skipped": skipped, "already": True}
-    await room_net.broadcast(room["id"], "inv_changed", None)
-    names = ", ".join(f"{r['qty']} × {r['name']}" for r in res)
-    sys_msg(room["id"], f"🎒 {ch['name']} receives starting equipment: {names}.")
-    return {"ok": True, "granted": res, "skipped": skipped, "already": False}
+            tokens = [t.strip() for t in str(bg.get("starting_items") or "").split(",")
+                      if t.strip()]
+            if not tokens:
+                resp["error"] = "This background lists no starting_items in the rule pack"
+            else:
+                entries, skipped = [], []
+                for tok in tokens:
+                    d = db.q1("SELECT * FROM item_defs WHERE id=? AND room_id=?",
+                              (tok[:24], room["id"]))
+                    if d is not None:
+                        entries.append(INV.entry_from_def(d, 1))
+                    else:
+                        skipped.append(tok)
+                resp["skipped"] = skipped
+                if entries:
+                    try:
+                        res = INV.grant(room["id"], ch["id"], entries,
+                                        f"starting-gear-{bg['id']}"[:40])
+                    except INV.InvError as ex:
+                        raise HTTPException(400, str(ex))
+                    if res == "replay":
+                        resp["already"] = True
+                    else:
+                        resp["granted"] = res
+                        await room_net.broadcast(room["id"], "inv_changed", None)
+                        names = ", ".join(f"{r['qty']} × {r['name']}" for r in res)
+                        sys_msg(room["id"],
+                                f"🎒 {ch['name']} receives starting equipment: {names}.")
+                bg_done = True
+
+    # ---- class part (D105, all-or-nothing, exactly-once) ----
+    cls_id = (ch.get("char_class") or "").strip()
+    if cls_id:
+        row = _class_gear_row(cls_id, room["id"])
+        if row is None:
+            resp["class_status"] = "not_in_pack"
+        elif db.q1("SELECT 1 AS hit FROM inv_ops WHERE op_id=?",
+                   (f"{ch['id']}|class-gear-{str(row.get('id') or '')}"[:40],)) is not None:
+            # exactly-once (D105): the kit was granted BEFORE — a later request
+            # answers 'already' whatever it carries. It can neither add items
+            # nor overwrite the original choice, so the picks are not even
+            # parsed. The claim key mirrors inventory._claim (ns = char id).
+            resp["class_status"] = "already"
+        else:
+            items, groups, errors, missing = _class_gear_plan(row, body.class_choices)
+            if errors:
+                resp["class_status"] = "invalid"
+                resp["class_errors"] = errors[:8]
+            elif missing:
+                resp["class_status"] = "needs_choice"
+                resp["needs_choice"] = missing
+            elif not items:
+                resp["class_status"] = "none"
+            else:
+                entries, unresolved = [], []
+                for item_id, qty in items:
+                    d = db.q1("SELECT * FROM item_defs WHERE id=? AND room_id=?",
+                              (item_id, room["id"]))
+                    if d is None:
+                        unresolved.append(item_id)
+                    else:
+                        entries.append(INV.entry_from_def(d, qty))
+                if unresolved:
+                    resp["class_status"] = "invalid"
+                    resp["class_errors"] = [
+                        "No item definition in this room's pack for: "
+                        + ", ".join(sorted(set(unresolved)))]
+                else:
+                    try:
+                        res = INV.grant(room["id"], ch["id"], entries,
+                                        f"class-gear-{row['id']}"[:40])
+                    except INV.InvError as ex:
+                        raise HTTPException(400, str(ex))
+                    if res == "replay":
+                        resp["class_status"] = "already"
+                    else:
+                        resp["class_status"] = "granted"
+                        resp["class_granted"] = res
+                        await room_net.broadcast(room["id"], "inv_changed", None)
+                        names = ", ".join(f"{r['qty']} × {r['name']}" for r in res)
+                        sys_msg(room["id"],
+                                f"🎒 {ch['name']} receives the "
+                                f"{row.get('name') or row['id']} kit: {names}.")
+
+    resp["ok"] = bg_done or bool(resp["class_granted"]) or \
+        (resp["class_status"] == "already" and not resp["error"])
+    return resp
 
 
 @router.delete("/rooms/{code}/members/{uid}")

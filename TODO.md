@@ -760,3 +760,24 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       dm_only-lamps not panel-editable yet (editor tool only); no magical-
       darkness state (documented variant); no falling mechanics; managing
       lights mid-preview only shows after Refresh.
+
+## Done — Sprint 34: D105 Class kit, NPC gear and looting (Klassen-Startausrüstung, NPC-Inventare, Loot) (2026-10-13, D105)
+- [x] classes.csv: starting_items / starting_choices (level-1, additive, Demo scout+warden);
+      prep screen is server-driven (GET report + radio groups + ONE grant POST with class_choices).
+- [x] Grant all-or-nothing (kein Claim bei kaputtem Pack — reparierbar), class kit exactly-once
+      ("already" before choices parse), background part D101-identisch; GET starting-gear/{cid} report.
+- [x] NPC inventories = containers table keyed tok:<token_id>, DM-only `npc_inv` channel
+      (inspect/fill/remove/coins_fill/coins_remove); contents never in any payload but own inspect.
+- [x] Looting `loot` channel: gate NPC hp==0 (live; heal>0 re-locks), D82/D92 authz
+      (room/plane/reach/own char, DM per seated char), container_give forces direction,
+      op_id everywhere (replay/race safe), chronicle 💰/🪙.
+- [x] New SSOT primitives: INV.container_give, INV.container_remove_coins; token deletion
+      cleans exactly its tok:<id> container (no orphans, no other stock touched).
+- [x] Fixed by tests: token pixel vs map-object cell coords in the reach check.
+- [x] UI: prep gear step (80_prep.js), NPC sheet Inventory/Loot, player "Loot search",
+      chest panel routes chest/npc/loot sources with op_id per action.
+- [x] tests/test_d105_gear_loot.py (24: 22 server + 2 source pins) green; suites
+      content/d101/sprint22/money/hardening/integration/npc/footprint regression green;
+      canonical 749 passed, 1 skipped, 0 failed (baseline 725 + 24).
+      Docs: D105, AGENT_GUIDE (inventory/loot section), CSV guide (gear grammar),
+      MANUAL checklist D105.

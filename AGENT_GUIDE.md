@@ -1233,6 +1233,29 @@ Inspect:
 
 Live delivery and `/state` replay must match.
 
+## Before modifying inventory, containers or looting
+- Inventory, equipment, containers and coin have ONE engine:
+  `app/inventory.py`. Every mutation runs in `db.tx()` with an op_id claim
+  (`_claim`, namespaced per character/object) — a missing op_id means "no
+  replay protection", so every client path must send `invOpId()` (D94).
+- NPC gear lives in the `containers` table under the synthetic key
+  `tok:<token_id>` (D105). It is DM-visible through the `npc_inv` channel
+  only and looting (`loot` channel) opens exactly while the NPC's stored
+  hp is 0; both answer contents ONLY to the requester's own inspect. Never
+  add inventory data to a token payload, snapshot or broadcast.
+- Looting direction is `container_give` (forced out of the container) —
+  do NOT "simplify" it to `container_move`, whose direction follows the
+  item's current location and would let a carrier deposit INTO the corpse.
+- Starting gear: the ONLY grant path is `POST /api/rooms/{code}/starting-
+  gear` (+ its GET report). Background part = D101 semantics; class part =
+  all-or-nothing (a broken pack must not write its claim) and exactly-once
+  (the claim answers `already` before choices are parsed). `classes.csv`
+  token grammar: `id [xN]`, groups `Label=alt|alt xN;…` — item ids in a
+  payload are never trusted, the CSV's alternatives are the allowlist.
+- Reach maths: tokens carry PIXEL x/y, map objects carry CELL coords —
+  convert with `map.cell` before intersecting (`room/inv.py` loot gate).
+- Deleting a token must delete its `tok:<id>` container row too (see
+  `handle_del_token`) — nothing else in `containers` may be touched.
 ## Before modifying chat/narrative privacy
 
 Inspect:

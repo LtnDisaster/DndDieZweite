@@ -1170,10 +1170,12 @@ function renderSheet(tok){
   if (!ch){
     if (tok.npc && state.room.role === "dm"){ renderNpcSheet(tok); return; }
     body.innerHTML = `<div class="meta">No character attached.</div>` +
+      `<div class="row"><button id="btn-loot-npc" title="Take gear from this fallen creature — stand next to it">💰 Loot search</button></div>` +
       (state.room.role === "dm"
         ? `<div class="row"><button id="btn-del-npc" style="color:var(--red)">Remove token</button></div>` : "");
     $("hp-btns").classList.add("hidden"); $("hp-adv").classList.add("hidden");
     const del = $("btn-del-npc"); if (del) del.onclick = () => wsSend({ type:"del_token", token_id: tok.id });
+    const lo = $("btn-loot-npc"); if (lo) lo.onclick = () => openLootChest(tok.id);
     return;
   }
   const mod = v => { const m2 = Math.floor(((v||10)-10)/2); return (m2>=0?"+":"")+m2; };
@@ -1517,6 +1519,8 @@ function renderNpcSheet(tok){
       <span class="tiny">swim</span><input id="npc-swim" type="number" min="0" value="${n.swim||0}" style="width:46px">
       <span class="tiny">climb</span><input id="npc-climb" type="number" min="0" value="${n.climb||0}" style="width:46px">
     </div>
+    <div class="row"><button id="npc-inventory" title="Manage this creature's carried gear (lives on the server, players never see it while it stands)">🎒 Inventory</button>
+      <button id="npc-loot" title="Take gear from this fallen creature" class="${(n.hp||0) > 0 ? "hidden" : ""}">💰 Loot</button></div>
     <div class="statline">${statCells}</div>
     <div class="row chips" id="npc-abil">${abilRolls}</div>
     <div class="row"><label><input type="checkbox" id="npc-prof"> proficient</label>
@@ -1572,6 +1576,8 @@ function renderNpcSheet(tok){
   $("npc-swim").oninput = e => n.swim = Math.max(0, +e.target.value||0);
   $("npc-climb").oninput = e => n.climb = Math.max(0, +e.target.value||0);
   $("npc-lvl").oninput = e => { n.level = Math.max(1, Math.min(30, +e.target.value||1)); renderNpcSpells(tok); };
+  $("npc-inventory").onclick = () => openNpcChest(tok.id);
+  const _nl = $("npc-loot"); if (_nl) _nl.onclick = () => openLootChest(tok.id);
   for (const b of body.querySelectorAll(".npc-slot")) b.oninput = () => {
     const lv = b.dataset.lv; const prev = n.spell_slots[String(lv)] || {used:0};
     n.spell_slots[String(lv)] = { max: Math.max(0, Math.min(9, +b.value||0)), used: Math.min(Math.max(0,Math.min(9,+b.value||0)), prev.used||0) };
@@ -2152,9 +2158,34 @@ function openInvContainer(ob){
 }
 
 function showInvContents(p){
+  // p.npc_token marks a D105 NPC container ("tok:<id>"); the source (who may
+  // do WHAT with it — world chest vs DM manage vs looting) was decided at
+  // open time and survives the server reply.
+  const prev = state.invChest && state.invChest.object_id === p.object_id ? state.invChest : null;
   state.invChest = { object_id: p.object_id, label: p.label || "Container",
-                     floor: p.floor || "", items: p.items || [], coins: p.coins || 0 };
+                     floor: p.floor || "", items: p.items || [], coins: p.coins || 0,
+                     token_id: p.npc_token != null ? p.npc_token : (prev && prev.token_id) || null,
+                     src: p.npc_token != null ? ((prev && prev.src) || "loot") : "chest" };
   setSideTab("inv"); renderInvChest();
+}
+/* D105: open the same chest panel for an NPC container. Inventory management
+   (src npc) is DM-only server-side; looting (src loot) works for anyone who
+   stands next to the body — the server says "It isn't here." while it stands. */
+function openNpcChest(tokId){
+  const tok = state.tokens.find(t => t.id === tokId);
+  state.invChest = { object_id: "tok:" + tokId, token_id: tokId, src: "npc",
+                     label: ((tok && tok.label) || "NPC"), floor: (tok && tok.floor) || "",
+                     items: [], coins: 0, loading: true };
+  setSideTab("inv"); renderInvChest();
+  wsSend({ type: "npc_inv", action: "inspect", token_id: tokId });
+}
+function openLootChest(tokId){
+  const tok = state.tokens.find(t => t.id === tokId);
+  state.invChest = { object_id: "tok:" + tokId, token_id: tokId, src: "loot",
+                     label: ((tok && tok.label) || "Fallen creature"), floor: (tok && tok.floor) || "",
+                     items: [], coins: 0, loading: true };
+  setSideTab("inv"); renderInvChest();
+  wsSend({ type: "loot", action: "inspect", token_id: tokId });
 }
 
 function renderInvChest(){
@@ -2165,41 +2196,46 @@ function renderInvChest(){
   box.classList.remove("hidden");
   const isDM = state.room && state.room.role === "dm";
   const ch = invTargetChar();
+  const src = cs.src || "chest";
   const rows = (cs.items || []).map(it =>
     `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind] || "🎒"} ${esc(it.name)} ×${it.qty}</span>` +
     `<small style="opacity:.55"> ${esc(it.desc || "")}</small><span class="inv-btns">` +
-    `<input id="tk-q-${it.id}" type="number" min="1" max="${it.qty}" value="1" style="width:52px">` +
-    `<button data-tk="${it.id}" ${ch ? "" : "disabled"}>Take</button>` +
-    (isDM ? `<button data-rm="${it.id}" style="color:var(--red)">Remove</button>` : "") +
-    `</span></div>`).join("") || `<div class="meta">${cs.loading ? "opening…" : "Empty."}</div>`;
+    (src === "npc" ? "" :
+      `<input id="tk-q-${it.id}" type="number" min="1" max="${it.qty}" value="1" style="width:52px">` +
+      `<button data-tk="${it.id}" ${ch ? "" : "disabled"}>${src === "loot" ? "Loot" : "Take"}</button>`) +
+    (isDM && src !== "loot" ? `<button data-rm="${it.id}" style="color:var(--red)">Remove</button>` : "") +
+    `</span></div>`).join("") || `<div class="meta">${cs.loading ? "opening…" : (src === "loot" ? "Nothing to loot." : "Empty.")}</div>`;
   const own = (ch && ch.items || []).filter(i => !i.unidentified);
   const _coinOpts = ["cp", "sp", "ep", "gp", "pp"].map(c => `<option value="${c}">${c}</option>`).join("");
   const _coinCtl = `<input id="coin-amt" type="number" min="1" value="1" style="width:60px"><select id="coin-sel">${_coinOpts}</select>`;
   const _coinRow = (cs.coins > 0)
     ? `<div class="inv-row"><span class="inv-name">🪙 <b>${cs.coins} cp</b></span><span class="inv-btns">${_coinCtl}` +
-      `<button id="coin-take" ${ch ? "" : "disabled"}>Take</button>` +
-      (isDM ? `<button id="coin-fill">Add</button>` : "") + `</span></div>`
-    : (isDM ? `<div class="inv-row"><span class="inv-name"><small style="opacity:.6">🪙 no coin — </small></span><span class="inv-btns">${_coinCtl}<button id="coin-fill">Add coin</button></span></div>` : "");
+      (src === "npc" ? (isDM ? `<button id="coin-out" title="Take coin out (gone from this container)">Remove</button><button id="coin-fill">Add</button>` : "") :
+        `<button id="coin-take" ${ch ? "" : "disabled"}>${src === "loot" ? "Loot" : "Take"}</button>` +
+        (isDM && src === "chest" ? `<button id="coin-fill">Add</button>` : "")) + `</span></div>`
+    : (isDM && src !== "loot" ? `<div class="inv-row"><span class="inv-name"><small style="opacity:.6">🪙 no coin — </small></span><span class="inv-btns">${_coinCtl}<button id="coin-fill">Add coin</button></span></div>` : "");
   box.innerHTML = `<h3>📦 ${esc(cs.label)} <button id="chest-close" class="ghost" title="close">✕</button></h3>` +
     _coinRow + rows +
-    (cs.loading ? "" : `<div class="row"><select id="put-item" title="take from this character's inventory">` +
-      (own.map(i => `<option value="${i.id}">${esc(i.name)} ×${i.qty}</option>`).join("") || "<option value=''>nothing to put</option>") +
-      `</select><input id="put-q" type="number" min="1" value="1" style="width:52px">` +
-      `<button id="chest-put" ${ch && own.length ? "" : "disabled"}>Put</button>` +
+    (cs.loading || src === "loot" || !(isDM || src === "chest") ? "" : `<div class="row">` +
+      (src === "chest" ? `<select id="put-item" title="take from this character's inventory">` +
+        (own.map(i => `<option value="${i.id}">${esc(i.name)} ×${i.qty}</option>`).join("") || "<option value=''>nothing to put</option>") +
+        `</select><input id="put-q" type="number" min="1" value="1" style="width:52px">` +
+        `<button id="chest-put" ${ch && own.length ? "" : "disabled"}>Put</button>` : "") +
       (isDM ? `<select id="fill-def" title="definition to put in">` +
         ((state.itemDefs || []).map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("") || "<option value=''>no defs</option>") +
         `</select><input id="fill-q" type="number" min="1" value="1" style="width:52px"><button id="chest-fill">Fill</button>` : "") +
       `</div>`);
   const cl = $("chest-close");
   if (cl) cl.onclick = () => { state.invChest = null; renderInvChest(); };
+  const _dst = src === "chest" ? { type: "inv_container", object_id: cs.object_id, floor: cs.floor }
+                               : { type: src === "npc" ? "npc_inv" : "loot", token_id: cs.token_id };
   box.querySelectorAll("button[data-tk]").forEach(b => b.onclick = () => {
     const q = +(($("tk-q-" + b.dataset.tk) || {}).value || 1);
-    wsSend({ type: "inv_container", action: "move", object_id: cs.object_id, floor: cs.floor,
-             char_id: ch.id, item_id: b.dataset.tk, qty: q, op_id: invOpId() });
+    wsSend({ ..._dst, action: src === "loot" ? "take" : "move", char_id: ch.id,
+             item_id: b.dataset.tk, qty: q, op_id: invOpId() });
   });
   box.querySelectorAll("button[data-rm]").forEach(b => b.onclick = () => {
-    wsSend({ type: "inv_container", action: "remove", object_id: cs.object_id, floor: cs.floor,
-             item_id: b.dataset.rm, qty: 9999, op_id: invOpId() });
+    wsSend({ ..._dst, action: "remove", item_id: b.dataset.rm, qty: 9999, op_id: invOpId() });
   });
   const put = $("chest-put");
   if (put) put.onclick = () => {
@@ -2210,12 +2246,12 @@ function renderInvChest(){
   const fill = $("chest-fill");
   if (fill) fill.onclick = () => {
     const id = (($("fill-def") || {}).value || ""); if (!id) return;
-    wsSend({ type: "inv_container", action: "fill", object_id: cs.object_id, floor: cs.floor,
-             def_id: id, qty: +(($("fill-q") || {}).value || 1), op_id: invOpId() });
+    wsSend({ ..._dst, action: "fill", def_id: id, qty: +(($("fill-q") || {}).value || 1), op_id: invOpId() });
   };
-  const _coin = (action) => wsSend({ type: "inv_container", action, object_id: cs.object_id,
-    floor: cs.floor, char_id: ch && ch.id, amount: +(($("coin-amt") || {}).value || 1),
+  const _coin = (action) => wsSend({ ..._dst, action, char_id: ch && ch.id,
+    amount: +(($("coin-amt") || {}).value || 1),
     coin: (($("coin-sel") || {}).value || "cp"), op_id: invOpId() });
   const ct = $("coin-take"); if (ct) ct.onclick = () => _coin("coins_take");
   const cf = $("coin-fill"); if (cf) cf.onclick = () => _coin("coins_fill");
+  const co = $("coin-out"); if (co) co.onclick = () => _coin("coins_remove");
 }

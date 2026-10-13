@@ -132,6 +132,26 @@ trägst du in die Stufe-1-Zeile; Stufenmerkmale in ihre jeweilige Stufe.
 | `upcast_scaling` | bool | Hinweis, dass Zauber mit Slotstufe skalieren (die eigentliche Regel steht pro Zauber in `upcast_step`) |
 | `manual` | Text | was händisch entschieden werden muss |
 
+**Startausrüstung (D105, nur Zeile `level=1` maßgeblich):**
+
+- `starting_items` — feste Gegenstände, kommagetrennt: `id` oder `id xN`
+  (N = 1…999, Kleinbuchstaben, Item-Id ≤ 24 Zeichen).
+  Beispiel: `dagger_surge, potion_heal x2`
+- `starting_choices` — Wahlgruppen, je eine Antwort: `Label=alt|alt xN;Label2=…`
+  Jede Alternative ist ein fester Token wie oben; mindestens zwei pro Gruppe;
+  Gruppenlabels enthalten kein `=`, `|`, `,` und kommen nicht doppelt vor.
+  Beispiel: `weapon=bow_long|sword_versatile; kit=goggles_night|gloves_thief`
+
+Auflösung läuft ausschließlich über die Startausrüstungs-Route
+(`POST /api/rooms/{code}/starting-gear`): Jedes Token muss auf eine
+**Item-Definition dieses Raums** (Pack-Import-Projektion) resolve-bar sein.
+Die Klassenvergabe ist **alls-oder-nichts** — ein kaputtes Token blockiert
+die komplette Klassen-Startausrüstung, schreibt aber keinen Idempotenz-Claim
+(das Pack darf repariert und erneut grantet werden). Eine einmal vergebene
+Klassenausrüstung bleibt genau einmal vergeben: spätere Anfragen — auch mit
+anderen Choices — beantworten nur `already`. Ein Client kann niemals eigene
+Item-Ids einschleusen; die Alternativen-Liste des CSV ist die Allowlist.
+
 ### 4.3 `subclasses.csv` — Unterklasse (Zeile pro Merkmal-Stufe)
 | Spalte | Typ | Bedeutung |
 |---|---|---|

@@ -546,3 +546,55 @@ def container_take_coins(room_id, char_id, object_id, cp, op_id=None):
         _container_coins_store(c, room_id, object_id, hoard - cp)
         _wallet_store(c, char_id, purse + cp)
     return {"cp": cp}
+
+
+# ---------- D105: forced take-out + DM-side coin removal (NPC carcasses) ----------
+
+def container_give(room_id, object_id, char_id, item_id, qty, op_id=None):
+    """FORCED container→character move (looting). container_move decides its
+    direction by where the item is — a character who already carries a stack of
+    the same definition would silently PUT INTO the corpse instead of taking.
+    Loot can only ever run one way: out of the container. One transaction, one
+    op_id claim namespaced to the character, so a replay after a reconnect
+    answers 'replay' instead of duplicating (D105)."""
+    try:
+        qty = int(qty)
+    except (TypeError, ValueError):
+        raise InvError("Quantity must be a whole number")
+    if qty <= 0:
+        raise InvError("Quantity must be positive")
+    if db.q1("SELECT 1 AS hit FROM room_members WHERE room_id=? AND character_id=?",
+             (room_id, char_id)) is None:
+        raise InvError("Not a character of this room")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_give", char_id):
+            return "replay"
+        src = _char(c, char_id)
+        items_s, equip_s = _load(c, src)
+        cont = container_load(c, room_id, object_id)
+        cit, q = _take(cont, item_id, qty)          # missing/too-few -> InvError
+        copy = dict(cit)
+        copy["qty"] = q
+        got, _ = stack_add(items_s, copy)
+        _container_store(c, room_id, object_id, cont)
+        strip_slots(equip_s, items_s)
+        _store(c, char_id, items_s, equip_s)
+    return {"name": cit["name"], "qty": q, "item_id": got["id"]}
+
+
+def container_remove_coins(room_id, object_id, cp, op_id=None):
+    """DM-side removal of coin from a container WITHOUT a receiving purse (the
+    DM decides where the gold went; world items vanish the same way). Mirrors
+    container_take_coins' shortfall rule: it raises BEFORE storing, so nothing
+    is written and the transaction rolls back; negative balances are impossible."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_coins_remove", object_id):
+            return "replay"
+        hoard = _container_coins_read(c, room_id, object_id)
+        if hoard < cp:
+            raise InvError("Not enough coin in the container")
+        _container_coins_store(c, room_id, object_id, hoard - cp)
+    return {"cp": cp}

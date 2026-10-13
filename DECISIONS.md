@@ -2155,3 +2155,74 @@ lines name conditions by design (public table record, D90).
   in the panel); no falling/feeling mechanics for darkness; connect reveal in
   dark rooms now reveals exactly the light's reach — a player whose lantern sat
   lit before disconnecting may legitimately re-learn that map area.
+
+
+## D105 — Class kits, NPC gear and looting: all-or-nothing grants, `tok:<id>` containers, and the corpse as a loot source
+
+- **Context:** D101 granted background gear only; `classes.csv` had no kit
+  columns; NPC tokens carried no inventory; a downed monster could not be
+  looted — although the container (D92), currency (D99) and op-id replay
+  (D94) engines had long existed. D105 adds the missing *rules*, not a
+  second engine.
+- **Pack schema (additive):** level-1 class rows gain `starting_items`
+  (fixed tokens `id` or `id xN`, comma-separated) and `starting_choices`
+  (pick-one groups `Label=alt|alt xN;Label2=…`). Unknown-column tolerance
+  made the extension safe, but the exporter's byte-stability required the
+  pack rows themselves to carry the new columns — `DictReader` turns a
+  missing trailing column into `None`, and `None` silently stringifies.
+  Demo kits live in `scout` and `warden`.
+- **One grant path:** the D101 route is the only grant path. POST gains an
+  optional `class_choices`; a new GET `starting-gear/{cid}` resolves the
+  pack server-side (names + every error the grant would refuse on) so the
+  prep screen shows problems BEFORE anything is granted. The background
+  part keeps D101 semantics verbatim (skipped-but-reported, replay→already).
+- **Class part is ALL-OR-NOTHING (D105 addendum):** one malformed token,
+  one missing item definition or one unanswered group refuses the entire
+  class grant and writes NO idempotency claim — fixing the CSV stays
+  possible and a half-grant can never freeze behind a claim. Choices are
+  re-checked against the CSV's offered alternatives only; a client can
+  never name an arbitrary item id.
+- **Exactly-once (D105 addendum):** the claim key `class-gear-<class>` is
+  probed BEFORE the choices are even parsed — a later request answers
+  `already` whatever it carries, adds nothing and overwrites nothing.
+- **NPC inventory = the containers table, keyed `tok:<token_id>`:** no new
+  table, no migration. A DM-only `npc_inv` channel manages it (inspect /
+  fill / remove / coins_fill / coins_remove). Contents travel exclusively
+  through the requester's own inspect — never in a snapshot, token payload
+  or broadcast — so a living NPC's gear is structurally invisible to
+  players.
+- **Loot gate = server-side NPC hp == 0:** death saves remain PC-only (the
+  model "sits NPCs at 0 HP", D56); no new death state was invented. The
+  gate reads the live token row on every action, so healing above 0
+  re-locks the corpse instantly. PCs (death saves or not) are never loot
+  sources.
+- **Loot authorisation mirrors D82/D92 exactly:** same room, same plane,
+  controlled token adjacent to the body, receiving character is yours —
+  the DM may act for any seated character. `inspect` reveals, `take` and
+  `coins_take` move — each through ONE transaction with ONE op_id claim,
+  so a replay after a reconnect can never duplicate, and two players
+  racing for the last dagger serialise on BEGIN IMMEDIATE with the loser
+  re-checking (and failing) inside the transaction.
+- **New SSOT primitives (`app/inventory.py`):** `container_give` forces
+  container→character — `container_move` decides direction by WHERE THE
+  ITEM IS, so a looter already carrying the same stack would have silently
+  PUT INTO the corpse. `container_remove_coins` lets the DM take coin out
+  of a container without minting a purse.
+- **Token deletion cleans exactly its own container** (`tok:<id>` of that
+  room): no orphan hoard outlives the carcass, world containers in the
+  same table are untouched (D105 addendum).
+- **Side bug found by the tests:** token `x/y` are PIXELS while map-object
+  coordinates are CELLS — the first reach check compared pixels against
+  cells and every looting attempt died at "Walk up to it first". Reach now
+  converts via `map.cell`.
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **749 passed, 1 skipped, 0 failed** (baseline 725 +
+  `tests/test_d105_gear_loot.py` 24, of which 2 are UI source pins).
+  classes.csv exports gain the two columns everywhere (byte-stable).
+- **Honest limits:** NPC death is HP==0 — there is no dying/revive
+  distinction for monsters and no corpse state; looting is standing
+  adjacency, no search time; a class kit is one row (level 1) — multi-
+  class kits were not invented; the prep screen's gear step grants what the
+  pack lists and never lets a player choose outside it; NPC inventories are
+  DM knowledge only — a DM who wants to reveal a corpse's exact gear to the
+  table uses the same loot panel.
