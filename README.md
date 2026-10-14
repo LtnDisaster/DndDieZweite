@@ -9,6 +9,10 @@ items (AC, attunement, potions, charges), ability-aware dice, **combat condition
 templates and a reusable bestiary**, server-authoritative saving throws, temporary HP,
 hit-dice rests, resources, exhaustion and typed damage, chat, and an initiative tracker.
 
+> Rules baseline: **D&D 5e (2024)** is the binding target; parts of the engine
+> still follow 2014 semantics — see the audit in
+> [`docs/RULES_AUDIT_2024.md`](docs/RULES_AUDIT_2024.md).
+
 **Table QoL:** visibility-filtered game log (public / self / blind / DM), advantage and
 disadvantage controls, `2d20kh1` style dice, map pins, pings, a two-click ruler,
 private encounter templates, a party/selected/DM journal, token footprints and disposition.

@@ -1,3 +1,3 @@
-id,name,skill_prof,tool_prof,languages,starting_items,feature,manual
-bg_scholar,Scholar,"arcana, history",,"Common, Celestial",potion_heal,Lots of Research: you can find lore others cannot,
-bg_urchin,Urchin,"sleight_of_hand, stealth",thieves' tools,Common,"sword_plus1, coin purse",City Secrets: you know a hidden hideout,
+id,name,skill_prof,tool_prof,languages,starting_items,feature,asi_abilities,origin_feat,manual
+bg_scholar,Scholar,"arcana, history",,"Common, Celestial",potion_heal,Lots of Research: you can find lore others cannot,"int, wis, cha",feat_quick_study,demo background — the ASI pattern follows the 2024 SRD; the feat is house-rule
+bg_urchin,Urchin,"sleight_of_hand, stealth",thieves' tools,Common,"sword_plus1, coin purse",City Secrets: you know a hidden hideout,"dex, con, cha",feat_alley_cat,demo background — the ASI pattern follows the 2024 SRD; the feat is house-rule

@@ -234,7 +234,188 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
     if needs_choice:
         return False, {"needs_choice": needs_choice}
 
-    # -- chronological, full recompute 1..to (idempotent by construction) -----
+    ok, payload = _recompute(ch, led, class_id, to, p, dec, room_id)
+    if not ok:
+        return False, payload
+
+    # -- persist through the ONE mutation site + the columns the engines read --
+    if not progression.set_class_levels(ch["id"], [{"class_id": class_id, "level": to}]):
+        return False, {"error": "invalid class levels"}
+    stats, skills, saves = payload["stats"], payload["skills"], payload["saves"]
+    spell_state = payload["spell_state"]
+    led.update({"class_id": class_id, "applied_through": to,
+                "subclass": payload["subclass"], "base_stats": payload["base_stats"],
+                "decisions": dec, "history": payload["history"]})
+    db.x("UPDATE characters SET char_class=?, hit_die=?, max_hp=?, hp=?, stats=?, "
+         "skills=?, saves=?, build=? WHERE id=?",
+         (class_id, payload["hit_die"], payload["max_hp"], payload["max_hp"],
+          db.json_dumps(stats), db.json_dumps(skills),
+          db.json_dumps({k: v for k, v in saves.items() if v}),
+          db.json_dumps(led), ch["id"]))
+    if spell_state:
+        db.x("UPDATE characters SET abilities=?, spells=?, spell_slots=?, resources=? "
+             "WHERE id=?",
+             (db.json_dumps(spell_state["abilities"]), db.json_dumps(spell_state["spells"]),
+              db.json_dumps(spell_state["spell_slots"]), db.json_dumps(spell_state["resources"]),
+              ch["id"]))
+    res = {"level": to, "max_hp": payload["max_hp"], "subclass": payload["subclass"],
+           "skills": sorted(k for k, v in skills.items() if v),
+           "saves": sorted(k for k, v in saves.items() if v),
+           "feats": payload["feats_applied"]}
+    if spell_state:
+        res["known"] = sorted(spell_state["abilities"])
+        res["slots"] = {lv: d["max"] for lv, d in spell_state["spell_slots"].items() if d["max"]}
+        res["spell_model"] = p["needs"]["spell"]["model"]
+    return True, res
+
+
+
+# --------------------------------------------------------------------------
+# D108 — character origin (2024): background ASI + Origin feat, server-authorised
+# --------------------------------------------------------------------------
+def _background_row(ref, room_id):
+    """Resolve a background reference (row id OR name, case-insensitive — the
+    same matcher the D101 starting-gear path uses) against THIS room's content."""
+    want = str(ref or "").strip().lower()
+    if not want:
+        return None
+    for r in content.load("background", room_id):
+        if str(r.get("id") or "").lower() == want or str(r.get("name") or "").lower() == want:
+            return r
+    return None
+
+
+def _origin_errors(row, room_id):
+    """What makes a background row 2024-ready: its three ASI abilities and one
+    feat row IN THIS ROOM whose category is exactly 'origin' (SRD 5.2.1:
+    'A background gives your character a specified Origin feat'). A 2014-style
+    row fails here visibly — never silently treated as 2024-conformant."""
+    errs = []
+    name = row.get("name") or row.get("id")
+    ab = [a for a in (row.get("asi_abilities") or []) if a in ABILITY_SHORT]
+    if len(ab) != 3 or len(set(ab)) != 3:
+        errs.append(f"background '{name}' has no valid asi_abilities "
+                    "(needs exactly three ability scores) — not a 2024 background")
+    feat_id = str(row.get("origin_feat") or "").strip()
+    if not feat_id:
+        errs.append(f"background '{name}' grants no origin_feat")
+    else:
+        feat = _feat_rows(room_id).get(feat_id)
+        if feat is None:
+            errs.append(f"origin_feat '{feat_id}' is not in this room's rule pack")
+        elif str(feat.get("category") or "") != "origin":
+            errs.append(f"feat '{feat_id}' is category "
+                        f"'{feat.get('category') or 'general'}', not 'origin'")
+    return errs
+
+
+def origin_options(char, room_id):
+    """The origin REPORT (GET side, D105 report-then-grant pattern): readiness,
+    the three allowed abilities with their CURRENT values (for the preview), the
+    Origin feat — and every error apply_origin would refuse on."""
+    led = ledger(char)
+    applied = led.get("origin") if isinstance(led.get("origin"), dict) else None
+    ref = str((char or {}).get("background") or "").strip()
+    out = {"applied": applied, "ready": False, "background": None,
+           "background_name": ref or None, "asi_abilities": [], "feat": None,
+           "current": {}, "modes": ["plus2_plus1", "three"], "errors": []}
+    if not ref:
+        out["errors"].append("This character has no background set")
+        return out
+    row = _background_row(ref, room_id)
+    if row is None:
+        out["errors"].append(f"Background '{ref}' is not in this room's rule pack")
+        return out
+    out["background"] = row.get("id")
+    out["background_name"] = row.get("name") or row.get("id")
+    ab = [a for a in (row.get("asi_abilities") or []) if a in ABILITY_SHORT]
+    out["asi_abilities"] = ab
+    stats = _as_dict(char.get("stats"))
+    out["current"] = {a: _int(stats.get(a, 10)) or 10 for a in ab}
+    feat_id = str(row.get("origin_feat") or "").strip()
+    feat = _feat_rows(room_id).get(feat_id) if feat_id else None
+    if feat:
+        out["feat"] = {"id": feat["id"], "name": feat.get("name", feat["id"]),
+                       "category": feat.get("category") or "general",
+                       "effect": feat.get("effect") or ""}
+    out["errors"] = _origin_errors(row, room_id)
+    out["ready"] = not out["errors"] and applied is None
+    return out
+
+
+def apply_origin(char_id, background, asi, room_id=0):
+    """Grant the 2024 background origin (ability increases + Origin feat) EXACTLY
+    ONCE. Every decision is validated against THIS room's imported content — the
+    client picks a distribution among the background's THREE listed abilities and
+    nothing else; feat id and amount come from the background row. The grant is
+    recorded in the build ledger (``characters.build.origin`` = the secure proof
+    of origin, no heuristic back-computation) and replayed inside the SAME full
+    recompute the class chronology uses, so it can never be applied twice and
+    survives any later build step. hp/max_hp/slots/resources are never touched;
+    existing sheets are never auto-migrated."""
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (int(char_id),))
+    if ch is None:
+        return False, {"error": "unknown character"}
+    led = ledger(ch)
+    applied = led.get("origin")
+    if isinstance(applied, dict) and applied:
+        return True, {"already": True, "origin": applied}
+    row = _background_row(background, room_id)
+    if row is None:
+        return False, {"error": f"background '{background}' is not in this room's rule pack"}
+    errs = _origin_errors(row, room_id)
+    if errs:
+        return False, {"error": "; ".join(errs)}
+    allowed = [a for a in (row.get("asi_abilities") or []) if a in ABILITY_SHORT]
+    deltas, err = _origin_deltas(allowed, asi, _as_dict(ch.get("stats")))
+    if err:
+        return False, {"error": err}
+    if not isinstance(led.get("base_stats"), dict) or not led.get("base_stats"):
+        led["base_stats"] = dict(_as_dict(ch.get("stats")))
+    led["origin"] = {"background": row["id"], "feat": str(row["origin_feat"]).strip(),
+                     "asi": deltas}
+
+    built = str(led.get("class_id") or "")
+    applied_through = int(led.get("applied_through") or 0)
+    feats_applied = []
+    if built and applied_through > 0:
+        # A built sheet: replay the WHOLE chronology (base snapshot + origin +
+        # class levels) — deterministic, so HP/spells/resources come out exactly
+        # as stored; only stats/skills may change (origin feat skill_prof).
+        p = plan(built, applied_through, room_id)
+        if not p["ok"]:
+            return False, {"error": "; ".join(p["errors"]) or "cannot replay build"}
+        ok, payload = _recompute(ch, led, built, applied_through, p,
+                                 dict(_decisions(led)), room_id)
+        if not ok:
+            return False, payload
+        stats, skills = payload["stats"], payload["skills"]
+    else:
+        stats = dict(led["base_stats"])
+        skills = dict(gear.clean_skills(_as_dict(ch.get("skills"))))
+        ok, note = _replay_origin(led["origin"], room_id, stats, skills, feats_applied)
+        if not ok:
+            return False, {"error": note}
+    db.x("UPDATE characters SET stats=?, skills=?, build=? WHERE id=?",
+         (db.json_dumps(stats), db.json_dumps(skills), db.json_dumps(led), ch["id"]))
+    feat_row = _feat_rows(room_id).get(led["origin"]["feat"], {})
+    return True, {"origin": led["origin"], "background": row["id"],
+                  "background_name": row.get("name", row["id"]),
+                  "feat": feat_row.get("name", led["origin"]["feat"]),
+                  "stats": stats,
+                  "skills": sorted(k for k, v in skills.items() if v)}
+
+
+
+# --------------------------------------------------------------------------
+# recompute core (D96 chronology + D108 origin replay) — the single mutation
+# arithmetic behind apply() and apply_origin()
+# --------------------------------------------------------------------------
+def _recompute(ch, led, class_id, to, p, dec, room_id):
+    """Full recompute 1..to from the ledger's base_stats snapshot — idempotent
+    by construction. The D108 origin grant (if the ledger has one) replays at
+    the FRONT of the chronology (2024: origins exist before class level 1).
+    Returns (False, {"error": ...}) or (True, payload)."""
     rows = _class_rows(class_id, room_id)
     first = rows[1]
     # ability deltas are RECOMPUTED from the pre-build base scores (snapshot at
@@ -254,6 +435,11 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
     hit_die = _int(first.get("hit_die")) or 8
     max_hp = _int(first.get("hp_base")) or (hit_die)
     feats_applied, history = [], []
+    origin = led.get("origin") if isinstance(led.get("origin"), dict) else None
+    if origin:
+        ok, note = _replay_origin(origin, room_id, stats, skills, feats_applied)
+        if not ok:
+            return False, {"error": note}
     for lvl in range(1, to + 1):
         r = rows.get(lvl, {})
         if lvl > 1:
@@ -314,31 +500,56 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
             "resources": _class_resources(rows, to, ch),
         }
 
-    # -- persist through the ONE mutation site + the columns the engines read --
-    if not progression.set_class_levels(ch["id"], [{"class_id": class_id, "level": to}]):
-        return False, {"error": "invalid class levels"}
-    led.update({"class_id": class_id, "applied_through": to, "subclass": subclass,
-                "base_stats": base_stats, "decisions": dec, "history": history})
-    db.x("UPDATE characters SET char_class=?, hit_die=?, max_hp=?, hp=?, stats=?, "
-         "skills=?, saves=?, build=? WHERE id=?",
-         (class_id, hit_die, max_hp, max_hp, db.json_dumps(stats),
-          db.json_dumps(skills), db.json_dumps({k: v for k, v in saves.items() if v}),
-          db.json_dumps(led), ch["id"]))
-    if spell_state:
-        db.x("UPDATE characters SET abilities=?, spells=?, spell_slots=?, resources=? "
-             "WHERE id=?",
-             (db.json_dumps(spell_state["abilities"]), db.json_dumps(spell_state["spells"]),
-              db.json_dumps(spell_state["spell_slots"]), db.json_dumps(spell_state["resources"]),
-              ch["id"]))
-    res = {"level": to, "max_hp": max_hp, "subclass": subclass,
-           "skills": sorted(k for k, v in skills.items() if v),
-           "saves": sorted(k for k, v in saves.items() if v),
-           "feats": feats_applied}
-    if spell_state:
-        res["known"] = sorted(spell_state["abilities"])
-        res["slots"] = {lv: d["max"] for lv, d in spell_state["spell_slots"].items() if d["max"]}
-        res["spell_model"] = casting["model"]
-    return True, res
+    return True, {"base_stats": base_stats, "stats": stats, "skills": skills,
+                  "saves": saves, "hit_die": hit_die, "max_hp": max_hp,
+                  "feats_applied": feats_applied, "history": history,
+                  "subclass": subclass, "spell_state": spell_state}
+
+
+def _replay_origin(origin, room_id, stats, skills, feats_applied):
+    """Apply a RECORDED origin grant onto the recompute state. The deltas were
+    validated at grant time; the feat must STILL exist and STILL be an Origin
+    feat — a later pack edit that drops or recategorises it fails the whole
+    recompute visibly (no half-grant, no silent skip)."""
+    for ab, delta in sorted((origin.get("asi") or {}).items()):
+        _bump(stats, str(ab).lower(), _int(delta))
+    feat_id = str(origin.get("feat") or "")
+    if feat_id:
+        ok, note = _apply_feat(feat_id, room_id, stats, skills, feats_applied,
+                               category="origin")
+        if not ok:
+            return False, note
+    return True, ""
+
+
+def _origin_deltas(allowed, asi, cur):
+    """Validate the client's ASI choice against SRD 5.2.1 'Character
+    Backgrounds': '+2 to one of the three and +1 to another' OR '+1 to all
+    three' — targets from the background's list only, +2 and +1 on DIFFERENT
+    scores, and NO score may rise above 20. Returns (deltas, error)."""
+    asi = asi if isinstance(asi, dict) else {}
+    mode = str(asi.get("mode") or "").strip().lower()
+    if mode == "three":
+        if set(asi) - {"mode"}:
+            return None, "mode 'three' takes no extra keys"
+        deltas = {a: 1 for a in allowed}
+    elif mode in ("plus2_plus1", "plus"):
+        if set(asi) - {"mode", "plus2", "plus1"}:
+            return None, "unknown keys in asi (use mode/plus2/plus1 only)"
+        p2 = str(asi.get("plus2") or "").strip().lower()
+        p1 = str(asi.get("plus1") or "").strip().lower()
+        if p2 not in allowed or p1 not in allowed:
+            return None, "asi targets must be abilities listed by the background"
+        if p2 == p1:
+            return None, "+2 and +1 must go to DIFFERENT abilities"
+        deltas = {p2: 2, p1: 1}
+    else:
+        return None, "asi mode must be 'plus2_plus1' or 'three'"
+    for ab, d in sorted(deltas.items()):
+        now = _int(cur.get(ab, 10)) or 10
+        if now + d > 20:
+            return None, f"{ab} would rise above 20 (currently {now})"
+    return deltas, ""
 
 
 
@@ -376,10 +587,13 @@ def _check_choices(p, dec, class_id, room_id):
 
 
 
-def _apply_feat(feat_id, room_id, stats, skills, applied):
+def _apply_feat(feat_id, room_id, stats, skills, applied, category=None):
     row = _feat_rows(room_id).get(feat_id)
     if row is None:
         return False, f"unknown feat '{feat_id}'"
+    if category is not None and str(row.get("category") or "") != category:
+        return False, (f"feat '{feat_id}' is category "
+                       f"'{row.get('category') or 'general'}', not '{category}'")
     for ab, delta in _parse_bonuses(row.get("ability_boost")):
         _bump(stats, ab, delta)
     for sk in _split(row.get("skill_prof")):

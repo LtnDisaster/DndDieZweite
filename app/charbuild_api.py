@@ -49,8 +49,45 @@ async def build_apply(request: Request, code: str, cid: int, user=Depends(requir
                                  body.get("choices") or {}, room["id"])
     if ok:
         # D101: the build changed sheets the table is showing — notify every
-        # client exactly like the DM class_levels transport, so the sheet
-        # updates WITHOUT a browser reload (the confirmed D101 browser bug).
+        # client exactly like the DM class_levels transport, so the sheet updates
+        # WITHOUT a browser reload (the confirmed D101 browser bug).
         await room_net.broadcast(room["id"], "snapshot", None)
+        return {"ok": True, "result": result}
+    return {"ok": False, **result}
+
+
+# ------------------------------------------------------------- D108: origin
+@router.get("/{code}/{cid}/origin")
+def build_origin(request: Request, code: str, cid: int, user=Depends(require_user)):
+    """2024 origin report (D105 report-then-grant pattern): readiness, the
+    background's three abilities with current values, its Origin feat, and
+    every refusal the apply would answer."""
+    room = _authorize(request, code, cid)
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (int(cid),))
+    if ch is None:
+        raise HTTPException(404, "Unknown character")
+    return charbuild.origin_options(ch, room["id"])
+
+
+@router.post("/{code}/{cid}/origin")
+async def build_origin_apply(request: Request, code: str, cid: int,
+                             user=Depends(require_user)):
+    """Apply the 2024 background origin (ASI + Origin feat) exactly once. The
+    body may carry ONLY ``background`` (id/name; defaults to the sheet value)
+    and the ``asi`` choice — feat id and amounts come from the ROOM'S CONTENT,
+    never from this request. Replays/double clicks answer ``already``."""
+    room = _authorize(request, code, cid)
+    ratelimit.limit("charbuild-origin", request, max_n=10, window=60)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Body must be a JSON object")
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (int(cid),))
+    if ch is None:
+        raise HTTPException(404, "Unknown character")
+    bg = str(body.get("background") or "").strip() or (ch.get("background") or "")
+    ok, result = charbuild.apply_origin(cid, bg, body.get("asi") or {}, room["id"])
+    if ok:
+        if not result.get("already"):
+            await room_net.broadcast(room["id"], "snapshot", None)
         return {"ok": True, "result": result}
     return {"ok": False, **result}

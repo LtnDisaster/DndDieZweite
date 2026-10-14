@@ -83,7 +83,7 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/content.py` | CSV content packages (D95): schema/validate/import/export. DATA read by the engines (items→item_defs, spells→abilities), **never code**; generic `content(kind,room_id,id)` SSOT, room 0 = global | `SCHEMAS`, `parse()`, `validate()`, `import_package()`, `export_csv()`, `load_registered_abilities()` |
 | `app/content_api.py` | DM-only content import/export REST, raw-body (no multipart) (D95) | `/api/content/{code}` import/export/kinds |
 | `app/charbuild.py` | Chronological build Stufe 1–20 from CONTENT, drives the EXISTING columns (D96); Phase C adds spellcasting — known/prepared model, slot TABLE, class resource (D97). Ledger in `characters.build` is bookkeeping, not a second truth | `plan()`, `apply()`, `ledger()` |
-| `app/charbuild_api.py` | Room-scoped build REST; owner-or-room-DM (mirrors `class_levels`) (D96) | `/api/build/{code}/{cid}` plan/apply |
+| `app/charbuild_api.py` | Room-scoped build REST; owner-or-room-DM (mirrors `class_levels`) (D96); D108 origin report/apply inside the SAME engine | `/api/build/{code}/{cid}` plan/apply · `…/origin` GET/POST |
 | `app/room/quests.py` | Quest WS transport (thin) | `handle_quest_add/complete/…` |
 | `app/room/progression.py` | `class_levels` WS transport (thin) | `handle_class_levels()` |
 | `app/ratelimit.py` | In-memory request limiter | `limit()` |
@@ -921,6 +921,19 @@ Frontend filtering may improve presentation but may not be the security boundary
   invented. Idempotent via a deterministic `op_id` (`starting-gear-<bg>`,
   D94 inv_ops replay → `"already"`, never a double grant). Authz mirrors the
   build API EXACTLY (owner, or DM of a character assigned to the room).
+- D108 `GET/POST /api/build/{code}/{cid}/origin` (`charbuild.py`/`charbuild_api.py`) —
+  the 2024 character ORIGIN (background ASI + Origin feat). One operation module
+  function `apply_origin` lives INSIDE the build engine: the background and its
+  Origin feat resolve against THIS room's content (`asi_abilities` exactly three
+  abilities, `origin_feat` a feat row with `category=origin`), the client may send
+  only the DISTRIBUTION (`{"mode":"plus2_plus1","plus2":…,"plus1":…}` with distinct
+  allowed targets, or `{"mode":"three"}`), scores may not rise above 20 (refused,
+  never clamped), and `_apply_feat` (category-aware) applies the feat. The grant is
+  recorded in the build ledger (`characters.build.origin` — secure proof, no
+  reverse-computing from stats) and replayed at the FRONT of the D96 full recompute,
+  so replay/double-click/parallel posts apply it exactly once and a later level-up
+  replays instead of wiping it. hp/AC/slots/resources and the D94/D101 gear claims
+  are untouched; no character is ever auto-migrated.
 - The guided wizard derives EVERY field from `charbuild.plan` (`needs`) — skill
   options, subclass, per-level feat/ASI, spell picks — and labels ids with the
   `options` catalogue. Decision types the form cannot render are surfaced with
@@ -1022,6 +1035,7 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_d103_editor_assets.py` | D103: void(5) blocks movement/teleport/placement but NOT vision/light; brush edits never touch wall/door/trap entities; void is plane-local (crypt pit ≠ primary); registry/sanitize keep legacy maps byte-identical; player map_edit refused; canonical `/assets/<id>` serves exactly like `/api/assets/<id>` (owner 200 PNG+nosniff, riding-DM 200, stranger/junk 404); assigned artwork roundtrip keeps DB canon; client brush/canvas wiring pinned |
 | `tests/test_d104_lights_preview.py` | D104: `lamp` channel roundtrip (add/update/off/remove, radius in/out, walls block glow like sight), darkness = memory+footstep only, darkvision effective, lamps plane-local AND plane-lighting, non-DM refused; `view_as` byte-equal to the player's own `/state`, leak-free (hidden NPC/traps/dm_only/secret doors/op payloads), purity (explored & player state unchanged), auth matrix (member 404/outsider 403/foreign char 404); reconnect reveals exactly by the light's reach; legacy rooms classic; toggled-off survives later map_edit; preview client wiring pinned |
 | `tests/test_d106_curses.py` | D106: per-instance curse metadata (twin daggers stay distinct, stack carve-out to qty=1, no merge into ordinary stacks, split refused), survival matrix (container move, loot, equip/unequip, use with charge debit, attune, identify, recharge, long rest, honest sheet-PUT round-trip), secrecy matrix (player /state, lobby sheet, gear snapshot/derived, chest+loot inspect, view_as, chat chronicle — no secret on any wire), REST tamper (forged curse ignored, stripped PUT cannot wipe), curse channel DM-only + foreign-room refusal, owner-change resets `revealed` but never the curse, whisper recipient forced server-side and invisible to peers (live + history), `del_token` atomicity incl. FK-failure rollback of BOTH token and container |
+| `tests/test_d108_origin.py` | D108 origin: report (abilities/feat/errors), both ASI modes, wrong/identical targets, 20-cap refuses, feat-category refusal, missing rows, 2014-background refusal, cross-room isolation, owner/DM/foreign authz, replay + concurrent double-post = one grant, reload-persistent ledger, no auto-migration, species stats untouched, gear never double, build-before/after origin replay once, PUT cannot forgery-erase | 
 | `tests/test_d101_prep.py` | D101 prep screen: content `options` (member read, non-member/anon refused, empty room), `characters.background` roundtrip + no-PUT-wipe guard, `starting-gear` (resolves/skips/idempotent, authz mirrors build API, missing-data reported, `inv_changed` broadcast), `apply` broadcasts `snapshot` (reload-bug fix), and the prep UI wiring (source asserts — no browser runner) |
 | `tests/test_abilities.py` | DC/attack derivation, save-half, resist/immune through defense pipeline, death-pipeline entry, heal, condition, concentration flag, slot+resource consumption, upcast validation, attack-vs-AC+crit, footprint flank, LOS/door, range authority, actor spoofing refusal, hidden-token non-leak |
 | `tests/test_diorama_parity.py` | confirmed-path revalidation refusal (`route_invalid`), shared camera-space click math (Node vm), view-aware click/token/double-click, tool parity, sheet-crash guard |

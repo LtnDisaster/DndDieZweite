@@ -812,3 +812,65 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [ ] **Backlog (bewusst nicht gebaut):** Taschendiebstahl-Mechanik, automatische
       Fluch-Auslöser/Zufallstabellen, geheime Rettungswürfe, mechanische Fluch-Folgen
       (Schaden/Saves/Ticks), Fluch-Verbreitung auf andere Gegenstände.
+
+## Done — Sprint 36: D107 Integration & Browser-Readiness-Audit + Regelkompatibilitäts-Audit 2014↔2024 (D107)
+
+- [x] Regelbasis-Beschluss: **D&D 5e (2024)** ist verbindliche primäre Regelbasis
+      (DECISIONS D107) — Abweichungen der Engine sind jetzt dokumentierte
+      Abstände mit R-Nummern, kein stiler Drift.
+- [x] Audit geschrieben: `docs/RULES_AUDIT_2024.md` — Matrix mit `Datei:Zeile`-
+      Belegen (Ableitungen/Proficiency, Species/Background/ASI/Feats, Klassen-
+      fortschritt, Zauber inkl. Concentration, Waffen inkl. Weapon Mastery,
+      Zustände/Tod/Ruhe), Einstufungen [2014]/[2024]/[gleich]/[HR]/[Anz.]/[lück].
+- [x] Bereits 2024-konform festgehalten: Cantrip-Skalung nach Gesamtcharakter-
+      stufe (abilities.py), ASI-Kadenz datengetrieben (classes.csv), Attunement
+      Kap 3, Cover-/Krit-/Traglast-Semantik.
+- [x] CSV-Schema-Eignung je Datei bewertet; additive Spalten-Vorschläge
+      (species.origin_feats, backgrounds.ability_bonuses, feats.tier,
+      items.mastery) NUR dokumentiert — kein Schema-Change in D107.
+- [x] Hausregel-Register H1–H9 (Death-Saves D34, Rests D35, NPC-0-HP D56/D105,
+      Attunement-Gate, Exhaustion-/Inspiration-/Ranks-Anzeige, Modi-Hoheit,
+      Content-Originalität) mit DECISIONS-Verlinkung.
+- [x] Priorisierte R-Liste: 4×R-P0 (Proficiency-Dice, ASI-Träger 2024, Feat-
+      Modell 2024, Weapon Mastery), 5×R-P1, ~9×R-P2 + R-L0 (SRD-5.2-Lizenz-
+      prüfung durch Menschen, bevor 2024-Originaltexte übernommen werden).
+- [x] README: Ein-Satz-Statushinweis; CSV-Guide §11 „Eignung für 2024".
+- [x] Schranken gehalten: keine Regelimplementierung, keine neuen Content-Packs,
+      keine fremden Regeltexte außer SRD-5.1-freigegeben, keine Änderung an
+      55_diorama.js, keine Git-Befehle. Kanonisch: 775 passed, 1 skipped,
+      0 failed (doku-only — Erwartung erfüllt).
+
+## Done — Sprint 37: D108 SRD-5.2.1-Korrektur + Charakterursprung (2024)
+
+- [x] D107-Audit gegen das offizielle SRD-5.2.1-PDF korrigiert (K1–K9 im
+      Audit §1): Proficiency Dice gestrichen (Engine konform), Concentration-
+      DC max(10, halb), Origin Feats aus dem Background, Feat-Kategorien inkl.
+      General-Wertboni, Death Saves 3✓/3✗ bestätigt konform, Short-Rest-HD
+      Spielerwahl bestätigt konform, Mastery-Liste (Cleave/Graze/Nick/Push/
+      Sap/Slow/Topple/Vex) sauber von Properties getrennt, Conditions/K9-
+      Korrekturen (Incapacitated fehlt; Passive Perception existiert 2024
+      nicht → Abwesenheit = konform).
+- [x] R-L0 gelöst: SRD 5.2.1 offiziell CC BY 4.0 — Quelle + wörtliche
+      Attribution in ATTRIBUTION.md.
+- [x] Schema additiv: backgrounds.asi_abilities/origin_feat, feats.category
+      (registriert in content.SCHEMAS; alte Packs lesbar, 2014er Werte gelten
+      nicht stillschweigend als 2024 — sichtbare Verweigerung).
+- [x] Demo-Packs neu erzeugt: beide Demo-Backgrounds mit 2024-Ursprung +
+      zwei projekt-eigene Demo-Origin-Feats, house-rule-markiert.
+- [x] charbuild.apply_origin + origin_options: serverseitig gegen Raum-
+      Content validiert, nur Verteilung aus Client, 20-Obergrenze ablehnend,
+      Wiederverwendung von _apply_feat (Kategorie-Check), Ledger-Eintrag
+      characters.build.origin als Herkunftsnachweis, Replay im D96-Voll-
+      recompute (exakt einmal, reload-/replay-/parallel-sicher), keine
+      Auto-Migration, keine HP/AC/Slot-/Ressourcen-Anfasstung, Start-
+      ausrüstung über getrennten Claim-Pfad unberührt.
+- [x] REST GET/POST /api/build/{code}/{cid}/origin (Authz = Build-API).
+- [x] UI: 🧬-Origin-Karte in der Raumvorbereitung (Report, +2/+1 vs. +1×3,
+      Vorschau, Apply; englisch; Server autoritativ).
+- [x] tests/test_d108_origin.py: 22 echte Integrationstests (beide
+      Verteilungen, falsche Ziele/gleiche Ziele/Cap 20, Kategorie, fehlende
+      Defs, 2014-Hintergrungsverweigerung, Cross-Room, Owner/DM/Foreign,
+      Replay/Doppelklick/paralleles Posten, Reload/Ledger, keine Auto-
+      Migration, Species-Stats, Startausrüstung doppelfrei, Build vor/nach
+      Origin ohne Verdopplung, PUT-Fälschungsschutz). Keine neuen Skips.
+- [x] Kanonischer Lauf: siehe kanonischer Stand unten.

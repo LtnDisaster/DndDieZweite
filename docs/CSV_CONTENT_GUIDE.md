@@ -613,3 +613,43 @@ siehe Abschnitt 8.3.)*
 3. **Vorschau** laufen lassen, alle Fehler (Datei/Zeile/Spalte) beheben.
 4. **Anwenden**. Bei bewusster Überschreibung: **Ersetzen**.
 5. **Export**, um die gespeicherte Wahrheit zu vergleichen / zu versionieren.
+
+## 11. Eignung für D&D 5e (2024) — Stand D108 (Ursprungs-Schicht umgesetzt)
+
+Verbindliche Regelbasis ist **5e (2024)** nach dem offiziell lizenzierten
+**SRD 5.2.1** (Quelle + Attribution in `ATTRIBUTION.md`). Das D107-Audit wurde
+in D108 gegen das SRD korrigiert; Matrix und priorisierte R-Liste:
+[`RULES_AUDIT_2024.md`](RULES_AUDIT_2024.md). Für Inhalts-Autor:innen kurz:
+
+* **Neu und aktiv (D108):** der **Charakterursprung**. `backgrounds.csv` hat
+  jetzt `asi_abilities` (genau drei Kürzel aus `str/dex/con/int/wis/cha`) und
+  `origin_feat` (eine Feat-ID); `feats.csv` hat `category`
+  (`origin`/`general`/`fighting_style`/`epic_boon`). Nur ein Feat mit
+  `category=origin` darf ein Background gewähren. Ein Background ohne diese
+  beiden Felder ist **nicht** 2024-tauglich — der Origin-Flow verweigert dann
+  sichtbar ("not a 2024 background"); er rät nichts.
+  Der Ablauf (Server autoritativ): `GET /api/build/{code}/{cid}/origin`
+  (Report), `POST …/origin` mit NUR der Verteilung
+  `{"asi":{"mode":"plus2_plus1","plus2":"int","plus1":"wis"}}` oder
+  `{"asi":{"mode":"three"}}`. Feat-ID und Beträge kommen aus der CSV, niemals
+  aus dem Client. Der Grant landet im Build-Ledger und wird genau einmal
+  angewandt.
+* **`ability_boost` bleibt erlaubt:** 2024-General-Feats WERFEN Attributs-
+  erhöhungen zu (bis max. 20, z. B. +1 WERF). Für `origin`-Feats sieht das SRD
+  keine Wertboni vor — Origin-Feats sollten `ability_boost` leer lassen.
+* **Bereits 2024-tauglich:** `classes.csv` (ASI-Kadenz je Level-Zeile frei
+  wählbar — auch Fighter 1/2/6; ASI ist regeltechnisch ein Level-4+-Feat),
+  `spells.csv` (`scale_tiers` rechnet gegen die **Gesamtcharakterstufe** —
+  genau die 2024-Regel: Cantrip-Skalung auf Stufe 5/11/17), Slot-/Known-/
+  Resource-Spalten, `subclasses.csv`, `creatures.csv` (Formate).
+* **Noch 2014/alt, aber nur Daten (nicht automatisch angewandt):**
+  `species.csv: ability_bonuses` — 2024 erhöhen Species keine Werte; die Engine
+  wendet die Spalte nie mechanisch an. Der Mensch liest sie als Bookkeeping.
+* **Weiter offen (nur dokumentiert, NICHT umgesetzt):** `items.csv` ohne
+  Weapon-Mastery-Feld. Die 2024er Masteries sind Cleave, Graze, Nick, Push,
+  Sap, Slow, Topple, Vex — getrennt von den Waffeneigenschaften (Ammunition,
+  Finesse, Heavy, Light, Loading, Range, Reach, Thrown, Two-Handed, Versatile).
+* **Lizenz:** 2024-Mechanik in eigenen Worten zu beschreiben ist ok; fremde
+  SRD-5.2.1-Regeltexte 1:1 zu kopieren nur unter der CC-By-4.0-Attribution
+  (siehe `ATTRIBUTION.md`). Die ausgelieferten Demo-Packs bleiben projekt-
+  original mit Hausregel-Hinweisen.

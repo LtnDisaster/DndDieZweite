@@ -160,13 +160,25 @@ SCHEMAS = {
         ("id", True, "id", ""), ("name", True, "str", ""),
         ("skill_prof", False, "skills", ""), ("tool_prof", False, "text", ""),
         ("languages", False, "str", ""), ("starting_items", False, "str", ""),
-        ("feature", False, "text", ""), ("manual", False, "text", ""),
+        ("feature", False, "text", ""),
+        # D108 (2024 origins): the three ability scores the 2024 Background ASI
+        # may touch ("+2/+1 among them, or +1 to all three; nothing above 20")
+        # and the ONE Origin feat the background grants. Optional — a 2014-style
+        # background row simply lacks them and the origin flow reports it.
+        ("asi_abilities", False, "ab", ""), ("origin_feat", False, "str", ""),
+        ("manual", False, "text", ""),
     ],
     "feat": [
         ("id", True, "id", ""), ("name", True, "str", ""),
         ("requires", False, "str", ""), ("ability_boost", False, "ability_bonuses", ""),
         ("skill_prof", False, "skills", ""), ("spells_grant", False, "str", ""),
-        ("effect", False, "text", ""), ("manual", False, "text", ""),
+        ("effect", False, "text", ""),
+        # D108: 2024 feat categories (SRD 5.2.1 "Feats": Origin, General,
+        # Fighting Style, Epic Boon). Empty on old packs — display default
+        # "general"; ONLY an explicit "origin" qualifies a row as a background's
+        # Origin feat.
+        ("category", False, "choices:|origin|general|fighting_style|epic_boon", ""),
+        ("manual", False, "text", ""),
     ],
     "creature": [
         ("id", True, "id", ""), ("name", True, "str", ""),

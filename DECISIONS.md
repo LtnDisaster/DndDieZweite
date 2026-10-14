@@ -2292,3 +2292,85 @@ lines name conditions by design (public table record, D90).
   the truth (that is the point); whisper text length is capped (1000 chars,
   chat-clean); curses on equipment are still passive story facts — nothing
   fires mechanically.
+
+## D107 — 2024 is THE primary rules baseline; compatibility becomes documentation, prioritised — never silent drift
+
+- **Baseline decision:** DnDTable's binding primary rules foundation is
+  **D&D 5e (2024)**. Everything the engine implements in 2014 semantics is now
+  a DOCUMENTED distance with a backlog id (R-P0.x … R-P2), not an accident —
+  the audit lives at `docs/RULES_AUDIT_2024.md` (matrix with `file:line`
+  evidence, CSV-schema suitability per file, house-rule register H1–H9,
+  prioritised R-list).
+- **D107 stays an audit:** no rule implementations, no schema changes, no new
+  content packs — only the audit document, a §11 in the CSV guide, this
+  decision, the TODO sprint block/backlog and one README sentence. The suite
+  is re-run canonically to prove nothing else moved.
+- **Already-2024 findings are recorded too:** cantrip scaling already runs on
+  TOTAL CHARACTER LEVEL (`abilities.py`, spells.csv `scale_tiers 5/11/17`) and
+  the class-CSV ASI cadence is data-driven (Fighter 1/2/6 would be pure data)
+  — both are kept as-is and pinned by the audit, not "fixed".
+- **Copyright wall stands:** quotable rule text stays SRD 5.1 (CC BY 4.0,
+  ATTRIBUTION.md); 2024 differences are phrased functionally in our own
+  words; adopting ANY 2024 official text requires the human-verified SRD 5.2
+  status step (R-L0) first.
+- **Existing house rules get explicit labels instead of quiet divergence:**
+  the death-save pipeline (D34), NPC-at-0-HP (D56/D105), attunement gate
+  (D105), display-only exhaustion/inspiration/skill-ranks are now the
+  register H1–H9 in the audit; changing any of them is a conscious,
+  R-numbered decision, never a side effect.
+- **Consequences:** canonical suite stays **775 passed, 1 skipped, 0 failed**
+  (docs-only sprint); the R-list is the ordered starting point for whichever
+  rules sprint comes next.
+
+## D108 — The D107 audit is corrected against SRD 5.2.1; the 2024 character origin becomes a real, ledgered operation
+
+- **D107 was wrong where it guessed.** Re-verified against the official SRD
+  5.2.1 PDF (CC BY 4.0, 2025-05-01) and the 2024 rules glossary: there is NO
+  Proficiency-Dice change (the fixed bonus stays — D107's R-P0.1 deleted),
+  the Concentration DC is max(10, half the damage) not "11 + half", Origin
+  feats come from the BACKGROUND (species extras like Human's Versatile are
+  separate traits), 2024 feat categories are Origin/General/Fighting
+  Style/Epic Boon and GENERAL feats MAY raise scores (to 20), death saves
+  remain 3✓/3✗ exactly as `room/death.py` already implements (no Dying
+  condition), short-rest Hit Dice stay player-spent, Weapon Masteries are the
+  SRD list Cleave/Graze/Nick/Push/Sap/Slow/Topple/Vex SEPARATE from the
+  weapon properties, 2024's condition list gained the standalone
+  Incapacitated and never had Dying/Encumbered, Exhaustion caps at level 6
+  with flat penalties, and Passive Perception simply no longer exists — its
+  absence is conformance, not a gap. Every correction is row-marked (K1–K9)
+  in `docs/RULES_AUDIT_2024.md` §1.
+- **R-L0 is closed:** SRD 5.2.1 is officially CC BY 4.0 (source URLs + the
+  verbatim attribution statement are in `ATTRIBUTION.md`). The shipped packs
+  stay project-original with house-rule notes — following 2024 MECHANICS
+  needs no SRD names.
+- **The origin operation lives in the build engine, not beside it.**
+  `charbuild.apply_origin` validates the background against THIS room's
+  content (three ASI abilities + a feat whose category is exactly `origin`),
+  accepts from the client ONLY the distribution (`plus2_plus1` on DIFFERENT
+  allowed abilities, or `three` × +1), REFUSES any score that would rise
+  above 20 (no clamping), and reuses `_apply_feat` (now category-aware).
+  The feat id and the amounts come from the background row — never from the
+  request.
+- **The ledger is the proof; the recompute is the guard.** The grant is
+  recorded as `characters.build.origin` (no heuristic "which score did this
+  come from?" reverse math) and replayed at the FRONT of the existing
+  D96 full recompute — so origin-before-build and build-before-origin both
+  produce one application, double posts/replays/reloads answer `already`,
+  and later level-ups replay it instead of wiping it. hp/max_hp/slots/
+  resources are untouched; starting gear keeps its separate D94/D101 claim
+  path. A sheet PUT cannot forge or erase the ledger (`build` is not a
+  writable sheet column).
+- **Old data never becomes 2024 silently:** `asi_abilities`/`origin_feat`/
+  `feats.category` are additive optional columns; a background row without
+  them reports "not a 2024 background" and refuses. Existing characters are
+  never auto-migrated — the origin is applied only by an explicit, authorised
+  operation. Species `ability_bonuses` stay data-only.
+- **UI stays a client-side convenience:** the "🧬 2024 Origin" prep card
+  shows the server's report (allowed abilities + current values + feat +
+  every refusal), a live preview, and one apply button; every real check is
+  server-side (`GET/POST /api/build/{code}/{cid}/origin`, same
+  owner-or-assigned-DM authorisation as the build API).
+- **Consequences:** `tests/test_d108_origin.py` (22 behaviour tests, no new
+  skips) + the untouched canonical suite; the corrected audit's remaining
+  work is Weapon Mastery (R-P0), Concentration saves / Light bonus attack /
+  origin-feat-choice flows (R-P1) and the display tier (R-P2).

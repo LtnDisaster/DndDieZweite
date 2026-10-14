@@ -160,6 +160,8 @@ function renderPrepChecklist(ch){
          ch ? "Species, class and background chosen" : "Species/class/background from the rule pack") +
     item(!!ch && !!led.applied_through,
          ch ? (led.applied_through ? `Build applied through level ${led.applied_through}` : "Build not applied yet — plan + apply below") : "Build (guided level-up)") +
+    item(!!ch && !!led.origin,
+         ch ? (led.origin ? `2024 Origin granted (${led.origin.background})` : "2024 Origin pending — 🧬 Origin card below") : "2024 Origin (background ASI + feat)") +
     item(assigned && ch && assigned === ch.id,
          assigned && ch && assigned === ch.id ? "Seated at the table" : "Seat this character at the table") +
     `<div style="margin-top:4px">Equipment: ${ch ? (ch.items || []).length : 0} item(s)${
@@ -459,6 +461,81 @@ async function prepGearGrant(){
   } catch (e) { res.innerHTML = `<span style="color:#e74c3c">${esc(e.message)}</span>`; }
 }
 
+/* ---------------- D108: 2024 character origin (background ASI + Origin feat)
+   ---------------- The server owns every decision: it returns the report (three
+   allowed abilities + their current values, the Origin feat, all refusal
+   reasons), the client only ever picks a DISTRIBUTION — feat id and amounts are
+   never sent. UI checks below are guidance, never authority. */
+async function prepOrigin(){
+  const ch = prepSelChar(), out = $("prep-origin-out"); if (!ch) return toast("No character selected");
+  try {
+    state.prep.originReport = await api(`/build/${state.prep.code}/${ch.id}/origin`);
+    state.prep.originSel = null;
+    renderOriginReport();
+  } catch (e){ out.innerHTML = `<span style="color:#e74c3c">${esc(e.message)}</span>`; }
+}
+function renderOriginReport(){
+  const p = state.prep, j = p.originReport, out = $("prep-origin-out");
+  if (!j){ out.innerHTML = ""; return; }
+  const lbl = a => ((STATS.find(s => s[0] === a) || [a, a.toUpperCase()])[1]);
+  const parts = [];
+  if (j.applied){
+    const as = Object.entries(j.applied.asi || {}).map(([k, v]) => `${esc(lbl(k))} +${v}`).join(", ");
+    out.innerHTML = `<span style="color:#9d9">Origin already granted</span> — ` +
+      `background <b>${esc(j.applied.background || j.background_name || "")}</b> · ${as} · ` +
+      `the build ledger keeps the proof; nothing can be granted twice.`;
+    return;
+  }
+  if ((j.errors || []).length) parts.push(`<span style="color:#f1c40f">${esc(j.errors.join("; "))}</span>`);
+  const ab = j.asi_abilities || [];
+  if (!j.background){ out.innerHTML = parts.join("<br>") || "<span style='opacity:.7'>Save a background first.</span>"; return; }
+  parts.push(`<b>${esc(j.background_name)}</b> · ability scores this origin may raise: ${ab.map(a => esc(lbl(a))).join(", ") || "—"}`);
+  if (j.feat) parts.push(`Origin feat: <b>${esc(j.feat.name)}</b> — ${esc(j.feat.effect || "see feat text")}`);
+  const sel = p.originSel || (p.originSel = {mode: "plus2_plus1", plus2: ab[0] || "", plus1: ab[1] || ab[0] || ""});
+  parts.push(`<div class="row" style="flex-wrap:wrap">` +
+    `<label class="tiny"><input type="radio" name="org-mode" value="plus2_plus1" ${sel.mode === "plus2_plus1" ? "checked" : ""}> +2 and +1</label>` +
+    `<label class="tiny"><input type="radio" name="org-mode" value="three" ${sel.mode === "three" ? "checked" : ""}> +1 to all three</label></div>`);
+  if (sel.mode === "plus2_plus1")
+    parts.push(`<div class="row">` +
+      `<select id="org-p2">${ab.map(a => `<option value="${esc(a)}" ${sel.plus2 === a ? "selected" : ""}>+2 ${esc(lbl(a))}</option>`).join("")}</select>` +
+      `<select id="org-p1">${ab.map(a => `<option value="${esc(a)}" ${sel.plus1 === a ? "selected" : ""}>+1 ${esc(lbl(a))}</option>`).join("")}</select></div>`);
+  const deltas = sel.mode === "three" ? Object.fromEntries(ab.map(a => [a, 1]))
+                                      : {[sel.plus2]: 2, [sel.plus1]: 1};
+  const cur = j.current || {};
+  const sameSel = sel.mode === "plus2_plus1" && !!sel.plus2 && sel.plus2 === sel.plus1;
+  const pv = ab.map(a => {
+    const now = cur[a] === undefined ? 10 : cur[a], d = deltas[a] || 0, after = now + d, bad = !!d && after > 20;
+    return `${esc(lbl(a))} ${now}${d ? ` → <span style="color:${bad ? "#e74c3c" : "#9d9"}">${after}</span>` : ""}${bad ? " (&gt;20!)" : ""}`;
+  });
+  if (sameSel) parts.push(`<div><span style="color:#e74c3c">+2 and +1 must go to DIFFERENT abilities</span></div>`);
+  parts.push(`<div>Preview: ${pv.join(" · ") || "—"}</div>`);
+  const ok = j.ready && !sameSel && !pv.some(s => s.includes("&gt;20"));
+  parts.push(`<div class="row"><button id="prep-origin-apply" class="primary" ${ok ? "" : "disabled"}>🧬 Apply origin</button></div>` +
+             `<div id="prep-origin-result" class="meta"></div>`);
+  out.innerHTML = parts.join("<br>");
+  for (const r of out.querySelectorAll("input[name=org-mode]"))
+    r.onchange = () => { p.originSel.mode = r.value; renderOriginReport(); };
+  const s2 = $("org-p2"), s1 = $("org-p1");
+  if (s2) s2.onchange = () => { p.originSel.plus2 = s2.value; renderOriginReport(); };
+  if (s1) s1.onchange = () => { p.originSel.plus1 = s1.value; renderOriginReport(); };
+  const b = $("prep-origin-apply"); if (b) b.onclick = prepOriginApply;
+}
+async function prepOriginApply(){
+  const p = state.prep, ch = prepSelChar(), res = $("prep-origin-result"); if (!ch || !res) return;
+  const sel = p.originSel || {};
+  const asi = sel.mode === "three" ? {mode: "three"}
+                                  : {mode: "plus2_plus1", plus2: sel.plus2, plus1: sel.plus1};
+  try {
+    const j = await api(`/build/${p.code}/${ch.id}/origin`, "POST", {asi});
+    if (j.ok)
+      res.innerHTML = j.result.already
+        ? "<i>Origin was granted earlier — the ledger says: nothing added.</i>"
+        : `<span style="color:#9d9">Origin granted</span> — ${esc(j.result.feat || "Origin feat")} applied`;
+    else res.innerHTML = `<span style="color:#e74c3c">${esc(j.error || "refused")}</span>`;
+    await prepRefresh();
+  } catch (e){ res.innerHTML = `<span style="color:#e74c3c">${esc(e.message)}</span>`; }
+}
+
 async function prepUpload(){
   const files = [...(($("prep-ct-file") || {}).files || [])];
   if (!files.length) return toast("Pick a CSV or ZIP first");
@@ -488,7 +565,9 @@ function backToPrep(){
 function wirePrep(){
   const p = () => state.prep;
   $("prep-back").onclick = () => { state.room = null; loadLobby().catch(() => show("auth")); };
-  $("prep-char").onchange = (e) => { if (p()){ p().selChar = +e.target.value || null; p().plan = null; p().gearReport = null; p().wiz = { skills: [], subclass: "", levels: {} }; renderPrep(); } };
+  $("prep-char").onchange = (e) => { if (p()){ p().selChar = +e.target.value || null; p().plan = null; p().gearReport = null;     p().originReport = null; p().originSel = null;
+    const oe = $("prep-origin-out"); if (oe) oe.innerHTML = "";
+    p().wiz = { skills: [], subclass: "", levels: {} }; renderPrep(); } };
   $("prep-new-toggle").onclick = () => {
     const q = p(); if (!q) return;
     q.newMode = !q.newMode;
@@ -508,6 +587,7 @@ function wirePrep(){
   };
   $("prep-assign").onclick = prepAssign;
   $("prep-gear").onclick = prepGear;
+  $("prep-origin").onclick = prepOrigin;
   $("prep-table").onclick = () => { const code = state.prep && state.prep.code; if (code) openRoom(code); };
   $("prep-ct-upload").onclick = prepUpload;
   const bp = $("btn-prep");

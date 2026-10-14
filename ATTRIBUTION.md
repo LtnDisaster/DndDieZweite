@@ -45,6 +45,37 @@ above is verified against the source PDF, but a human should confirm the
 presentation context (and whether any OGL 1.0a obligations apply to content
 actually used, which the CC path is intended to avoid) before distribution.
 
+## Binding rules baseline (D108): SRD 5.2.1 under CC BY 4.0
+
+Since decision **D108** the binding primary rules foundation is **D&D 5e
+(2024)**, taken from the officially published **System Reference Document
+5.2.1**, released by Wizards of the Coast on 2025-05-01 under **CC BY 4.0**
+(the 5.1 foundation above stays licensed and usable in parallel). Sources,
+verified 2026-10-14 (official SRD page `https://www.dndbeyond.com/srd`):
+
+- SRD 5.2.1 (Creative Commons PDF, EN): <https://media.dndbeyond.com/compendium-images/srd/5.2/SRD_CC_v5.2.1.pdf>
+- SRD 5.2.1 (Deutsch): <https://media.dndbeyond.com/compendium-images/srd/5.2/DE_SRD_CC_v5.2.1.pdf>
+- SRD 5.1 → 5.2.1 conversion guide: <https://media.dndbeyond.com/compendium-images/srd/guide/converting-to-srd-5.2.1.pdf>
+- FAQ (license irrevocability, mixing 5.1 + 5.2.1): the "SRD 5.2 FAQ" on the SRD page
+
+The SRD 5.2.1 "Legal Information" page prescribes this attribution statement.
+It is reproduced **verbatim**, extracted with `pdftotext` from the official
+PDF on 2026-10-14:
+
+> This work includes material from the System Reference Document 5.2.1
+> ("SRD 5.2.1") by Wizards of the Coast LLC, available at
+> https://www.dndbeyond.com/srd. The SRD 5.2.1 is licensed under the Creative
+> Commons Attribution 4.0 International License, available at
+> https://creativecommons.org/licenses/by/4.0/legalcode.
+
+As with 5.1: no other Wizards attribution beyond the statement above; a
+"5E compatible" note remains allowed, not required. **DnDTable's shipped
+content packs remain project-original** (section below) — the 2024 rules are
+followed mechanically, and the demo backgrounds/feats carry original names
+with explicit house-rule notes, so no SRD-name attribution obligations are
+triggered by the packs themselves; this file documents the license position
+for any future adoption of SRD text or names.
+
 ## Project-original content
 
 Everything in this repository that is not explicitly marked as SRD-derived —

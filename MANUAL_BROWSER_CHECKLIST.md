@@ -678,3 +678,36 @@ ACCEPT or REJECT:
       same token id → hoard does NOT reappear), world chest containers unaffected.
 - [ ] Mount a rider on the NPC, then delete it: "Could not remove that token." — the NPC
       AND its hoard both still exist (no half-deletion); clear the mount, delete works.
+
+## D108 — 2024 character origin (🧬 prep card)
+
+### Report + preview (player)
+- [ ] Room prep with an imported demo pack, a character with background **Scholar**:
+      "🧬 2024 Origin" shows the three allowed abilities (INT/WIS/CHA) with their
+      CURRENT sheet values, the Origin feat name, and mode options "+2 and +1" /
+      "+1 to all three" — nothing applied yet (checklist line "2024 Origin pending").
+- [ ] Switching the mode or the two +2/+1 selects updates the live preview
+      (10 → 12 style arrows); picking the SAME ability for +2 and +1 shows a red
+      "DIFFERENT abilities" hint and disables the Apply button.
+- [ ] A character whose sheet value is 19 on an allowed ability: preview shows
+      "→ 21 (>20!)" in red and Apply stays disabled.
+
+### Apply (owner)
+- [ ] Apply with +2/+1 → green "Origin granted", preview sheet values rise exactly
+      by the picked deltas, the feat's skill (Investigation for Quick Study) shows
+      as proficient on the character, and the checklist line flips to
+      "✅ 2024 Origin granted (bg_scholar)".
+- [ ] Click Apply twice / reload the page and reopen the card: report answers
+      "Origin already granted"; stats do NOT rise a second time.
+- [ ] Post a raw request with a forged feat id or an ability outside the list
+      (curl/devtools) → server refuses with a readable error; nothing changes.
+
+### Coexistence
+- [ ] Apply origin, then run the guided build through level 4 (Ability +2 STR):
+      the level-4 ASI lands AND the origin deltas are still exactly once.
+- [ ] Build first, origin second: the origin apply does not reset HP or re-level —
+      hp/max_hp visible in the sheet are unchanged.
+- [ ] "🎒 Starting equipment" before/after origin: the background items appear once;
+      a second gear request answers "already granted — nothing duplicated".
+- [ ] A room WITHOUT an imported rule pack: the origin card explains
+      "not in this room's rule pack" — no silent success.
