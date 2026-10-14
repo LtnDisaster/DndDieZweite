@@ -653,6 +653,9 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `inv_grip` | `room.inv.handle_inv_grip` | sheet owner or DM | no | D98: {item_id, grip:one/two} for an equipped VERSATILE weapon — picks the damage dice; two-handed grip clears the off hand atomically |
 | `inv_money` | `room.inv.handle_inv_money` | grant/deduct: DM; transfer: sheet owner | no | D99: {action:grant/deduct/transfer, amount(int), coin:cp/sp/ep/gp/pp, char_id[, to_char_id]}. Server converts via `gear.to_cp` (never trusts a copper total); atomic + `op_id`-replay-guarded; a shortfall raises before any store. `inv_container{action:coins_fill/coins_take}` moves loot coin |
 | `inv_container` | `room.inv.handle_inv_container` | reach-gated like `interact` (D82) | inspect private | D92: inspect/move/fill/remove on container objects; dm_only/cross-plane refuse without leaking |
+| `npc_inv` | `room.inv.handle_npc_inv` | DM only | contents = inspect only | D105: manage `tok:<token_id>` gear (inspect/fill/remove/coins_*); silent to non-DM |
+| `loot` | `room.inv.handle_loot` | reach-gated, while NPC hp==0 | contents = inspect only | D105: inspect/take/coins_take on a downed NPC; forced direction via `container_give` |
+| `curse` | `room.inv.handle_curse` | DM only | full metadata = DM socket only | D106: {action:set/clear, item_id, name/desc/whisper} on a char-, chest- or NPC-carried instance; {action:reveal/conceal/whisper} additionally needs a seated PLAYER owner — recipient resolved server-side from the item's holder, delivered through `chat.post_chat` whisper (never broadcast, never in foreign histories). DM gets the authoritative `curse_updated` event; no `inv_changed` broadcast for curse ops (secrecy) |
 
 ## Important outbound event kinds
 
@@ -1018,6 +1021,7 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_d102_floors.py` | D102 floors: trap/toggle saves stay ON their plane (never clobber primary), connect/assign reveals land on the token's plane, reveal/fog patches carry `floor` and reach plane viewers only, `token_floor` DM-only while stairs stay the player route, floor RENAME moves registry+map+tokens and retargets stair destinations (refusals included), player `/state` delivered on the token's plane |
 | `tests/test_d103_editor_assets.py` | D103: void(5) blocks movement/teleport/placement but NOT vision/light; brush edits never touch wall/door/trap entities; void is plane-local (crypt pit ≠ primary); registry/sanitize keep legacy maps byte-identical; player map_edit refused; canonical `/assets/<id>` serves exactly like `/api/assets/<id>` (owner 200 PNG+nosniff, riding-DM 200, stranger/junk 404); assigned artwork roundtrip keeps DB canon; client brush/canvas wiring pinned |
 | `tests/test_d104_lights_preview.py` | D104: `lamp` channel roundtrip (add/update/off/remove, radius in/out, walls block glow like sight), darkness = memory+footstep only, darkvision effective, lamps plane-local AND plane-lighting, non-DM refused; `view_as` byte-equal to the player's own `/state`, leak-free (hidden NPC/traps/dm_only/secret doors/op payloads), purity (explored & player state unchanged), auth matrix (member 404/outsider 403/foreign char 404); reconnect reveals exactly by the light's reach; legacy rooms classic; toggled-off survives later map_edit; preview client wiring pinned |
+| `tests/test_d106_curses.py` | D106: per-instance curse metadata (twin daggers stay distinct, stack carve-out to qty=1, no merge into ordinary stacks, split refused), survival matrix (container move, loot, equip/unequip, use with charge debit, attune, identify, recharge, long rest, honest sheet-PUT round-trip), secrecy matrix (player /state, lobby sheet, gear snapshot/derived, chest+loot inspect, view_as, chat chronicle — no secret on any wire), REST tamper (forged curse ignored, stripped PUT cannot wipe), curse channel DM-only + foreign-room refusal, owner-change resets `revealed` but never the curse, whisper recipient forced server-side and invisible to peers (live + history), `del_token` atomicity incl. FK-failure rollback of BOTH token and container |
 | `tests/test_d101_prep.py` | D101 prep screen: content `options` (member read, non-member/anon refused, empty room), `characters.background` roundtrip + no-PUT-wipe guard, `starting-gear` (resolves/skips/idempotent, authz mirrors build API, missing-data reported, `inv_changed` broadcast), `apply` broadcasts `snapshot` (reload-bug fix), and the prep UI wiring (source asserts — no browser runner) |
 | `tests/test_abilities.py` | DC/attack derivation, save-half, resist/immune through defense pipeline, death-pipeline entry, heal, condition, concentration flag, slot+resource consumption, upcast validation, attack-vs-AC+crit, footprint flank, LOS/door, range authority, actor spoofing refusal, hidden-token non-leak |
 | `tests/test_diorama_parity.py` | confirmed-path revalidation refusal (`route_invalid`), shared camera-space click math (Node vm), view-aware click/token/double-click, tool parity, sheet-crash guard |
@@ -1252,10 +1256,36 @@ Live delivery and `/state` replay must match.
   (the claim answers `already` before choices are parsed). `classes.csv`
   token grammar: `id [xN]`, groups `Label=alt|alt xN;…` — item ids in a
   payload are never trusted, the CSV's alternatives are the allowlist.
+- D106 SECRET CURSES: `entry["curse"]` rides INSIDE the item entry (there is
+  no stable global instance id — `stack_add` re-issues entry ids on every
+  transfer, so a side table could not follow the instance; the entry dict IS
+  the instance and travels transfer/chest/loot for free). `gear.clean_items`
+  STRIPS the field by default (fail-closed — client PUTs, /state renders and
+  every legacy path stay clean without knowing curses exist); only the engine's
+  trusted reads pass `keep_curse=True` (`inventory._load`/`container_load`,
+  the write-backs in `room/items.py`, `room/dice.py` long rest, `rooms.py` DM
+  sheet view) — a plain mutation that re-writes items WITHOUT the trusted read
+  silently deletes a curse, that is the class of bug D106 pins with tests.
+  Disclosure has ONE gate: `gear.curse_view(items, mode)` — 'dm' full,
+  'owner' only a revealed curse's name+desc (the whisper text never rides a
+  sheet), anything else strips. A cursed entry NEVER stacks and NEVER splits
+  (`_stack_key` returns None, `adjust("split")` refuses) — marking a qty>1
+  stack carves one qty=1 piece atomically. Any owner change (transfer,
+  container put/take, loot) keeps the curse but clears `revealed` — knowledge
+  never travels; only `curse{action:reveal}` sets it again for the CURRENT
+  owner. `curse{action:whisper}` resolves the recipient from the item's
+  holder server-side — a recipient field in the message is ignored; delivery
+  is the existing private `chat.post_chat` whisper (no broadcast, recipients'
+  + sender's history only). Sheet PUT round-trips must neither forge
+  (`_preserve_curses` strips client-authored curses) nor wipe (`update_char`
+  re-attaches the stored ones by entry id).
 - Reach maths: tokens carry PIXEL x/y, map objects carry CELL coords —
   convert with `map.cell` before intersecting (`room/inv.py` loot gate).
-- Deleting a token must delete its `tok:<id>` container row too (see
-  `handle_del_token`) — nothing else in `containers` may be touched.
+- Deleting a token must delete its `tok:<id>` container row too — in the
+  SAME transaction as the token row itself (D106: `handle_del_token`
+  wraps seat-unassign + container + token + chronicle line in one
+  `db.tx()`; a failing DELETE rolls everything back, no orphan hoard and
+  no headless corpse). Nothing else in `containers` may be touched.
 ## Before modifying chat/narrative privacy
 
 Inspect:

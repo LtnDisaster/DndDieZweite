@@ -712,7 +712,7 @@ async def handle_long_rest(ws, room_id, user, is_dm, msg):
         if ch is None:
             continue
         slots = gear.clean_slots(db.j(ch["spell_slots"], {}))
-        items = gear.clean_items(db.j(ch["items"], []))
+        items = gear.clean_items(db.j(ch["items"], []), keep_curse=True)  # D106: rest preserves curses
         resources = gear.clean_resources(db.j(ch.get("resources"), []))
         for lv in range(1, 10):
             slots[lv]["used"] = 0

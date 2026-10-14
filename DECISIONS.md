@@ -2226,3 +2226,69 @@ lines name conditions by design (public table record, D90).
   pack lists and never lets a player choose outside it; NPC inventories are
   DM knowledge only — a DM who wants to reveal a corpse's exact gear to the
   table uses the same loot panel.
+
+## D106 — Secret per-instance curses: metadata inside the item entry, per-viewer disclosure, DM-gated whispers (+ atomic token delete)
+
+- **Why the entry, not a table:** there is no stable GLOBAL item-instance id —
+  `inventory.stack_add` re-issues entry ids on every transfer/chest/loot move
+  (ids are only unique inside one inventory). A side table keyed by instance id
+  would lose the instance at the first transfer. The entry dict inside
+  `characters.items` / `containers.items` IS the instance and rides every
+  existing atomic move (`dict(it)` copy) for free — so `curse`
+  (`{name, desc, whisper, revealed}`) lives there. **No schema change, no
+  migration**: old items simply have no field; the JSON columns are the
+  existing storage of instance truth.
+- **Fail-closed by default:** `gear.clean_items` STRIPS the field unless the
+  caller explicitly passes `keep_curse=True`. Every pre-D106 read path
+  (client PUT sanitising, /state renders, container peeks, legacy tests) is
+  byte-identical and structurally incapable of leaking; the engine's mutation
+  round-trips (`_load`, `container_load`, `room/items.py`, long rest) read
+  trusted so a plain mutation can never wipe the secret. `PUT /characters` is
+  covered both ways: client-authored curses are stripped (cannot forge,
+  cannot flip `revealed`), stored curses are re-attached by entry id (a sheet
+  round-trip cannot wipe them) — `_preserve_curses`.
+- **Instance identity = the curse itself:** a cursed entry never stacks
+  (`_stack_key` → None) and can never be split (refused) — marking a qty>1
+  stack ATOMICALLY carves one qty=1 piece (DM decision confirmed: carve, not
+  reject). Minting a second cursed instance via merge/split/replay is
+  structurally impossible; op_id claims guard the metadata writes like every
+  other mutation.
+- **One disclosure gate:** `gear.curse_view(items, mode)` — `dm` sees
+  everything, `owner` sees ONLY a revealed curse's `name` + `desc` (the
+  whisper text never rides any sheet payload — DM decision confirmed), every
+  other mode strips. Applied at the sheet serializer (`_char_row`), the
+  container replies (`container_peek(curse=is_dm)`), and nothing else; WS
+  broadcasts carry no inventory payload at all (the client refetches its own
+  entitled `/state`). No HTML-hiding anywhere in the path.
+- **Owner change resets knowledge, never touches the curse:** transfer,
+  container put/take and loot clear `revealed` on the MOVING copy (the curse
+  itself survives every move and every reload — it is stored data). A new
+  holder learns nothing from the previous holder's revelation; the DM must
+  reveal again. Internal operations (equip, use, rest, recharge, identify,
+  attune, sheet PUT) do NOT clear it.
+- **Whisper authority is the item, never the client:** `curse{action:whisper}`
+  resolves the recipient from the instance's current holder
+  (`characters.user_id`, room-membership enforced) — recipient fields in the
+  message are ignored by construction; container/NPC-carried items have no
+  player owner and are refused with a clear reason. Delivery is the existing
+  private `chat.post_chat` whisper model (per-socket delivery, recipient-
+  filtered history) — no second chat infrastructure, no broadcast, no
+  automatic whisper on loot/equip/rest (all triggers remain DM decisions).
+  Revealing sends exactly the released name+desc through the same channel.
+- **No curse engine (deliberate):** no random tables, no saves, no damage, no
+  tick timers — D106 stores what the DM authors and delivers it when the DM
+  asks. Mechanics stay in the DM's hands (backlog: pickpocketing, automatic
+  curse triggers, secret saves, curse consequences).
+- **D105 follow-up fixed:** `handle_del_token` now deletes token + `tok:<id>`
+  container + seat-unassign + chronicle line inside ONE `db.tx()`; a failing
+  DELETE (e.g. FOREIGN KEY from a mounted rider) rolls BOTH back — verified
+  with the real FK failure, no monkeypatching.
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **775 passed, 1 skipped, 0 failed** (baseline 749 +
+  `tests/test_d106_curses.py` 26 behaviour tests, 0 source-only pins).
+- **Honest limits:** instance identity is per-inventory — after a transfer the
+  DM panel must re-read ids (the UI does, via `inv_changed`/`curse_updated`);
+  a curse travels to a NEW holder revealed=False but the DM panel still shows
+  the truth (that is the point); whisper text length is capped (1000 chars,
+  chat-clean); curses on equipment are still passive story facts — nothing
+  fires mechanically.

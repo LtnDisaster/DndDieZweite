@@ -19,9 +19,9 @@ from .items import handle_attune, handle_identify, handle_recharge, handle_use_i
 from .fog import handle_fog_edit, handle_fog_toggle
 from .interact import handle_interact
 from .lights import handle_lamp                          # D104: DM light management
-from .inv import (handle_inv_adjust, handle_inv_container, handle_inv_equip,
-                  handle_inv_grant, handle_inv_grip, handle_inv_money, handle_inv_remove, handle_inv_transfer,
-                  handle_item_def, handle_loot, handle_npc_inv)
+from .inv import (handle_curse, handle_inv_adjust, handle_inv_container, handle_inv_equip,
+                   handle_inv_grant, handle_inv_grip, handle_inv_money, handle_inv_remove, handle_inv_transfer,
+                   handle_item_def, handle_loot, handle_npc_inv)
 from .movement import handle_move, handle_path_preview, handle_stop_move
 from .moveforced import handle_forced_move
 from .net import broadcast, get_map, map_lock, send_to, set_map, sys_msg
@@ -202,6 +202,7 @@ HANDLERS = {
     "inv_container": handle_inv_container,     # D92: world container inspect/move
     "npc_inv": handle_npc_inv,                 # D105: DM manages NPC inventories
     "loot": handle_loot,                       # D105: looting a downed NPC
+    "curse": handle_curse,                     # D106: DM-authored secret item curses
 }
 
 

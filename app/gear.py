@@ -116,7 +116,61 @@ def _norm_attr_bonus(v):
     return out or None
 
 
-def clean_items(items):
+# ---------- D106: secret per-instance curse metadata (DM-only by default) ----------
+# A curse lives INSIDE the item entry (characters.items / containers.items JSON):
+# instance identity only exists within one inventory — stack_add() re-issues
+# entry ids on every transfer — so a side table could not follow the instance,
+# while the entry dict rides along through transfer, container move and loot
+# for free. clean_items() STRIPS this field by default (fail-closed: every
+# read path, /state render and client PUT that predates D106 stays clean
+# without knowing about curses); only server-internal mutation paths pass
+# keep_curse=True, and only gear.curse_view() decides per viewer who sees what.
+
+CURSE_NAME = 48
+CURSE_DESC = 200
+CURSE_WHISPER = 1000
+
+
+def clean_curse(c):
+    """Sanitise one stored curse dict. None = no curse (an all-empty dict is
+    the same as no dict at all). Values are re-sanitised on EVERY trusted read,
+    so a hand-edited DB row can never smuggle a control char or an overlong
+    field into a DM view or a whisper. 'revealed' is the DM's disclosure flag
+    for the CURRENT owner — gear.curse_view() gates it."""
+    if not isinstance(c, dict):
+        return None
+    name = str(c.get("name", "")).strip()[:CURSE_NAME]
+    desc = str(c.get("desc", "")).strip()[:CURSE_DESC]
+    whisper = str(c.get("whisper", "")).strip()[:CURSE_WHISPER]
+    if not (name or desc or whisper):
+        return None
+    return {"name": name, "desc": desc, "whisper": whisper,
+            "revealed": bool(c.get("revealed"))}
+
+
+def curse_view(items, mode="strip"):
+    """THE single per-viewer disclosure filter for curse metadata.
+    'dm'     — trusted passthrough (the caller already loaded with keep_curse).
+    'owner'  — the owning character learns ONLY a revealed curse's name+desc;
+               the whisper text never rides a sheet (it arrives via chat only).
+    'strip'  — default, fail-closed: every hint of a curse vanishes."""
+    out = []
+    for it in items:
+        curse = it.get("curse") if isinstance(it, dict) else None
+        if curse is None or mode == "dm":
+            out.append(it)
+            continue
+        it = dict(it)
+        curse = clean_curse(curse)
+        if mode == "owner" and curse and curse["revealed"]:
+            it["curse"] = {"name": curse["name"], "desc": curse["desc"]}
+        else:
+            it.pop("curse", None)
+        out.append(it)
+    return out
+
+
+def clean_items(items, keep_curse=False):
     out = []
     if not isinstance(items, list):
         return out
@@ -183,6 +237,10 @@ def clean_items(items):
         })
         if not out[-1]["id"]:
             out[-1]["id"] = f"it{len(out)}"
+        if keep_curse:                            # D106 trusted read only
+            curse = clean_curse(it.get("curse"))
+            if curse:
+                out[-1]["curse"] = curse
     return out
 
 

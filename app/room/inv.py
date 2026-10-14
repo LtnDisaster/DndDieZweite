@@ -7,8 +7,8 @@ rule as attune). Containers are D82 world objects (editor, fog, dm_only,
 reach); contents live in SQLite and are transmitted ONLY through an
 authorised inspect — never via /state or broadcasts.
 """
-from .. import db, events, floors as FLOOR, inventory as INV
-from . import authz
+from .. import db, events, floors as FLOOR, gear, inventory as INV
+from . import authz, chat as CHAT
 from .interact import _reach_cells
 from .net import broadcast, get_map, send_to, send_user, sys_msg
 
@@ -354,7 +354,7 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
     if action == "inspect":
         await send_to(ws, "inv_contents",
                       {"object_id": oid, "label": obj.get("label", ""),
-                       "floor": fl, "items": INV.container_peek(room_id, oid),
+                       "floor": fl, "items": INV.container_peek(room_id, oid, curse=is_dm),
                        "coins": INV.container_coins_peek(room_id, oid)})
         return
     if action in ("fill", "remove", "coins_fill") and not is_dm:
@@ -402,7 +402,7 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
         from .. import gear
         await send_to(ws, "inv_contents",
                       {"object_id": oid, "label": obj.get("label", ""),
-                       "floor": fl, "items": INV.container_peek(room_id, oid),
+                       "floor": fl, "items": INV.container_peek(room_id, oid, curse=is_dm),
                        "coins": INV.container_coins_peek(room_id, oid)})
         await broadcast(room_id, "inv_changed", None)
         if action == "coins_take":
@@ -412,7 +412,7 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
     if action == "fill":
         await send_to(ws, "inv_contents",
                       {"object_id": oid, "label": obj.get("label", ""),
-                       "floor": fl, "items": INV.container_peek(room_id, oid)})
+                       "floor": fl, "items": INV.container_peek(room_id, oid, curse=is_dm)})
         await broadcast(room_id, "inv_changed", None)
         return
     if action == "remove":
@@ -421,7 +421,7 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
     # move: fresh contents back to the actor + public chronicle
     await send_to(ws, "inv_contents",
                   {"object_id": oid, "label": obj.get("label", ""),
-                   "floor": fl, "items": INV.container_peek(room_id, oid)})
+                   "floor": fl, "items": INV.container_peek(room_id, oid, curse=is_dm)})
     await broadcast(room_id, "inv_changed", None)
     if not is_dm:
         verb = "puts" if res["direction"] == "into" else "takes"
@@ -475,7 +475,7 @@ async def handle_npc_inv(ws, room_id, user, is_dm, msg):
     async def reply():
         await send_to(ws, "inv_contents",
                       {"object_id": oid, "label": tok["label"] or "NPC",
-                       "floor": tok["floor"] or "", "items": INV.container_peek(room_id, oid),
+                       "floor": tok["floor"] or "", "items": INV.container_peek(room_id, oid, curse=is_dm),
                        "coins": INV.container_coins_peek(room_id, oid), "npc_token": tok["id"]})
 
     if action == "inspect":
@@ -547,7 +547,7 @@ async def handle_loot(ws, room_id, user, is_dm, msg):
     async def reply():
         await send_to(ws, "inv_contents",
                       {"object_id": oid, "label": tok["label"] or "fallen creature",
-                       "floor": fl, "items": INV.container_peek(room_id, oid),
+                       "floor": fl, "items": INV.container_peek(room_id, oid, curse=is_dm),
                        "coins": INV.container_coins_peek(room_id, oid), "npc_token": tok["id"]})
 
     if action == "inspect":
@@ -584,3 +584,154 @@ async def handle_loot(ws, room_id, user, is_dm, msg):
         from .. import gear
         sys_msg(room_id, f"🪙 {user['username']} takes {gear.cp_label(res['cp'])}"
                          f" from the fallen {tok['label'] or 'creature'}.")
+
+
+# ---------- D106: DM-authored secret curses on concrete item instances ----------
+# One channel, five actions. Storage goes through app/inventory.py only; the
+# disclosure rules live in gear.curse_view. The whisper RECIPIENT is always
+# resolved server-side from the instance's current holder — the client cannot
+# name one — and delivery rides the existing private whisper system (chat.
+# post_chat), so other players see nothing on the wire and nothing in history.
+
+CURSE_ACTIONS = ("set", "clear", "reveal", "conceal", "whisper")
+
+
+def _curse_fields(msg):
+    """Sanitise the DM-authored metadata. Control chars are stripped with the
+    SAME cleaner chat uses — whisper text becomes chat body, so both paths
+    share one definition of a legal character."""
+    return gear.clean_curse({
+        "name": CHAT.clean_text(msg.get("name"), gear.CURSE_NAME),
+        "desc": CHAT.clean_text(msg.get("desc"), gear.CURSE_DESC),
+        "whisper": CHAT.clean_text(msg.get("whisper"), gear.CURSE_WHISPER)})
+
+
+def _curse_of_char(char_id, item_id):
+    """Trusted read of (entry, curse) for owner-side actions (reveal/whisper)."""
+    row = db.q1("SELECT items FROM characters WHERE id=?", (char_id,))
+    if row is None:
+        return None, None
+    items = gear.clean_items(db.j(row["items"], []), keep_curse=True)
+    it = INV.find(items, item_id)
+    return it, (it.get("curse") if it else None)
+
+
+async def handle_curse(ws, room_id, user, is_dm, msg):
+    """DM-only: mark a concrete instance cursed (character-, world-chest- or
+    NPC-carried), edit/clear the secret, reveal it to or whisper it to the
+    CURRENT player owner. Room scope is enforced by construction: the character
+    must be a member's character, the token/container must live in THIS room.
+    No broadcast ever carries curse data — the DM client gets the fresh state
+    on this socket only."""
+    if not is_dm:
+        await send_to(ws, "error", {"msg": "DM only"})
+        return
+    action = str(msg.get("action", ""))
+    if action not in CURSE_ACTIONS:
+        return
+    item_id = str(msg.get("item_id", ""))[:16]
+    if not item_id:
+        await send_to(ws, "error", {"msg": "Which item?"})
+        return
+
+    # ---- resolve the scope of THIS room (foreign ids answer like nothing exists)
+    char, oid = None, None
+    if msg.get("char_id") not in (None, "", 0):
+        char = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("char_id", -1),))
+        if char is None or db.q1("SELECT 1 AS hit FROM room_members WHERE room_id=? AND character_id=?",
+                                 (room_id, char["id"])) is None:
+            await send_to(ws, "error", {"msg": "No such character"})
+            return
+    elif msg.get("token_id") not in (None, "", 0):
+        tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                    (msg.get("token_id", -1), room_id))
+        if _npc_dead(tok) is None:                       # not an NPC of this room
+            await send_to(ws, "error", {"msg": "No such container here"})
+            return
+        oid = _tok_c(tok["id"])
+    else:
+        oid = str(msg.get("object_id", ""))[:16]
+        fl = str(msg.get("floor") or "")
+        obj = None
+        if oid and FLOOR.exists(room_id, fl):
+            mp = get_map(room_id, fl)
+            obj = next((o for o in mp.get("objects", []) if o.get("id") == oid), None)
+            if obj is not None and ((obj.get("interact") or {}).get("op") or {}).get("kind") != "container":
+                obj = None
+        if obj is None:
+            await send_to(ws, "error", {"msg": "No such container here"})
+            return
+
+    async def fail(text):
+        await send_to(ws, "error", {"msg": text})
+
+    async def done(payload):
+        await send_to(ws, "curse_updated", payload)     # DM socket only
+
+    if action in ("reveal", "conceal", "whisper") and char is None:
+        # Editing (set/clear) works anywhere the DM may reach; disclosing and
+        # whispering require an unambiguous player owner for this instance.
+        return await fail("That item needs a player owner first — move it onto a character.")
+
+    try:
+        if action == "set":
+            curse = _curse_fields(msg)
+            if curse is None:
+                return await fail("Give the curse a name, a description or a whisper text.")
+            res = (INV.curse_set(room_id, char["id"], item_id, curse, _op(msg))
+                   if char else INV.container_curse_set(room_id, oid, item_id, curse, _op(msg)))
+        elif action == "clear":
+            res = (INV.curse_clear(room_id, char["id"], item_id, _op(msg))
+                   if char else INV.container_curse_clear(room_id, oid, item_id, _op(msg)))
+        else:                                          # reveal / conceal
+            res = INV.curse_reveal(room_id, char["id"], item_id,
+                                   action == "reveal", _op(msg))
+    except INV.InvError as ex:
+        return await fail(str(ex))
+    if res == "replay":
+        return await send_to(ws, "whisper", {"text": "⚠️ That action was already applied."})
+
+    if action in ("set", "clear", "reveal", "conceal"):
+        await done({"char_id": char["id"] if char else None,
+                    "object_id": None if char else oid,
+                    "item_id": res["item_id"], "curse": res.get("curse"), "action": action})
+        if action == "set":
+            await send_to(ws, "whisper", {"text": f"🪡 Curse “{res['curse']['name'] or 'unnamed'}” set on {res['name']}."})
+        elif action == "clear":
+            await send_to(ws, "whisper", {"text": f"🪡 Curse removed from {res['name']}."})
+        elif action == "conceal":
+            await send_to(ws, "whisper", {"text": f"🪡 Curse on {res['name']} is undisclosed again."})
+
+    if action == "reveal":
+        # Server-side disclosure: ONLY the owning user receives the released
+        # fields (name + desc — the whisper text never rides a sheet), through
+        # the private whisper channel; nobody else sees an event or a history row.
+        curse = res["curse"]
+        label = " — ".join(x for x in (curse["name"], curse["desc"]) if x)
+        if not CHAT._rate_ok(room_id, user["id"], "curse"):
+            return await fail("Curses are being sent too quickly.")
+        await CHAT.post_chat(room_id, user,
+                             text=f"☠️ {res['name']}: {label or 'a curse stirs.'}",
+                             channel="whisper", visibility="whisper",
+                             recipients=[char["user_id"]], meta={"source": "curse"})
+        await send_to(ws, "whisper", {"text": f"🪡 The curse on {res['name']} is revealed to its owner."})
+    elif action == "whisper":
+        # The stored whisper text goes to the CURRENT owner exactly as the DM
+        # authored it. The recipient is looked up from the item's holder —
+        # any recipient field in this message is ignored by construction.
+        if not CHAT._rate_ok(room_id, user["id"], "curse"):
+            return await fail("Curses are being sent too quickly.")
+        it, curse = _curse_of_char(char["id"], item_id)
+        if it is None:
+            return await fail("Item not found")
+        if not curse:
+            return await fail("That item carries no curse.")
+        if not curse["whisper"]:
+            return await fail("This curse has no whisper text stored.")
+        mid = await CHAT.post_chat(room_id, user, text=curse["whisper"],
+                                   channel="whisper", visibility="whisper",
+                                   recipients=[char["user_id"]],
+                                   meta={"source": "curse"})
+        if mid is None:
+            return await fail("The whisper text is empty.")
+        await send_to(ws, "whisper", {"text": f"🪡 Whispered to {char['name']}'s player."})

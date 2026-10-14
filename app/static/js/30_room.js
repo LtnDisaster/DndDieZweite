@@ -2000,7 +2000,25 @@ function renderInv(){
       if (it.stackable)
         btns.push(`<button data-a="combine" data-id="${it.id}" ${state.invCombine === it.id ? "class='active'" : ""}>${state.invCombine === it.id ? "pick other" : "Combine"}</button>`);
       if (isDM) btns.push(`<button data-a="remove" data-id="${it.id}" style="color:var(--red)">Remove</button>`);
-      const sub = [known ? esc(it.desc || "") : "unidentified",
+      // D106: curse controls are DM-only UI over DM-only data; the sheet owner
+      // gets no buttons here at all — the server decides what an owner sees.
+      if (isDM && it.curse && it.curse.revealed)
+        btns.push(`<button data-a="conceal" data-id="${it.id}">☠ conceal</button>`);
+      if (isDM && it.curse && !it.curse.revealed)
+        btns.push(`<button data-a="reveal" data-id="${it.id}">☠ reveal</button>`);
+      if (isDM && it.curse && it.curse.whisper)
+        btns.push(`<button data-a="whisper" data-id="${it.id}" title="whisper the stored curse text to the current owner">☠ whisper</button>`);
+      if (isDM && it.curse)
+        btns.push(`<button data-a="cursee" data-id="${it.id}">☠ edit</button>` +
+                  `<button data-a="cursex" data-id="${it.id}" style="color:var(--red)">☠ ✕</button>`);
+      if (isDM && !it.curse)
+        btns.push(`<button data-a="cursee" data-id="${it.id}">☠ curse</button>`);
+      // owner (revealed by the DM) and DM both see the released fields; the
+      // whisper text only reaches its target through the private chat channel.
+      const curse = it.curse ? "☠ " + esc(it.curse.name || "A curse") +
+                    (it.curse.desc ? " — " + esc(it.curse.desc) : "") +
+                    (isDM && it.curse.whisper ? " 📜" : "") : "";
+      const sub = [known ? esc(it.desc || "") : "unidentified", curse,
                    it.weight ? it.weight + " lb" : ""].filter(Boolean).join(" · ");
       return `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind] || "🎒"} ${esc(it.name)}${it.qty > 1 ? " ×" + it.qty : ""}</span>` +
         `<small style="opacity:.55"> ${sub}</small><span class="inv-btns">${btns.join("")}</span></div>`;
@@ -2024,6 +2042,15 @@ function renderInv(){
         const it = inv.find(i => i.id === id);
         const q = window.confirm(`Remove ALL ${it ? it.qty : ""} × ${it ? it.name : ""}?`) ? (it ? it.qty : 1) : 0;
         if (q > 0) wsSend({ type: "inv_remove", char_id: ch.id, item_id: id, qty: q, op_id: invOpId() });
+      } else if (a === "cursee" || a === "cursex" || a === "reveal" || a === "conceal" || a === "whisper"){
+        // D106: every authority lives server-side; the client only names the
+        // instance — never a recipient, never a disclosure truth of its own.
+        if (a === "cursee") curseEdit({ char_id: ch.id }, inv.find(i => i.id === id) || { id });
+        else if (a === "cursex"){
+          if (window.confirm("Remove the curse from this item?"))
+            wsSend({ type: "curse", action: "clear", char_id: ch.id, item_id: id, op_id: invOpId() });
+        }
+        else wsSend({ type: "curse", action: a, char_id: ch.id, item_id: id, op_id: invOpId() });
       }
     });
   }
@@ -2150,8 +2177,43 @@ function wireInvStatic(){
   };
 }
 
-function openInvContainer(ob){
-  state.invChest = { object_id: ob.id, label: ob.label || "Container",
+/* D106: DM curse administration for one concrete item instance. Three small
+   channels ride the ONE "curse" transport: set/clear (metadata), reveal/conceal
+   (disclosure to the current owner) and whisper (private delivery, recipient
+   resolved server-side). The editor is intentionally prompt-based to match the
+   inventory panel's minimal style; all truth is authored by the server reply
+   "curse_updated", never by what was typed in. */
+function curseEdit(scope, it){
+  const c = it.curse || {};
+  const name = window.prompt("Curse name (DM only)", c.name || "");
+  if (name === null) return;
+  const desc = window.prompt("Secret description (DM only — players never see this until revealed)", c.desc || "");
+  if (desc === null) return;
+  const whisper = window.prompt("Whisper text for the owner (stays secret, delivered only via \"☠ whisper\")", c.whisper || "");
+  if (whisper === null) return;
+  if (!name && !desc && !whisper){ toast("Give the curse a name, a description or a whisper text."); return; }
+  wsSend({ type: "curse", action: "set", ...scope, item_id: it.id,
+           name, desc, whisper, op_id: invOpId() });
+}
+
+function applyCurseUpdate(p){
+  // DM-only authoritative patch: the server tells us the stored truth for
+  // exactly this instance; local panels render THAT, so they can never drift
+  // ahead of (or behind) the stored metadata.
+  let items = null;
+  if (p.char_id != null){
+    const m = ((state.room && state.room.members) || []).find(
+      x => x.char && String(x.char.id) === String(p.char_id));
+    items = m && m.char.items;
+  } else if (state.invChest && String(state.invChest.object_id) === String(p.object_id)){
+    items = state.invChest.items;
+  }
+  const it = (items || []).find(i => String(i.id) === String(p.item_id));
+  if (it){ if (p.curse) it.curse = p.curse; else delete it.curse; }
+  renderInv();
+}
+
+function openInvContainer(ob){  state.invChest = { object_id: ob.id, label: ob.label || "Container",
                      floor: state.viewFloor || "", items: [], coins: 0, loading: true };
   setSideTab("inv"); renderInvChest();
   wsSend({ type: "inv_container", action: "inspect", object_id: ob.id, floor: state.viewFloor || "" });
@@ -2197,12 +2259,23 @@ function renderInvChest(){
   const isDM = state.room && state.room.role === "dm";
   const ch = invTargetChar();
   const src = cs.src || "chest";
+  const _dst = src === "chest" ? { type: "inv_container", object_id: cs.object_id, floor: cs.floor }
+                               : { type: src === "npc" ? "npc_inv" : "loot", token_id: cs.token_id };
+  // D106: DM curse authoring also works on world chests and NPC carcasses;
+  // reveal/whisper are deliberately NOT offered here — they need a player
+  // owner, which a container does not have (the server enforces the same).
+  const _curseScope = src === "chest" ? { object_id: cs.object_id, floor: cs.floor }
+                                      : { token_id: cs.token_id };
   const rows = (cs.items || []).map(it =>
     `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind] || "🎒"} ${esc(it.name)} ×${it.qty}</span>` +
-    `<small style="opacity:.55"> ${esc(it.desc || "")}</small><span class="inv-btns">` +
+    `<small style="opacity:.55"> ${[esc(it.desc || ""),
+      (isDM && it.curse) ? "☠ " + esc(it.curse.name || "a curse") + (it.curse.whisper ? " 📜" : "") : ""
+    ].filter(Boolean).join(" · ")}</small><span class="inv-btns">` +
     (src === "npc" ? "" :
       `<input id="tk-q-${it.id}" type="number" min="1" max="${it.qty}" value="1" style="width:52px">` +
       `<button data-tk="${it.id}" ${ch ? "" : "disabled"}>${src === "loot" ? "Loot" : "Take"}</button>`) +
+    (isDM ? `<button data-ce="${it.id}">${it.curse ? "☠ edit" : "☠ curse"}</button>` +
+            (it.curse ? `<button data-cx="${it.id}" style="color:var(--red)">☠ ✕</button>` : "") : "") +
     (isDM && src !== "loot" ? `<button data-rm="${it.id}" style="color:var(--red)">Remove</button>` : "") +
     `</span></div>`).join("") || `<div class="meta">${cs.loading ? "opening…" : (src === "loot" ? "Nothing to loot." : "Empty.")}</div>`;
   const own = (ch && ch.items || []).filter(i => !i.unidentified);
@@ -2227,8 +2300,6 @@ function renderInvChest(){
       `</div>`);
   const cl = $("chest-close");
   if (cl) cl.onclick = () => { state.invChest = null; renderInvChest(); };
-  const _dst = src === "chest" ? { type: "inv_container", object_id: cs.object_id, floor: cs.floor }
-                               : { type: src === "npc" ? "npc_inv" : "loot", token_id: cs.token_id };
   box.querySelectorAll("button[data-tk]").forEach(b => b.onclick = () => {
     const q = +(($("tk-q-" + b.dataset.tk) || {}).value || 1);
     wsSend({ ..._dst, action: src === "loot" ? "take" : "move", char_id: ch.id,
@@ -2236,6 +2307,12 @@ function renderInvChest(){
   });
   box.querySelectorAll("button[data-rm]").forEach(b => b.onclick = () => {
     wsSend({ ..._dst, action: "remove", item_id: b.dataset.rm, qty: 9999, op_id: invOpId() });
+  });
+  box.querySelectorAll("button[data-ce]").forEach(b => b.onclick = () =>
+    curseEdit(_curseScope, (cs.items || []).find(i => String(i.id) === b.dataset.ce) || { id: b.dataset.ce }));
+  box.querySelectorAll("button[data-cx]").forEach(b => b.onclick = () => {
+    if (window.confirm("Remove the curse from this item?"))
+      wsSend({ type: "curse", action: "clear", ..._curseScope, item_id: b.dataset.cx, op_id: invOpId() });
   });
   const put = $("chest-put");
   if (put) put.onclick = () => {

@@ -781,3 +781,34 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       canonical 749 passed, 1 skipped, 0 failed (baseline 725 + 24).
       Docs: D105, AGENT_GUIDE (inventory/loot section), CSV guide (gear grammar),
       MANUAL checklist D105.
+
+## Done — Sprint 35: D106 Cursed items + secret metadata + DM whispers (Verfluchte Gegenstände, geheime Metadaten, DM-Flüsterpost) (2026-10-14, D106)
+
+- [x] Per-instance curse metadata INSIDE the item entry (`curse {name, desc, whisper, revealed}`)
+      — no schema change, no migration; the entry dict IS the instance and travels
+      transfer/chest/loot through the existing atomic moves (ids are per-inventory only).
+- [x] Fail-closed sanitising: `gear.clean_items` strips `curse` by default; engine mutation
+      paths read trusted (`keep_curse=True`) — equip/use/attune/identify/recharge/long rest
+      and the honest sheet-PUT round-trip provably never wipe it; client PUTs can neither
+      forge a curse nor flip `revealed` (`_preserve_curses`).
+- [x] One disclosure gate `gear.curse_view`: DM full, owner ONLY a revealed curse's
+      name+desc (whisper text never leaves chat), everyone else sees nothing — server-side,
+      applied to /state, lobby sheets, container/loot replies; broadcasts never carry items.
+- [x] Cursed instances never stack, never split; marking a qty>1 stack carves EXACTLY one
+      qty=1 piece atomically (op_id-guarded writes; replay mints nothing).
+- [x] Owner change keeps the curse, clears `revealed` (knowledge never travels);
+      reveal/conceal/whisper are DM-commands, recipient resolved server-side from the
+      item's current holder (room-membership enforced), delivered via the existing
+      private `chat.post_chat` whisper — no second chat stack, foreign players see
+      nothing live and nothing in history.
+- [x] D105 follow-up: `handle_del_token` deletes token + `tok:<id>` container + seat +
+      chronicle in ONE `db.tx()` (FK-failure rolls back both — tested with the real FK error).
+- [x] UI: DM ☠-editor/reveal/whisper/clear on sheet + chest + NPC panels, owner sees
+      revealed curse line; 55_diorama.js untouched.
+- [x] tests/test_d106_curses.py (26 behaviour tests, 0 source pins) green;
+      canonical 775 passed, 1 skipped, 0 failed (baseline 749 + 26).
+      Docs: D106 (DECISIONS), AGENT_GUIDE (curse channel + inventory section + test map),
+      MANUAL checklist D106.
+- [ ] **Backlog (bewusst nicht gebaut):** Taschendiebstahl-Mechanik, automatische
+      Fluch-Auslöser/Zufallstabellen, geheime Rettungswürfe, mechanische Fluch-Folgen
+      (Schaden/Saves/Ticks), Fluch-Verbreitung auf andere Gegenstände.

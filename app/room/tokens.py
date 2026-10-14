@@ -558,16 +558,30 @@ async def handle_del_token(ws, room_id, user, is_dm, msg):
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:
         return                      # already deleted — idempotent, no error, no ghost
-    if tok["owner_user_id"] is not None:
-        db.x("UPDATE room_members SET character_id=NULL WHERE user_id=? AND room_id=?",
-             (tok["owner_user_id"], room_id))
-    db.x("DELETE FROM tokens WHERE id=?", (tok["id"],))
-    # D105: the token's synthetic loot container ("tok:<id>", see room/inv.py)
-    # dies with it — exactly that one row, so world containers sharing the
-    # table are never touched and no orphan hoard outlives the carcass.
-    db.x("DELETE FROM containers WHERE room_id=? AND object_id=?",
-         (room_id, f"tok:{tok['id']}"))
-    sys_msg(room_id, f"DM removed token '{tok['label']}'.")
+    # D106: the D105 container cleanup ("tok:<id>" dies with the carcass, see
+    # room/inv.py) and the token row itself now share ONE transaction — the
+    # seat un-assign, the container DELETE, the token DELETE and the chronicle
+    # line commit together or not at all. Before this, a failing token DELETE
+    # (e.g. FOREIGN KEY: a rider still mounts it) could leave the loot gone
+    # while the corpse stayed on the map. Still exactly that one container row
+    # — world chests sharing the table are never touched, and the delete
+    # permission (DM only, room-scoped) is unchanged.
+    label = tok["label"]
+    try:
+        with db.tx() as c:
+            if tok["owner_user_id"] is not None:
+                c.execute("UPDATE room_members SET character_id=NULL WHERE user_id=? AND room_id=?",
+                          (tok["owner_user_id"], room_id))
+            c.execute("DELETE FROM containers WHERE room_id=? AND object_id=?",
+                      (room_id, f"tok:{tok['id']}"))
+            c.execute("DELETE FROM tokens WHERE id=?", (tok["id"],))
+            c.execute("INSERT INTO messages (room_id,type,body) VALUES (?,'system',?)",
+                      (room_id, f"DM removed token '{label}'."))
+    except Exception:
+        # ROLLBACK done by db.tx — nothing was removed; answer like the classic
+        # handler failure path (generic, reveals no schema details).
+        await send_to(ws, "error", {"msg": "Could not remove that token."})
+        return
     await movement._cancel_walk(tok["id"])
     # Gone is a TRANSIENT sync event, not a stored state: forget_token clears the
     # server-side last-seen memory and broadcasts token_gone; the row itself is

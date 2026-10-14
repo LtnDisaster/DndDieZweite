@@ -89,10 +89,15 @@ def clean_def(d):
 def _stack_key(it):
     """Two entries may share a stack iff: the SAME DM definition, both
     stackable, and instance truth matches (charges, identified). Attunable
-    items never stack — attunement is instance truth."""
+    items never stack — attunement is instance truth. D106: a cursed instance
+    never stacks either — a curse belongs to EXACTLY one item, and merging a
+    cursed copy into an ordinary stack (or vice versa) would silently dilute
+    or duplicate that truth."""
     if not it.get("stackable") or not it.get("def_id"):
         return None
     if it.get("attunable") or it.get("attuned"):
+        return None
+    if it.get("curse"):
         return None
     return (it["def_id"], it.get("charges", -1), bool(it.get("identified", True)),
             it.get("heal", ""))
@@ -148,6 +153,18 @@ def strip_slots(equip, items):
     return equip
 
 
+def _ownership_moves(entry):
+    """D106: an instance that CHANGES HANDS keeps its curse — but `revealed`
+    is knowledge of the FORMER owner, and knowledge does not travel. Only the
+    moving copy is reset (never the source entry, which may still exist as the
+    remainder of a stack); a plain mutation (equip/use/rest) never calls this.
+    The curse itself is untouchable here — an owner change can never clear it."""
+    c = entry.get("curse")
+    if isinstance(c, dict) and c.get("revealed"):
+        entry["curse"] = dict(c, revealed=False)
+    return entry
+
+
 # ---------- character mutations (each one tx, replay-guarded) ----------
 
 def _char(c, char_id):
@@ -158,7 +175,9 @@ def _char(c, char_id):
 
 
 def _load(c, row):
-    items = gear.clean_items(db.j(row.get("items"), []))
+    # D106: this is the engine's trusted read — it round-trips the secret curse
+    # field through every mutation. Client-facing paths never use _load.
+    items = gear.clean_items(db.j(row.get("items"), []), keep_curse=True)
     equip = gear.clean_equipment(db.j(row.get("equipment"), {}), items)
     return items, equip
 
@@ -212,6 +231,10 @@ def adjust(room_id, char_id, action, item_id, other_id=None, qty=1, op_id=None):
         if action == "split":
             if not it.get("stackable"):
                 raise InvError("Not stackable")
+            if it.get("curse"):
+                # D106: a split copies the entry — copying a curse would mint a
+                # SECOND cursed instance. Cursed instances are always qty=1.
+                raise InvError("A cursed item cannot be split")
             try:
                 q = int(qty)
             except (TypeError, ValueError):
@@ -311,7 +334,8 @@ def transfer(room_id, from_char, to_char, item_id, qty, op_id=None):
         it, q = _take(items_s, item_id, qty)
         copy = dict(it)
         copy["qty"] = q
-        got, _ = stack_add(items_d, copy)       # full target → InvError → ROLLBACK
+        _ownership_moves(copy)                    # D106: revealed never travels
+        got, _ = stack_add(items_d, copy)         # full target → InvError → ROLLBACK
         strip_slots(equip_s, items_s)
         _store(c, from_char, items_s, equip_s)
         _store(c, to_char, items_d, equip_d)
@@ -323,14 +347,17 @@ def transfer(room_id, from_char, to_char, item_id, qty, op_id=None):
 def container_load(c, room_id, object_id):
     row = c.execute("SELECT items FROM containers WHERE room_id=? AND object_id=?",
                     (room_id, object_id)).fetchone()
-    return gear.clean_items(db.j(row["items"], []) if row else [])
+    # trusted in-transaction read (D106: curses survive fill/remove/move round-trips)
+    return gear.clean_items(db.j(row["items"], []) if row else [], keep_curse=True)
 
 
-def container_peek(room_id, object_id):
-    """Read-only view (inspect answers from this — never a /state payload)."""
+def container_peek(room_id, object_id, curse=False):
+    """Read-only view (inspect answers from this — never a /state payload).
+    D106: curse=True is the DM-only reply variant; every player-facing inspect
+    keeps the default (secrets stripped by clean_items)."""
     row = db.q1("SELECT items FROM containers WHERE room_id=? AND object_id=?",
                 (room_id, object_id))
-    return gear.clean_items(db.j(row["items"], []) if row else [])
+    return gear.clean_items(db.j(row["items"], []) if row else [], keep_curse=curse)
 
 
 def _container_store(c, room_id, object_id, items):
@@ -395,12 +422,14 @@ def container_move(room_id, object_id, char_id, item_id, qty, op_id=None):
             it, q = _take(items_s, item_id, qty)
             copy = dict(it)
             copy["qty"] = q
+            _ownership_moves(copy)                # D106: pack leaving its owner
             got, _ = stack_add(cont, copy)
             direction, name = "into", it["name"]
         else:                                     # take: container → character
             cit, q = _take(cont, item_id, qty)
             copy = dict(cit)
             copy["qty"] = q
+            _ownership_moves(copy)                # D106: fresh instance for a new owner
             got, _ = stack_add(items_s, copy)     # full inventory → ROLLBACK
             direction, name = "from", cit["name"]
         _container_store(c, room_id, object_id, cont)
@@ -575,6 +604,7 @@ def container_give(room_id, object_id, char_id, item_id, qty, op_id=None):
         cit, q = _take(cont, item_id, qty)          # missing/too-few -> InvError
         copy = dict(cit)
         copy["qty"] = q
+        _ownership_moves(copy)                      # D106: loot is an owner change
         got, _ = stack_add(items_s, copy)
         _container_store(c, room_id, object_id, cont)
         strip_slots(equip_s, items_s)
@@ -598,3 +628,113 @@ def container_remove_coins(room_id, object_id, cp, op_id=None):
             raise InvError("Not enough coin in the container")
         _container_coins_store(c, room_id, object_id, hoard - cp)
     return {"cp": cp}
+
+
+# ---------- D106: secret per-instance curses (DM metadata, storage side) ----------
+# THE single mutation site for the curse field — handlers authorise, these
+# write. Everything here runs inside the same tx/op_id machinery as every other
+# inventory mutation: a curse change can neither duplicate an item, half-apply,
+# nor survive a replayed op_id.
+
+def _curse_target(items, item_id):
+    """Resolve the cursed instance in `items`, carving a stack first: marking
+    a qty>1 stack curses EXACTLY ONE piece (an atomic qty-1 carve-out; the
+    rest of the stack stays ordinary). A cursed entry is always qty=1 — a
+    hand-corrupted cursed stack is refused, never split (that would mint a
+    second cursed instance)."""
+    it = find(items, item_id)
+    if it is None:
+        raise InvError("Item not found")
+    try:
+        qty = int(it.get("qty", 1))
+    except (TypeError, ValueError):
+        qty = 1
+    if qty > 1:
+        if it.get("curse"):
+            raise InvError("Corrupt cursed stack — clear the curse first")
+        if len(items) >= 40:                      # gear.clean_items entry cap —
+            raise InvError("Inventory is full")   # a carve-out must not overflow it
+        it["qty"] = qty - 1
+        single = dict(it)
+        single["id"] = new_item_id(items)
+        single["qty"] = 1
+        items.append(single)
+        it = single
+    return it
+
+
+def _curse_store(it, curse, revealed=None):
+    """Author the metadata on the resolved entry. revealed=None keeps the
+    current disclosure flag (editing the text does not un-disclose it)."""
+    if curse is None:
+        it.pop("curse", None)
+        return None
+    prev = it.get("curse") or {}
+    it["curse"] = dict(curse, revealed=bool(prev.get("revealed"))
+                       if revealed is None else bool(revealed))
+    return it["curse"]
+
+
+def curse_set(room_id, char_id, item_id, curse, op_id=None):
+    """DM creates/updates the secret curse on one character-carried instance."""
+    def fn(items, equip):
+        it = _curse_target(items, item_id)
+        stored = _curse_store(it, curse)
+        return {"name": it["name"], "item_id": it["id"], "curse": stored}
+    return mutate_char(room_id, char_id, fn, op_id, "curse_set")
+
+
+def curse_clear(room_id, char_id, item_id, op_id=None):
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        it.pop("curse", None)
+        return {"name": it["name"], "item_id": it["id"]}
+    return mutate_char(room_id, char_id, fn, op_id, "curse_clear")
+
+
+def curse_reveal(room_id, char_id, item_id, revealed, op_id=None):
+    """Flip the disclosure flag for the CURRENT owner. The DM handler pairs
+    True with a private whisper of the released fields."""
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        curse = gear.clean_curse(it.get("curse"))
+        if curse is None:
+            raise InvError("That item carries no curse to reveal")
+        curse["revealed"] = bool(revealed)
+        it["curse"] = curse
+        return {"name": it["name"], "item_id": it["id"], "curse": curse}
+    return mutate_char(room_id, char_id, fn, op_id, f"curse_reveal:{int(bool(revealed))}")
+
+
+def container_curse_set(room_id, object_id, item_id, curse, op_id=None):
+    def fn(items):
+        it = _curse_target(items, item_id)
+        stored = _curse_store(it, curse)
+        return {"name": it["name"], "item_id": it["id"], "curse": stored}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_curse_set", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res
+
+
+def container_curse_clear(room_id, object_id, item_id, op_id=None):
+    def fn(items):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        it.pop("curse", None)
+        return {"name": it["name"], "item_id": it["id"]}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_curse_clear", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res

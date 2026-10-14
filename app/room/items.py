@@ -15,7 +15,7 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
         await send_to(ws, "error", {"msg": "Not your character"})
         return
     ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],)))
-    items = gear.clean_items(db.j(ch["items"], []))
+    items = gear.clean_items(db.j(ch["items"], []), keep_curse=True)
     it = next((i for i in items if i["id"] == msg.get("item_id")), None)
     if it is None:
         await send_to(ws, "error", {"msg": "Item not found"})
@@ -65,7 +65,7 @@ async def handle_attune(ws, room_id, user, is_dm, msg):
     ch = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("char_id", -1),))
     if ch is None or not (is_dm or ch["user_id"] == user["id"]):
         return
-    items = gear.clean_items(db.j(ch["items"], []))
+    items = gear.clean_items(db.j(ch["items"], []), keep_curse=True)
     it = next((i for i in items if i["id"] == msg.get("item_id")), None)
     if it is None or not it["attunable"]:
         return
@@ -87,7 +87,7 @@ async def handle_identify(ws, room_id, user, is_dm, msg):
     ch = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("char_id", -1),))
     if ch is None:
         return
-    items = gear.clean_items(db.j(ch["items"], []))
+    items = gear.clean_items(db.j(ch["items"], []), keep_curse=True)
     it = next((i for i in items if i["id"] == msg.get("item_id")), None)
     if it is None:
         return
@@ -104,7 +104,7 @@ async def handle_recharge(ws, room_id, user, is_dm, msg):
     ch = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("char_id", -1),))
     if ch is None:
         return
-    items = gear.clean_items(db.j(ch["items"], []))
+    items = gear.clean_items(db.j(ch["items"], []), keep_curse=True)
     it = next((i for i in items if i["id"] == msg.get("item_id")), None)
     if it is None or not it["recharge"]:
         return

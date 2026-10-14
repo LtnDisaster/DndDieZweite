@@ -631,3 +631,50 @@ ACCEPT or REJECT:
 - [ ] Delete the NPC token while its container has items → room stays
       healthy, world chest containers unaffected, no phantom hoard returns
       under a recreated token id (DB: containers row for tok:<id> gone).
+
+## D106 — Cursed items, secret metadata, DM whispers (manual browser acceptance)
+
+### DM — authoring a curse on ONE instance
+- [ ] DM inventory tab, a character carrying TWO identical daggers: each row shows a
+      "☠ curse" button. Curse ONE of them (name / secret description / whisper text).
+      The cursed row gains a "☠ <name>" line (+ "📜" marker for a stored whisper);
+      the twin row stays completely ordinary. Reload the page — the curse persists.
+- [ ] Cursing a STACK (e.g. 3 × potion): exactly one piece is carved out (potion ×2
+      ordinary + a new ×1 row with the curse). The cursed row offers no Split; combining
+      it into the ordinary stack answers "different items".
+- [ ] "☠ edit" changes the fields; "☠ ✕" removes the curse (row goes back to plain).
+
+### Secrecy (the core check)
+- [ ] Player (owner) view of the cursed item: NO curse text anywhere — sheet, inventory
+      tab, devtools WS frames (frames for /state/inv_contents contain no "curse", no
+      curse name), chronicle stays clean.
+- [ ] DM opens the same room in a second browser: only the DM sees the metadata.
+      "View as" (D104) shows the player's exact view — curse invisible there too.
+- [ ] Player ws (devtools) sending {type:"curse", action:"reveal", …} → "DM only".
+
+### Owner change
+- [ ] Transfer the cursed item to another player's character (inv_transfer) or let a
+      second character LOOT it from a corpse: the curse follows the item; nobody sees a
+      disclosure; the DM panel on the NEW holder still shows the curse (revealed: no).
+- [ ] Equip/unequip, use (charges), identify, recharge, DM long rest: the curse survives
+      all of it (DM panel; also survives a page reload).
+
+### Reveal + whisper
+- [ ] "☠ reveal": the OWNER's chat privately receives "☠ <item>: <name> — <description>"
+      (visible ONLY to owner + DM; other players: nothing, also nothing after reload —
+      history is filtered). The owner's sheet item now shows the revealed name+desc line.
+      The stored whisper text does NOT appear on the sheet.
+- [ ] "☠ conceal": the owner's sheet line and chat history view of the curse vanish for
+      them (re-reveal works); the DM still sees everything.
+- [ ] "☠ whisper": the owner's chat privately receives the stored whisper text verbatim;
+      other players see nothing.
+- [ ] Curse an item inside a world chest or a dead NPC's hoard: edit/clear works; the
+      whisper/reveal buttons are absent there (a container has no player owner), and a
+      hand-typed whisper message for a container item answers "needs a player owner".
+- [ ] DM of a DIFFERENT room cannot touch these ids (refused like "nothing exists").
+
+### NPC deletion (D105 gap closed)
+- [ ] Delete an NPC token that carries gear: token gone, its hoard gone (recreate the
+      same token id → hoard does NOT reappear), world chest containers unaffected.
+- [ ] Mount a rider on the NPC, then delete it: "Could not remove that token." — the NPC
+      AND its hoard both still exist (no half-deletion); clear the mount, delete works.

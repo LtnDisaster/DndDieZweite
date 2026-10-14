@@ -102,13 +102,20 @@ def _clean_weapons(items):
     return out
 
 
-def _char_row(r, mask_items=False):
+def _char_row(r, mask_items=False, curse="strip"):
     if not r:
         return r
     r = dict(r)
     r["stats"] = db.j(r.get("stats"), {})
     r["weapons"] = db.j(r.get("weapons"), [])
-    r["items"] = gear.clean_items(db.j(r.get("items"), []))
+    # D106: curse disclosure is decided HERE, per viewer, and nowhere else.
+    # 'dm' = trusted load, full metadata; 'owner' = trusted load, revealed
+    # curses reduced to name+desc; 'strip' (default, fail-closed) = the old
+    # byte-identical behaviour — every caller that forgot the parameter is
+    # automatically safe.
+    r["items"] = gear.curse_view(
+        gear.clean_items(db.j(r.get("items"), []), keep_curse=(curse in ("dm", "owner"))),
+        curse)
     r["skills"] = gear.clean_skills(db.j(r.get("skills"), {}))
     r["spells"] = gear.clean_spells(db.j(r.get("spells"), []))
     r["spell_slots"] = gear.clean_slots(db.j(r.get("spell_slots"), {}))
@@ -223,6 +230,24 @@ def _load_char(cid: int, user_id: int):
     return ch
 
 
+def _preserve_curses(cur, new_items):
+    """D106: the raw sheet PUT round-trips the owner's items. Two rules:
+    (1) any curse arriving FROM the client was already stripped by the
+    untrusted clean_items — a sheet owner can neither forge a curse nor flip
+    'revealed'; (2) a curse that exists on the STORED entry of the same id is
+    re-attached — a plain sheet edit (notes, HP …) must never silently wipe
+    DM metadata. Same id inside the same sheet = same instance: ownership of
+    this character did not change, so 'revealed' stays exactly as stored."""
+    stored = {i["id"]: i.get("curse") for i in
+              gear.clean_items(db.j(cur.get("items"), []), keep_curse=True)
+              if i.get("curse")}
+    for it in new_items:
+        c = stored.get(it["id"])
+        if c:
+            it["curse"] = c
+    return new_items
+
+
 @router.post("/register")
 def register(cred: Cred, request: Request, response: Response):
     ratelimit.limit("register", request, max_n=10, window=3600)
@@ -261,7 +286,7 @@ def me(user=Depends(require_user)):
 
 @router.get("/characters")
 def list_chars(user=Depends(require_user)):
-    return [_char_row(r) for r in db.q(
+    return [_char_row(r, curse="owner") for r in db.q(
         "SELECT * FROM characters WHERE user_id=? ORDER BY name", (user["id"],))]
 
 
@@ -277,7 +302,7 @@ def create_char(ch: CharIn, user=Depends(require_user)):
          db.json_dumps(gear.clean_slots(ch.spell_slots)),
          db.json_dumps(gear.clean_saves(ch.saves)), db.json_dumps(gear.clean_resources(ch.resources)),
          db.json_dumps(gear.clean_defenses(ch.defenses)), gear.clean_hit_die(ch.hit_die)))
-    return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)))
+    return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)), curse="owner")
 
 
 @router.put("/characters/{cid}")
@@ -285,11 +310,15 @@ def update_char(cid: int, ch: CharIn, user=Depends(require_user)):
     cur = _load_char(cid, user["id"])
     # D100 autonomy lock: the raw character-editor PUT may no longer rewrite the
     # SERVER-AUTHORISED progression fields. `level`, `spells` and `spell_slots` are
-    # kept EXACTLY as stored — a sheet owner cannot refill consumed slots, self-grant
-    # a spell list, or set their own level by hand. Authorised writers are untouched:
+    # kept EXACTLY as stored — a sheet owner cannot refill consumed slots,
+    # self-grant a spell list, or set their own level by hand. Authorised writers are untouched:
     # the validated build/level-up (`charbuild.apply`), the DM `class_levels` transport,
     # and the WS rest/ability/progression handlers. DMs never hit this endpoint at all
     # (_load_char is owner-scoped). Everything else on the sheet stays editable.
+    # D106: items run through the UNTRUSTED cleaner (client curses can never be
+    # forged) and then re-attach the stored curses by entry id (a sheet edit can
+    # never wipe them either) — the write carries neither mint nor eraser.
+    items = _preserve_curses(cur, gear.clean_items(ch.items))
     db.x(
         "UPDATE characters SET name=?,race=?,char_class=?,background=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,"
         "weapons=?,items=?,skills=?,saves=?,defenses=?,resources=?,hit_die=? WHERE id=?",
@@ -297,11 +326,11 @@ def update_char(cid: int, ch: CharIn, user=Depends(require_user)):
          ch.background if ch.background is not None else (cur.get("background") or ""),
          db.json_dumps(ch.stats),
          ch.hp, ch.max_hp, ch.ac, ch.speed, ch.notes,
-         db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(gear.clean_items(ch.items)),
-         db.json_dumps(gear.clean_skills(ch.skills)),
-         db.json_dumps(gear.clean_saves(ch.saves)), db.json_dumps(gear.clean_defenses(ch.defenses)),
+        db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(items),
+        db.json_dumps(gear.clean_skills(ch.skills)),
+        db.json_dumps(gear.clean_saves(ch.saves)), db.json_dumps(gear.clean_defenses(ch.defenses)),
          db.json_dumps(gear.clean_resources(ch.resources)), gear.clean_hit_die(ch.hit_die), cid))
-    return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)))
+    return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)), curse="owner")
 
 
 @router.delete("/characters/{cid}")
@@ -670,9 +699,13 @@ def room_state(code: str, request: Request):
         "FROM room_members m JOIN users u ON u.id=m.user_id WHERE m.room_id=?", (room["id"],))
     for m in members:
         masked = room["_role"] != "dm" and m["user_id"] != user["id"]
+        # D106: the DM's /state is the ONLY full-metadata channel; the sheet
+        # owner sees their revealed curses reduced to name+desc; peers get the
+        # fail-closed strip (their row is reduced to _peer_view anyway).
+        curse = "strip" if masked else ("dm" if room["_role"] == "dm" else "owner")
         m["char"] = _char_row(
             db.q1("SELECT * FROM characters WHERE id=?", (m["character_id"],)),
-            mask_items=masked) if m["character_id"] else None
+            mask_items=masked, curse=curse) if m["character_id"] else None
         # D93: a peer row is now the tactical allow-list — the old notes/
         # unidentified-magic redaction was the tip of a much bigger row.
         if masked:
@@ -719,7 +752,7 @@ def room_state(code: str, request: Request):
         "grid": mapmodel.visible_map(mp, user["id"], room["_role"] == "dm", visible),
         "initiative": db.j(st.get("initiative"), {"combat": False, "order": [], "active": -1}),
         "quests": questlog.visible_for(room["id"], room["_role"] == "dm"),
-        "characters": [_char_row(c) for c in db.q("SELECT * FROM characters WHERE user_id=?", (user["id"],))],
+        "characters": [_char_row(c, curse="owner") for c in db.q("SELECT * FROM characters WHERE user_id=?", (user["id"],))],
         # D92: the DM's item-definition library travels to the DM only; players
         # receive [] (defs are authoring templates — no player has a use for a
         # peer's future loot). Container CONTENTS never appear here at all —

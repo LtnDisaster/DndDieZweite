@@ -29,6 +29,7 @@ function connectWS(code){
       case "quests_changed": refreshRoom(); break;
       case "inv_changed": refreshRoom(); break;         // D92: inventory/equipment refetch
       case "inv_contents": showInvContents(p); break;   // D92: authorised container view (requester only)
+      case "curse_updated": applyCurseUpdate(p); break; // D106: DM-only authoritative curse patch
       case "whisper": appendGameLogMessage({ type:"whisper", body:p.text }); break;
       case "ambience": applyAudioState(p); break;
       case "sound": playSoundEvent(p); break;
