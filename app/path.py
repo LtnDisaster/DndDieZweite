@@ -22,12 +22,14 @@ def _cells(origin, side):
     return [(cx + dx, cy + dy) for dy in range(h) for dx in range(w)]
 
 
-def _valid_origin(mp, origin, side, allowed_cells=None):
+def _valid_origin(mp, origin, side, allowed_cells=None, fly=False):
     if not mapmodel.in_world(mp, origin[0], origin[1]):
         return False
     for (x, y) in _cells(origin, side):
         t = mapmodel.terrain_at(mp, x, y)
-        if t is None or not mapmodel.walkable(t):
+        if t is None:
+            return False
+        if not (mapmodel.body_open(t) if fly else mapmodel.walkable(t)):
             return False
         if allowed_cells is not None and (x, y) not in allowed_cells:
             return False
@@ -51,7 +53,7 @@ def _elev_passable(mp, old_cells, new_cells):
 
 
 def _step_valid(mp, old, new, side, be, elev_layer=None, fly=False):
-    if not _valid_origin(mp, new, side):
+    if not _valid_origin(mp, new, side, fly=fly):
         return False
     old_cells = {(x, y) for (x, y) in _cells(old, side) if mapmodel.in_world(mp, x, y)}
     new_cells = {(x, y) for (x, y) in _cells(new, side) if mapmodel.in_world(mp, x, y)}
@@ -113,10 +115,10 @@ def find_path(mp, start, goal, max_steps=400, blocked_edges=None,
     if not mapmodel.in_world(mp, gx, gy) or not mapmodel.in_world(mp, sx, sy):
         return None
 
-    def valid_origin(origin):
-        return _valid_origin(mp, origin, side, allowed_cells)
-
     fly = mode == "fly"                       # D83: no cliff gate, no rough penalty
+
+    def valid_origin(origin):
+        return _valid_origin(mp, origin, side, allowed_cells, fly=fly)
 
     def step_valid(old, new):
         return _step_valid(mp, old, new, side, be, fly=fly)
@@ -184,3 +186,79 @@ def path_footprint_cost(mp, start, path, footprint=1, mode="walk"):
     app/movecost.py (SSOT): orthogonal 1, difficult 2, diagonals 1, 2, 1, 2...
     D83 mode="fly" costs no terrain (see movecost.route_cost)."""
     return movecost.route_cost(mp, [start] + list(path), footprint, mode=mode)
+
+
+def find_path_3d(start, goal, maps, levels, side, mode="fly",
+                 vertical_ok=None, state_ok=None, blocked_edges=None,
+                 max_steps=600):
+    """D114 3D A* over (floor-name, origin). Horizontal steps reuse the ONE
+    terrain/door/elevation predicate of this module; vertical adjacent-plane
+    steps use the caller-supplied ``vertical_ok`` (vertical3d), so plane-open
+    logic is not duplicated. Diagonal horizontal/vertical combinations are
+    intentionally unsupported and documented."""
+    if not vertical_ok or not state_ok:
+        raise ValueError("find_path_3d requires vertical_ok and state_ok callbacks")
+    fly = mode == "fly"
+    names = list(levels)
+
+    def hcost(state):
+        fl, (x, y) = state
+        gfl, (gx, gy) = goal
+        dx, dy = abs(gx - x), abs(gy - y)
+        return 10 * (dx + dy) + (14 - 20) * min(dx, dy) + 10 * abs(levels[fl] - levels[gfl])
+
+    if not state_ok(start) or not state_ok(goal):
+        return None
+    if start == goal:
+        return []
+
+    open_q = [(hcost(start), 0, start)]
+    g = {start: 0}
+    came = {}
+    tie = 0
+    while open_q:
+        _, _, state = heapq.heappop(open_q)
+        if state == goal:
+            break
+        fl, origin = state
+        mp = maps.get(fl)
+        be = (blocked_edges or {}).get(fl) or set()
+        neighbors = []
+        if mp is not None:
+            for dx, dy, base in DIRS:
+                new = (origin[0] + dx, origin[1] + dy)
+                if not mapmodel.in_world(mp, new[0], new[1]):
+                    continue
+                if (dx and dy and not _diagonal_valid(mp, origin, new, side, be, fly=fly)) \
+                        or (not (dx and dy) and not _step_valid(mp, origin, new, side, be, fly=fly)):
+                    continue
+                neighbors.append(((fl, new), base))
+        level = levels.get(fl)
+        if level is not None:
+            for d in (-1, 1):
+                nlevel = level + d
+                if nlevel not in levels.values():
+                    continue
+                nfl = next(n for n, lv in levels.items() if lv == nlevel)
+                cells = set(_cells(origin, side))
+                if not vertical_ok(state, (nfl, origin), cells):
+                    continue
+                neighbors.append(((nfl, origin), 10))
+        for new, base in neighbors:
+            if not state_ok(new):
+                continue
+            ng = g[state] + base
+            if ng < g.get(new, 1e18):
+                g[new] = ng
+                came[new] = state
+                tie += 1
+                heapq.heappush(open_q, (ng + hcost(new), tie, new))
+    else:
+        return None
+
+    path, node = [], goal
+    while node != start:
+        path.append(node)
+        node = came[node]
+    path.reverse()
+    return path if len(path) <= max_steps else None

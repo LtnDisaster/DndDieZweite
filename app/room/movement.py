@@ -7,14 +7,14 @@ import asyncio
 
 from .. import conditions as C
 from .. import db, footprint, gear, los, mapmodel, movecost
-from ..path import find_path, path_footprint_cost, step_legal
+from ..path import find_path, find_path_3d, path_footprint_cost, step_legal
 from .growth import maybe_grow_map
 from . import authz, combat as CB
 from .net import (broadcast, fog_patch, get_map, map_lock, send_to,
                   send_to_plane_viewed, set_map)
 from .traps import at_cell, hit_trap, take_loot
-from .visibility import (broadcast_token_step, viewer_visible_cells,
-                         send_presence_event)
+from .visibility import (broadcast_token_step, send_property_to_interested,
+                         viewer_visible_cells, send_presence_event)
 
 STEP_DELAY = 0.11
 # token_id -> walk asyncio.Task
@@ -69,9 +69,19 @@ def _cell_elev(mp, cx, cy):
 def _speeds(tok):
     """All movement allowances in feet — always through gear.clean_speeds (SSOT)."""
     if tok["character_id"]:
-        return gear.clean_speeds(db.q1("SELECT speed FROM characters WHERE id=?",
-                                       (tok["character_id"],)))
-    return gear.clean_speeds(db.j(tok["npc"]) if tok["npc"] else {})
+        speeds = gear.clean_speeds(db.q1("SELECT speed FROM characters WHERE id=?",
+                                         (tok["character_id"],)))
+    else:
+        speeds = gear.clean_speeds(db.j(tok["npc"]) if tok["npc"] else {})
+    # D109 SRD Slow / D111 catalog hook: speed_delta from the condition
+    # definitions (slowed = -10 built-in; several sources stack, but slowed
+    # itself can never appear twice — condition entries dedupe by key),
+    # floored at 0, applied to walk only.
+    from .. import conditions as CND
+    delta = CND.speed_delta(CND.load(tok), tok.get("room_id"))
+    if delta:
+        speeds = dict(speeds, walk=max(0, speeds["walk"] + delta))
+    return speeds
 
 
 def _walk_speed(tok):
@@ -95,9 +105,9 @@ def _mode_or_error(tok, msg):
 
 
 MOVE_BLOCKED_CONDS = {"incapacitated", "unconscious", "paralyzed", "stunned",
-                      "petrified"}    # the incapacitated family (D80) — the
-# restrained/grappled family deliberately is NOT here: those need their own
-# mechanics (out of scope) and must not be silently turned into a movement ban.
+                      "petrified"}    # pre-D111 hardcode — kept as the
+# documentation of the SRD baseline. The gate below reads the catalog hook
+# blocks_movement instead, so built-ins AND conditions.csv rows decide it.
 
 
 async def carry_riders(room_id, token_id):
@@ -156,9 +166,11 @@ def _movement_block_reason(tok):
         ch = db.q1("SELECT hp FROM characters WHERE id=?", (cid,))
         if ch is not None and int(ch.get("hp") or 0) <= 0:
             return "You cannot move while downed"
-    hit = {c["k"].lower() for c in C.load(tok)} & MOVE_BLOCKED_CONDS
-    if hit:
-        return f"You cannot move while {C.label(sorted(hit)[0]).lower()}"
+    conds = C.load(tok)
+    hit_key = next((c["k"] for c in conds
+                    if C.hook_bool([c], tok.get("room_id") or 0, "blocks_movement")), None)
+    if hit_key:
+        return f"You cannot move while {C.label(hit_key).lower()}"
     return None
 
 
@@ -191,6 +203,23 @@ async def handle_move(ws, room_id, user, is_dm, msg):
         if budget <= 0:
             await send_to(ws, "error", {"msg": "No movement left this turn — Dash or End Turn"})
             return
+    current_floor = tok.get("floor") or ""
+    cross_3d = "floor" in msg and str(msg["floor"] or "") != current_floor
+    if not cross_3d:
+        proposed = msg.get("path")
+        cross_3d = isinstance(proposed, list) and any(
+            isinstance(p, dict) and "floor" in p and str(p["floor"] or "") != current_floor
+            for p in proposed)
+    if cross_3d:
+        if msg.get("teleport") and is_dm:
+            await _teleport3d(ws, tok, msg)
+            return
+        if mode != "fly":
+            await send_to(ws, "error", {"msg": "Vertical movement requires a fly speed"})
+            return
+        await _move3d(ws, tok, msg, mode, budget)
+        return
+
     mp = get_map(room_id, tok.get("floor") or "")     # D88: YOUR plane's map
     cell = mp["cell"]
     try:
@@ -232,6 +261,8 @@ async def handle_move(ws, room_id, user, is_dm, msg):
                 # plane's map only; sockets standing elsewhere must not receive it.
                 await send_to_plane_viewed(room_id, fl_tp, "explored",
                                            fog_patch(mp, newly, fl_tp))
+        from .grapple import end_grapples_out_of_reach
+        await end_grapples_out_of_reach(room_id, tok)
         await maybe_grow_map(room_id, tok)
         return
 
@@ -277,7 +308,7 @@ async def handle_move(ws, room_id, user, is_dm, msg):
     if path is None:
         await send_to(ws, "error", {"msg": "No path there"})
         return
-    if not footprint.valid_final_position(mp, tok, (tx, ty), tokens):
+    if not footprint.valid_final_position(mp, tok, (tx, ty), tokens, mode=mode):
         await send_to(ws, "error", {"msg": "That token footprint cannot finish there"})
         return
 
@@ -285,6 +316,272 @@ async def handle_move(ws, room_id, user, is_dm, msg):
     _walks[tok["id"]] = asyncio.create_task(walk(room_id, tok["id"], path, mover_ws=ws,
                                                  budget=budget, mode=mode))
     await _announce_move(room_id, tok["id"], True)
+
+
+def _all_tokens(room_id):
+    return db.q("SELECT * FROM tokens WHERE room_id=?", (room_id,))
+
+
+def _state_pixel(mp, cx, cy):
+    return (cx + .5) * mp["cell"], (cy + .5) * mp["cell"]
+
+
+def _state_token(tok, state, maps):
+    fl, (cx, cy) = state
+    mp = maps[fl]
+    x, y = _state_pixel(mp, cx, cy)
+    return {**tok, "floor": fl, "x": x, "y": y, "z": _cell_elev(mp, cx, cy)}
+
+
+async def _teleport3d(ws, tok, msg):
+    from . import vertical3d
+    room_id = tok["room_id"]
+    current = tok.get("floor") or ""
+    to_fl = str(msg["floor"] or current) if "floor" in msg else current
+    maps = vertical3d.maps_for(room_id)
+    lm = vertical3d.level_map(room_id)
+    if to_fl not in maps or current not in maps:
+        await send_to(ws, "error", {"msg": "That floor is not registered"})
+        return
+    try:
+        cx, cy = int(msg["tx"]), int(msg["ty"])
+    except (KeyError, TypeError, ValueError):
+        return
+    start_origin, side = footprint.occupied_origin(maps[current], tok)
+    goal = (to_fl, footprint.clamp_origin(maps[to_fl], footprint.center_to_anchor((cx, cy), side), side))
+    if start_origin == goal[1] and current == to_fl:
+        return
+    cand = _state_token(tok, goal, maps)
+    if not vertical3d.volume_final_valid(room_id, cand, _all_tokens(room_id), maps, lm):
+        await send_to(ws, "error", {"msg": "Invalid 3D teleport destination for this footprint"})
+        return
+    mp = maps[to_fl]
+    x, y = _state_pixel(mp, *goal[1])
+    db.x("UPDATE tokens SET floor=?, x=?, y=?, z=? WHERE id=?",
+         (to_fl, x, y, _cell_elev(mp, *goal[1]), tok["id"]))
+    tok["floor"], tok["x"], tok["y"] = to_fl, x, y
+    await send_property_to_interested(room_id, tok, "token_floor",
+                                      {"token_id": tok["id"], "floor": to_fl})
+    await broadcast_token_step(room_id, tok, x, y, goal[1][0], goal[1][1])
+    if _carries_riders(tok["id"]):
+        await carry_riders(room_id, tok["id"])
+    if tok["owner_user_id"] is not None:
+        async with map_lock(room_id):
+            mp = get_map(room_id, to_fl)
+            visible, _ = _reveal_player_token(mp, tok)
+            newly = mapmodel.reveal_cells(mp, visible)
+            if newly:
+                set_map(room_id, mp, to_fl)
+        if newly:
+            await send_to_plane_viewed(room_id, to_fl, "explored", fog_patch(mp, newly, to_fl))
+    from .grapple import end_grapples_out_of_reach
+    await end_grapples_out_of_reach(room_id, tok)
+    await maybe_grow_map(room_id, tok)
+
+
+async def _move3d(ws, tok, msg, mode, budget):
+    """D114 Phase 6: flight through a legitimate open vertical column. Terrain,
+    openings and collision are checked by path.py + vertical3d.py, never by a
+    second geometry implementation."""
+    from . import vertical3d
+    room_id = tok["room_id"]
+    current = tok.get("floor") or ""
+    to_fl = str(msg["floor"] or current) if "floor" in msg else current
+    maps = vertical3d.maps_for(room_id)
+    lm = vertical3d.level_map(room_id)
+    if to_fl not in maps or current not in maps:
+        await send_to(ws, "error", {"msg": "That floor is not registered"})
+        return
+    try:
+        cx, cy = int(msg["tx"]), int(msg["ty"])
+    except (KeyError, TypeError, ValueError):
+        return
+    start_origin, side = footprint.occupied_origin(maps[current], tok)
+    start = (current, start_origin)
+    goal_anchor = footprint.clamp_origin(
+        maps[to_fl], footprint.center_to_anchor((cx, cy), side), side)
+    goal = (to_fl, goal_anchor)
+    if start == goal:
+        return
+    proposed = msg.get("path")
+    raw = proposed if isinstance(proposed, list) else []
+    states = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            await send_to(ws, "error", {"msg": "3D path points need x and y", "code": "route_invalid"})
+            return
+        fl = str(entry["floor"] or current) if "floor" in entry else current
+        if fl not in maps:
+            await send_to(ws, "error", {"msg": "That floor is not registered"})
+            return
+        try:
+            cell = (int(entry["x"]), int(entry["y"]))
+        except (KeyError, TypeError, ValueError):
+            await send_to(ws, "error", {"msg": "3D path points need x and y", "code": "route_invalid"})
+            return
+        states.append((fl, cell))
+
+    blocked_edges = {fl: mapmodel.blocked_edges(mp) for fl, mp in maps.items()}
+    all_tokens = _all_tokens(room_id)
+
+    def state_ok(state):
+        cand = _state_token(tok, state, maps)
+        return vertical3d.volume_final_valid(room_id, cand, all_tokens, maps, lm)
+
+    def vertical_ok(prev, nxt, cells):
+        cand = _state_token(tok, prev, maps)
+        return vertical3d.vertical_path_clear(room_id, cand, prev[0], nxt[0], maps, lm)
+
+    def step_ok(prev_state, state):
+        pf, porigin = prev_state
+        fl, origin = state
+        if pf != fl:
+            return (abs(lm.get(pf, 99) - lm.get(fl, 99)) == 1
+                    and vertical_ok(prev_state, state, footprint.origin_cells(maps[pf], porigin, side)))
+        return step_legal(maps[pf], porigin, origin, blocked_edges=blocked_edges.get(pf) or set(),
+                          footprint=side, mode=mode)
+
+    if raw:
+        cur = start
+        for state in states:
+            if not step_ok(cur, state) or not state_ok(state):
+                await send_to(ws, "error", {"msg": "Route changed — please plan it again",
+                                            "code": "route_invalid"})
+                return
+            cur = state
+        if cur != goal:
+            await send_to(ws, "error", {"msg": "Route changed — please plan it again",
+                                        "code": "route_invalid"})
+            return
+        path = states
+    else:
+        path = find_path_3d(start, goal, maps, lm, side, mode=mode,
+                            vertical_ok=vertical_ok, state_ok=state_ok,
+                            blocked_edges=blocked_edges)
+        if path is None:
+            await send_to(ws, "error", {"msg": "No vertical flight path there"})
+            return
+
+    await _cancel_walk(tok["id"])
+    _walks[tok["id"]] = asyncio.create_task(walk3d(room_id, tok["id"], path, mover_ws=ws,
+                                                   budget=budget, mode=mode))
+    await _announce_move(room_id, tok["id"], True)
+
+
+async def walk3d(room_id, token_id, path, mover_ws=None, budget=None, mode="fly"):
+    from . import vertical3d
+    stop_reason = None
+    spent = 0
+    has_riders = _carries_riders(token_id)
+    try:
+        for i, state in enumerate(path):
+            tok = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
+            if tok is None or tok["room_id"] != room_id:
+                return
+            downed = _movement_block_reason(tok)
+            if downed:
+                stop_reason = "downed"
+                if mover_ws is not None:
+                    await send_to(mover_ws, "error", {"msg": downed})
+                break
+
+            legal = False
+            x = y = None
+            old_floor = tok.get("floor") or ""
+            cell = state[1]
+            fl = state[0]
+            async with map_lock(room_id):
+                maps = vertical3d.maps_for(room_id)
+                lm = vertical3d.level_map(room_id)
+                current = old_floor
+                if current in maps and fl in maps:
+                    prev = (current, footprint.occupied_origin(maps[current], tok)[0])
+                    pf, pcell = prev
+                    side = footprint.token_span(tok)
+                    all_tokens = _all_tokens(room_id)
+                    if pf == fl:
+                        legal = step_legal(maps[pf], pcell, cell,
+                                           blocked_edges=mapmodel.blocked_edges(maps[pf]),
+                                           footprint=side, mode=mode)
+                    else:
+                        legal = (abs(lm.get(pf, 99) - lm.get(fl, 99)) == 1
+                                 and vertical3d.vertical_path_clear(
+                                     room_id, _state_token(tok, prev, maps), pf, fl, maps, lm))
+                    if legal:
+                        cand = _state_token(tok, state, maps)
+                        legal = vertical3d.volume_final_valid(room_id, cand, all_tokens, maps, lm)
+                    if legal:
+                        step_c = (movecost.vertical_cost() if pf != fl
+                                  else movecost.route_cost(maps[pf], [pcell, cell], side, mode=mode))
+                        if budget is not None and spent + step_c > budget:
+                            stop_reason = "budget"
+                            legal = False
+                        else:
+                            spent += step_c
+                    if legal:
+                        mp = maps[fl]
+                        x, y = _state_pixel(mp, *cell)
+                        db.x("UPDATE tokens SET floor=?, x=?, y=?, z=? WHERE id=?",
+                             (fl, x, y, _cell_elev(mp, *cell), token_id))
+                        tok["floor"], tok["x"], tok["y"] = fl, x, y
+
+            if stop_reason == "budget":
+                if mover_ws is not None:
+                    await send_to(mover_ws, "error", {"msg": "Out of movement — Dash or End Turn"})
+                break
+            if not legal:
+                stop_reason = "path_blocked"
+                if mover_ws is not None:
+                    await send_to(mover_ws, "error", {"msg": "Your path was blocked"})
+                break
+            if old_floor != fl:
+                await send_property_to_interested(room_id, tok, "token_floor",
+                                                  {"token_id": token_id, "floor": fl})
+            await broadcast_token_step(room_id, tok, x, y, cell[0], cell[1])
+            if has_riders:
+                await carry_riders(room_id, token_id)
+            reveals = tok["owner_user_id"] is not None
+            async with map_lock(room_id):
+                mp = get_map(room_id, fl)
+                visible, _ = _reveal_player_token(mp, tok)
+                newly = mapmodel.reveal_cells(mp, visible) if reveals else []
+                map_dirty = False
+                trap = at_cell(mp["traps"], *cell)
+                if trap and not trap.get("triggered"):
+                    trap["discovered"] = True
+                    set_map(room_id, mp, fl)
+                    stop_reason = "trap" if await hit_trap(room_id, tok, trap) else stop_reason
+                    map_dirty = True
+                loot = at_cell(mp["loot"], *cell)
+                if loot and loot.get("taken_by") is None:
+                    if await take_loot(room_id, tok, loot):
+                        map_dirty = True
+                if newly or map_dirty:
+                    set_map(room_id, mp, fl)
+            if newly:
+                await send_to_plane_viewed(room_id, fl, "explored", fog_patch(mp, newly, fl))
+            if map_dirty:
+                await broadcast(room_id, "map_changed", None)
+            if stop_reason:
+                break
+            if i < len(path) - 1:
+                await asyncio.sleep(STEP_DELAY)
+        await _announce_move(room_id, token_id, False, stop_reason)
+        _moved = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
+        if _moved is not None:
+            from .grapple import end_grapples_out_of_reach
+            await end_grapples_out_of_reach(room_id, _moved)
+        if spent:
+            updated = CB.spend_move(room_id, token_id, spent, mode=mode)
+            if updated is not None:
+                await broadcast(room_id, "initiative", updated)
+        if stop_reason is None:
+            final = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
+            if final is not None:
+                await maybe_grow_map(room_id, final)
+    except asyncio.CancelledError:
+        await _announce_move(room_id, token_id, False, "cancelled")
+        raise
 
 
 async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk"):
@@ -376,6 +673,13 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk")
             if i < len(path) - 1:
                 await asyncio.sleep(STEP_DELAY)
         await _announce_move(room_id, token_id, False, stop_reason)
+        # D112: a grappler that walked away is not itself grappled (so it CAN
+        # move) — it releases every creature now beyond its reach. One check at
+        # walk END; grappled creatures cannot walk at all (blocks_movement).
+        _moved = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
+        if _moved is not None:
+            from .grapple import end_grapples_out_of_reach
+            await end_grapples_out_of_reach(room_id, _moved)
         if spent:                                  # charge the turn's move meter (D74,
             updated = CB.spend_move(room_id, token_id, spent, mode=mode)   # D83 per-mode)
             if updated is not None:
@@ -453,7 +757,7 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
     tx, ty = footprint.clamp_origin(mp, (tx, ty), side)          # WORLD clamp (D72)
     allowed = _preview_allowed_cells(mp, room_id, user, is_dm,
                                      floor=tok.get("floor") or "")
-    if not footprint.valid_final_position(mp, tok, (tx, ty), _room_tokens(room_id, tok["id"], tok.get("floor") or ""), allowed):
+    if not footprint.valid_final_position(mp, tok, (tx, ty), _room_tokens(room_id, tok["id"], tok.get("floor") or ""), allowed, mode=mode):
         await send_to(ws, "error", {"msg": "No path there"})
         return
     path = find_path(mp, origin, (tx, ty),

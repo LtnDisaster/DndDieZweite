@@ -224,12 +224,19 @@ def occupied_cells(mp, token):
     return set(origin_cells(mp, origin, side))
 
 
-def valid_terrain_position(mp, origin, side, allowed_cells=None):
+def valid_terrain_position(mp, origin, side, allowed_cells=None, mode="walk"):
+    """Terrain fit. D114: flight may enter cells with open volume (including
+    void); every other mode keeps the canonical standable-floor rule."""
     if not origin_in_bounds(mp, origin, side):
         return False
     for (x, y) in origin_cells(mp, origin, side):
         t = mapmodel.terrain_at(mp, x, y)          # WORLD cell (D72)
-        if t is None or not mapmodel.walkable(t):
+        if t is None:
+            return False
+        if mode == "fly":
+            if not mapmodel.body_open(t):
+                return False
+        elif not mapmodel.walkable(t):
             return False
         if allowed_cells is not None and (x, y) not in allowed_cells:
             return False
@@ -280,9 +287,9 @@ def collision_cells(mp, tokens, token):
     return occupied
 
 
-def valid_final_position(mp, token, origin, tokens=None, allowed_cells=None):
+def valid_final_position(mp, token, origin, tokens=None, allowed_cells=None, mode="walk"):
     side = token_span(token)
-    if not valid_terrain_position(mp, origin, side, allowed_cells):
+    if not valid_terrain_position(mp, origin, side, allowed_cells, mode=mode):
         return False
     cells = set(origin_cells(mp, origin, side))
     return not (cells & collision_cells(mp, tokens or [], token))

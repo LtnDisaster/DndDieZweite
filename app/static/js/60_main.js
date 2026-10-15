@@ -82,6 +82,10 @@ async function addSound(){
 }
 function triggerAmbience(kind, extra={}){ wsSend({ type:kind, ...extra }); }
 function updateMoveControls(){
+  // D113 Phase 5: a trap control on the token's own cell, for whoever controls
+  // a token (the DM may still target any adjacent cell over the trap channel).
+  const th = $("traphud");
+  if (th) th.classList.toggle("hidden", !(state.room && ownToken()));
   const b = $("btn-stop-move"); if (!b) return;
   b.classList.toggle("hidden", !(state.room && state.room.role === "dm" && state.sel && state.moving.has(state.sel)));
 }
@@ -236,6 +240,12 @@ function wire(){
     draw();
   };
   $("btn-stop-move").onclick = () => { if (state.sel) wsSend({ type:"stop_move", token_id: state.sel }); };
+  // D113 Phase 5: search / disarm a trap on the controlled token's cell.
+  for (const [id, action] of [["btn-trap-search","search"], ["btn-trap-disarm","disarm"]]){
+    const el = $(id);
+    if (el) el.onclick = () => { const t = ownToken(); if (!t) return toast("Select your token first");
+      const c = tokenCenterCell(t); wsSend({ type:"trap", action, token_id: t.id, x: c.cx, y: c.cy }); };
+  }
   $("view-tactical").onclick = () => setViewMode("tactical");
   $("view-diorama").onclick = () => setViewMode("diorama");
   renderViewToggle();
@@ -266,6 +276,7 @@ function wire(){
     b.onclick = () => { state.brush = b.dataset.b;
       document.querySelectorAll(".brush").forEach(x => x.classList.toggle("active", x === b));
       $("trap-fields").classList.toggle("hidden", b.dataset.b !== "trap");
+      const tef = $("trap-effect-row"); if (tef) tef.classList.toggle("hidden", b.dataset.b !== "trap");
       $("loot-fields").classList.toggle("hidden", b.dataset.b !== "loot");
       const of = $("obj-fields"); if (of) of.classList.toggle("hidden", b.dataset.b !== "obj");
       $("door-fields").classList.toggle("hidden", b.dataset.b !== "door");

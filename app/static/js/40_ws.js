@@ -108,7 +108,11 @@ function connectWS(code){
                        if (state.room && state.room.role === "dm" && typeof renderViewFloor === "function") renderViewFloor();
                        if (t.owner_user_id === state.me.id) refreshRoom();  // D88: view follows your token
                        if (state.sel === p.token_id) renderSheet(t); } break; }
-      case "token_darkvision": { const t = state.tokens.find(t => t.id === p.token_id);
+       case "token_height": { const t = state.tokens.find(t => t.id === p.token_id);
+                      if (t){ t.height_ft = p.height_ft === undefined ? null : p.height_ft;
+                              t.elevation_ft = p.elevation_ft | 0;
+                              if (state.sel === p.token_id) renderSheet(t); } break; }
+       case "token_darkvision": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t) t.darkvision = p.radius | 0; } break;   // D89: owner-only sense
       case "floors_changed": { state.floors = p.floors || [""];  // D86: DM curated floor list
                      if (typeof renderViewFloor === "function") renderViewFloor();
@@ -160,7 +164,9 @@ function upsertToken(p){
   state.ghosts = state.ghosts.filter(g => g.id !== p.id);
   const t = state.tokens.find(t => t.id === p.id);
   if (t){ Object.assign(t, {label:p.label, color:p.color, owner_user_id:p.owner_user_id,
-                            character_id:p.character_id}); t.atx = p.x; t.aty = p.y;
+                            character_id:p.character_id, floor:p.floor || "",
+                            height_ft:p.height_ft === undefined ? null : p.height_ft,
+                            elevation_ft:p.elevation_ft | 0}); t.atx = p.x; t.aty = p.y;
           if (Math.abs(t.x - p.x) > cellSize()*3){ t.x = p.x; t.y = p.y; } }
   else state.tokens.push({...p, atx:null, aty:null});
 }

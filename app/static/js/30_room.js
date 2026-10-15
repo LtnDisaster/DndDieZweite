@@ -1070,6 +1070,48 @@ function wireLightRow(tok){
     $("dv-r").onkeydown = e => { if (e.key === "Enter") senddv(); };
   }
 }
+function _heightRowHtml(tok){
+  const h = tok.height_ft, e = (tok.elevation_ft | 0);
+  const dh = tokenDefaultHeightFt(tok);
+  return `<div class="row" title="Vertical body (D114): height is the creature's vertical extent, not a ceiling. Empty height uses the size default. A 30 ft body spans three declared planes if a full-footprint opening connects them.">`
+    + `<span class="tiny"><b>Height</b></span><input id="vh-ft" type="number" min="0" max="200" step="5" value="${h == null ? "" : h}" placeholder="${dh}" style="width:58px">`
+    + `<span class="tiny">ft (default ${dh})</span>`
+    + `<span class="tiny"><b>Flying</b></span><input id="vh-elev" type="number" min="0" max="200" step="5" value="${e}" style="width:58px">`
+    + `<span class="tiny">ft under-edge</span><button id="vh-apply">Apply</button></div>`;
+}
+function wireHeightRow(tok){
+  const b = $("vh-apply"); if (!b) return;
+  const send = () => {
+    const raw = $("vh-ft").value;
+    const h = raw === "" ? null : parseInt(raw, 10);
+    const e = parseInt($("vh-elev").value || "0", 10);
+    if (h !== null && (!Number.isInteger(h) || h < 0 || h > 200)){ toast("Body height: 0 to 200 ft"); return; }
+    if (!Number.isInteger(e) || e < 0 || e > 200){ toast("Flying elevation: 0 to 200 ft"); return; }
+    wsSend({ type:"token_height", token_id: tok.id, height_ft: h, elevation_ft: e });
+  };
+  b.onclick = send;
+  $("vh-ft").onkeydown = e => { if (e.key === "Enter") send(); };
+  $("vh-elev").onkeydown = e => { if (e.key === "Enter") send(); };
+}
+function _verticalMoveRowHtml(tok){
+  const sp = tokenSpeeds(tok), fls = state.floors && state.floors.length ? state.floors : [""];
+  const cur = tok.floor || "", can = sp.fly > 0 && state.plan == null;
+  if (!can) return "";
+  const opts = fls.filter(f => f !== cur)
+    .map(f => `<option value="${esc(f)}">${f === "" ? "Ground (primary)" : esc(f)}</option>`).join("");
+  if (!opts) return "";
+  return `<div class="row" title="D114: fly vertically through a full-footprint opening to the selected plane. The server finds the 3D route, charges the fly budget and refuses a solid ceiling or blocked volume.">`
+    + `<span class="tiny"><b>Vertical flight</b></span><select id="vf-floor" style="max-width:120px">${opts}</select>`
+    + `<button id="vf-go">Fly ↕</button></div>`;
+}
+function wireVerticalMoveRow(tok){
+  const b = $("vf-go"); if (!b) return;
+  b.onclick = () => {
+    const c = tokenCenterCell(tok);
+    wsSend({ type:"move", token_id: tok.id, tx: c.cx, ty: c.cy, teleport:false,
+             mode:"fly", floor: $("vf-floor").value });
+  };
+}
 function _floorRowHtml(tok){
   const fls = state.floors && state.floors.length ? state.floors : [""];
   const cur = tok.floor || "";
@@ -1180,7 +1222,9 @@ function renderSheet(tok){
   }
   const mod = v => { const m2 = Math.floor(((v||10)-10)/2); return (m2>=0?"+":"")+m2; };
   const isDM = state.room.role === "dm", own = tok.owner_user_id === state.me.id;
-  const spanRow = (isDM || own) ? _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) : "";
+  const canManageToken = isDM || own || tok.controller_user_id === state.me.id;
+  let spanRow = (isDM || own) ? _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _heightRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) + _verticalMoveRowHtml(tok) : "";
+  if (canManageToken && !spanRow) spanRow = _heightRowHtml(tok) + _verticalMoveRowHtml(tok);
   const ac = ch.ac_total != null ? ch.ac_total : ch.ac;
   const inv = (ch.items || []);
   const invRows = inv.map(it => {
@@ -1196,6 +1240,8 @@ function renderSheet(tok){
         btns.push(`<button data-a="grip" data-id="${it.id}" data-grip="${it.grip === "two" ? "one" : "two"}" title="grip determines the damage dice">${it.grip === "two" ? "✋ two→one" : "🤲 one→two"}</button>`); }
     if (isDM && it.magic && !it.identified) btns.push(`<button data-a="identify" data-id="${it.id}">Identify</button>`);
     if (isDM && it.recharge) btns.push(`<button data-a="recharge" data-id="${it.id}">Recharge</button>`);
+    // D112: authorise this character item as stealable (Model B subset).
+    if (isDM) btns.push(`<button data-a="pk" data-id="${it.id}" title="Authorise this item for a pickpocket steal (Model B)">${it.pick ? "🤝 steal ✓" : "🤝 steal"}</button>`);
     return `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind]||"🎒"} ${esc(it.name)}${it.qty > 1 ? " ×" + it.qty : ""}</span> <small>${chips}</small>
       <small style="opacity:.6">${it.kind==="armor" ? ("AC "+(it.ac||(it.acBonus?("+"+it.acBonus):""))) : (it.heal?("+HP "+it.heal):"")}</small>
       ${it.unidentified ? "" : `<small style="opacity:.55"> ${esc(it.desc||"")}</small>`}<span class="inv-btns">${btns.join("")}</span></div>`;
@@ -1244,22 +1290,49 @@ function renderSheet(tok){
       `<button id="bld-apply" class="primary" type="button">⬆ Apply</button></div>` +
       `<textarea id="bld-ch" spellcheck="false" title="choices JSON" placeholder='{"skills":[...],"subclass":"...","levels":{"4":{"ability":{"dex":2}}}}'` +
       ` style="width:100%;min-height:48px;font-size:.72rem">${esc(JSON.stringify(led.decisions || {}))}</textarea>` +
-      `<div id="bld-out" class="meta" style="opacity:.85"></div></details>`;
+      `<div id="bld-out" class="meta" style="opacity:.85"></div>` +
+      // D109: weapon masteries — grants from the level chronology or a DM
+      // grant; the entitlement, not the weapon, unlocks a mastery effect.
+      `<details id="mas-card" class="sheet-sec"><summary><h3>🎖 Weapon Masteries</h3></summary>` +
+      `<div id="mas-out" class="meta" style="opacity:.85">open to load</div></details>` +
+      `</details>`;
   })() : "";
 
   const attackBlock = ((own || isDM) && (der.attack_profiles || []).length) ?
     (() => { const tg = state.tokens.filter(t => t.id !== tok.id);
       return `<details class="sheet-sec" open><summary><h3>Attacks <small style="opacity:.6">server-derived</small></h3></summary>` +
       der.attack_profiles.map(p =>
-        `<div class="skrow"><span>⚔️ ${esc(p.name)}${p.versatile ? ` <small style="opacity:.5">(${p.grip})</small>` : ""}${p.gated ? ` <small title="requires attunement — bonuses inert">🔒</small>` : ""} <b>${sgn(p.to_hit)}</b> ` +
+        `<div class="skrow"><span>⚔️ ${esc(p.name)}${p.versatile ? ` <small style="opacity:.5">(${p.grip})</small>` : ""}${p.gated ? ` <small title="requires attunement — bonuses inert">🔒</small>` : ""}${p.mastery ? ` <small title="mastery property" style="opacity:.7">🎖 ${esc(p.mastery)}</small>` : ""} <b>${sgn(p.to_hit)}</b> ` +
         `<small style="opacity:.6">${p.dmg}${p.dmg_bonus ? (p.dmg_bonus >= 0 ? "+" : "") + p.dmg_bonus : ""}${p.dmg_type ? " " + p.dmg_type : ""}` +
         `${p.extra_dmg ? " +" + p.extra_dmg + (p.extra_dmg_type ? " " + p.extra_dmg_type : "") : ""}` +
         `${p.range_ft ? " · " + p.range_ft + " ft" + (p.range_long_ft ? "/" + p.range_long_ft : "") : (p.reach_ft ? " · reach " + p.reach_ft + " ft" : "")}</small></span>` +
         (own ? `<select class="atk-adv"><option value="">—</option><option value="adv">adv</option><option value="dis">dis</option></select>` +
-               `<select class="atk-slot"><option value="action">Action</option><option value="bonus">Bonus</option></select>` +
+               `<select class="atk-slot"><option value="action">Action</option><option value="bonus">Bonus</option>` +
+               `${(!p.ranged && p.light) ? `<option value="nick" title="Nick: the Light extra attack, part of the Attack action">Nick</option>` : ""}</select>` +
+               `${p.mastery ? `<label title="apply ${esc(p.mastery)} on this attack (server-enforced)" style="opacity:.8"><input class="atk-mastery" type="checkbox" value="${esc(p.mastery)}">🎖</label>` : ""}` +
+               `${p.mastery === "cleave" ? `<select class="atk-tgt2" title="Cleave: second target"><option value="">2nd tgt —</option>${tg.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("")}</select>` : ""}` +
                `<select class="atk-tgt"><option value="">no target</option>${tg.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("")}</select>` +
-               `<button class="atk-go primary" data-id="${p.item_id}">Attack</button>` : "") + `</div>`).join("") +
-      `</details>`; })() : "";
+       `<button class="atk-go primary" data-id="${p.item_id}">Attack</button>` : "") + `</div>`).join("") +
+       `</details>`; })() : "";
+  // D112: the 2024 special melee + pickpocket actions act through THIS token;
+  // the whole resolution is server-side (opposed/DC check, save, size/reach,
+  // action economy, op-id). The sheet only names the actor and the target.
+  const specialBlock = (own || isDM) ? (() => {
+    const tg = state.tokens.filter(t => t.id !== tok.id);
+    const opts = tg.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("");
+    const grappled = (tok.conds || []).some(c => String(c.k || "").toLowerCase() === "grappled");
+    return `<details class="sheet-sec"><summary><h3>🤼 Special &amp; Stealth <small style="opacity:.6">2024 · server</small></h3></summary>` +
+      `<div class="skrow"><span>Target</span>` +
+      `<select class="sp-tgt"><option value="">— none —</option>${opts}</select>` +
+      `<button class="sp-go" data-m="grapple" title="Grapple: your Str check sets a DC, the target saves Str or Dex">🤼 Grapple</button>` +
+      `<button class="sp-go" data-m="shove_prone" title="Shove to knock prone">⬇ Prone</button>` +
+      `<button class="sp-go" data-m="shove_push" title="Shove to push 5 ft (forced move)">➡ Push</button>` +
+      `<button class="sp-go" data-m="pickpocket" title="Pickpocket: concealed Sleight of Hand; the DM sees the result">🤝 Pick</button>` +
+      (grappled ? `<button class="sp-go" data-m="escape" title="Escape: Athletics or Acrobatics vs the grapple DC">🤼 Escape</button>` : "") +
+      `</div>` +
+      `<div class="meta" style="opacity:.7;font-size:.72rem">Escape needs no target. Grapple/Shove/Pick need an ADJACENT, visible target and cost your action (in initiative).</div>` +
+      `</details>`;
+  })() : "";
   let bookBlock = "";
   if (ch.has_spellbook || (spells && spells.length)){
     const slotLine = [];
@@ -1359,7 +1432,7 @@ function renderSheet(tok){
     ${conditionsHtml(tok)}
     ${defenseHtml(ch.defenses)}
     ${inv.length ? `<div class="inv"><div class="wlabel">Inventory <small style="opacity:.6">(attuned ${(ch.items||[]).filter(x=>x.attunable&&x.attuned).length}/${der.attune_max || 3})</small></div>${invRows}</div>` : ""}
-    ${attackBlock}${skillBlock}${saveBlock}${bookBlock}${buildBlock}
+    ${attackBlock}${specialBlock}${skillBlock}${saveBlock}${bookBlock}${buildBlock}
     ${_walletBlock}${_weightBlock}${_compBlock}
     <details><summary style="cursor:pointer;font-size:.8rem;opacity:.7">Notes</summary><div style="white-space:pre-wrap;font-size:.82rem">${esc(ch.notes)}</div></details>`;
   for (const b of body.querySelectorAll(".inv-btns button")) b.onclick = () => {
@@ -1369,6 +1442,8 @@ function renderSheet(tok){
     else if (b.dataset.a === "attune") wsSend({ type:"attune", char_id: ch.id, item_id: id });
     else if (b.dataset.a === "identify") wsSend({ type:"identify", char_id: ch.id, item_id: id });
     else if (b.dataset.a === "recharge") wsSend({ type:"recharge", char_id: ch.id, item_id: id });
+    else if (b.dataset.a === "pk") wsSend({ type:"pickable", char_id: ch.id, item_id: id,
+             action: (b.textContent || "").indexOf("✓") >= 0 ? "clear" : "set", op_id: invOpId() });
   };
   // D99 wiring — money (authorised intents only) + companion controls (reuse the
   // existing token_controller / token_mount / del_token / add_token handlers).
@@ -1413,11 +1488,29 @@ function renderSheet(tok){
   for (const b of body.querySelectorAll(".sv-roll")) b.onclick = () => wsSend({ type:"roll", kind:"save", ability: b.dataset.ab, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
   for (const b of body.querySelectorAll(".atk-go")) b.onclick = () => {
     const row = b.closest(".skrow");
-    wsSend({ type:"roll", kind:"attack", item_id: b.dataset.id, token_id: tok.id,
+    const msg = { type:"roll", kind:"attack", item_id: b.dataset.id, token_id: tok.id,
              target_id: row.querySelector(".atk-tgt").value || null,
              adv: row.querySelector(".atk-adv").value || null,
              slot: row.querySelector(".atk-slot").value,
-             visibility:_vis(), op_id: invOpId() });
+             visibility:_vis(), op_id: invOpId() };
+    const ms = row.querySelector(".atk-mastery");
+    if (ms && ms.checked) { msg.mastery = ms.value;
+      const t2 = row.querySelector(".atk-tgt2"); if (t2) msg.target2_id = t2.value || null; }
+    wsSend(msg);
+  };
+  // D112: Special & Stealth — every rule runs server-side; the sheet supplies
+  // only the actor (this token), the target, and a fresh op-id.
+  for (const b of body.querySelectorAll(".sp-go")) b.onclick = () => {
+    const m = b.dataset.m, row = b.closest(".skrow");
+    if (m === "escape") { wsSend({ type: "escape", token_id: tok.id, op_id: invOpId() }); return; }
+    const sel = row.querySelector(".sp-tgt"), tgt = sel && sel.value;
+    if (!tgt) { toast("Pick a target first"); return; }
+    const msg = { token_id: tok.id, target_id: +tgt, op_id: invOpId(), visibility: _vis() };
+    if (m === "grapple") { msg.type = "grapple"; }
+    else if (m === "shove_prone") { msg.type = "shove"; msg.mode = "prone"; }
+    else if (m === "shove_push") { msg.type = "shove"; msg.mode = "push"; }
+    else if (m === "pickpocket") { msg.type = "pickpocket"; }
+    wsSend(msg);
   };
   const _bld = () => { const c = $("bld-class"); return c ? { cls: c.value, to: +$("bld-to").value, raw: $("bld-ch").value } : null; };
   const bp = $("bld-plan");
@@ -1447,12 +1540,50 @@ function renderSheet(tok){
       else if (j.needs_choice) out.innerHTML = `<span style="color:#f1c40f">choices still needed</span><br><small>${esc(JSON.stringify(j.needs_choice))}</small>`;
       else out.innerHTML = `<span style="color:#e74c3c">${esc(j.error || j.reason || "refused")}</span>`;
     } catch (e) { out.textContent = e.message; } };
+  // D109: mastery card — lazy GET report, one pending pick at a time, DM grants.
+  const masCard = $("mas-card");
+  if (masCard) {
+    const masPost = async (path, body) => {
+      try { const r = await fetch(`/api/build/${state.room.code}/${ch.id}${path}`,
+            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const j = await r.json();
+        if (!j.ok) toast("🎖 " + (j.error || j.reason || "refused"));
+        else { await refreshRoom();
+          renderSheet(state.tokens.find(t => t.id === state.sel) || null); }
+      } catch (e) { toast("🎖 " + e.message); }
+    };
+    const masLoad = async () => {
+      const out = $("mas-out"); if (!out) return;
+      try {
+        const d = await api(`/build/${state.room.code}/${ch.id}/mastery`);
+        const grants = (d.grants || []).map(g =>
+          `<div>${g.id ? "✓" : "◻"} ${g.via === "level" ? "L" + g.level : "DM grant"}: ` +
+          `<b>${esc(g.id || "— pending —")}</b></div>`).join("") ||
+          `<div style="opacity:.6">no masteries yet — they accrue as you level</div>`;
+        const pend = (d.grants || []).find(g => !g.id);
+        const pick = pend ? `<div class="row"><select id="mas-pick-sel">` +
+            (pend.pool || []).map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("") +
+            `</select><button id="mas-pick" class="primary" type="button">Choose</button></div>` : "";
+        const grant = state.room.role === "dm" ? `<div class="row" style="opacity:.85">` +
+            `<select id="mas-grant-sel">${["cleave","graze","nick","push","sap","slow","topple","vex"]
+              .map(m => `<option value="${m}">${m}</option>`).join("")}</select>` +
+            `<button id="mas-grant" class="ghost" type="button">DM grant</button></div>` : "";
+        out.innerHTML = grants + pick +
+          (d.allowed && d.allowed.length ? `<div>unlocked: ${esc(d.allowed.join(", "))}</div>` : "") + grant;
+        const pb = $("mas-pick");
+        if (pb) pb.onclick = () => masPost("/mastery", { pick: $("mas-pick-sel").value });
+        const gb = $("mas-grant");
+        if (gb) gb.onclick = () => masPost("/mastery/grant", { mastery: $("mas-grant-sel").value });
+      } catch (e) { out.textContent = e.message; }
+    };
+    masCard.addEventListener("toggle", () => { if (masCard.open) masLoad(); });
+  }
   wireConditions(tok);
   wireHpStates(tok);
   wireDeath(tok);
   wireSpanRow(tok);
-  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireLightRow(tok);
-  wireRotRow(tok); wireMoveModeRow(tok);
+  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireHeightRow(tok); wireLightRow(tok);
+  wireRotRow(tok); wireMoveModeRow(tok); wireVerticalMoveRow(tok);
   $("hp-btns").classList.toggle("hidden", state.room.role !== "dm" || !tok.character_id);
   $("hp-adv").classList.toggle("hidden", state.room.role !== "dm");
   function v(s,k){ const x = s && s[k]; return typeof x === "number" ? x : 10; }
@@ -1495,7 +1626,7 @@ function renderNpcSheet(tok){
     const d = n.spell_slots[String(lv)] || n.spell_slots[lv] || {max:0};
     slotCells.push(`<label class="slotcell">L${lv}<input class="npc-slot" data-lv="${lv}" type="number" min="0" max="9" value="${d.max||0}" style="width:36px"></label>`);
   }
-  body.innerHTML = _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) + `
+  body.innerHTML = _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _heightRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) + _verticalMoveRowHtml(tok) + `
     <div class="row"><input id="npc-name" placeholder="NPC name" value="${esc(tok.label)}" maxlength="32">
       <select id="npc-size">${["Tiny","Small","Medium","Large","Huge","Gargantuan"].map(s => `<option value="${s}" ${(tok.size||"Medium")===s?"selected":""}>${s}</option>`).join("")}</select>
       <select id="npc-disp"><option value="">neutral</option>${["friend","neutral","hostile"].map(d => `<option value="${d}" ${(tok.disposition||"")===d?"selected":""}>${d}</option>`).join("")}</select>
@@ -1633,8 +1764,8 @@ function renderNpcSheet(tok){
                                          mount_id: (+mnt.value) || null });
   $("npc-to-best").onclick = () => saveNpcToBestiary(n, ($("npc-name").value || "NPC").slice(0,32), tok);
   wireSpanRow(tok);
-  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireLightRow(tok);
-  wireRotRow(tok); wireMoveModeRow(tok);
+  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireHeightRow(tok); wireLightRow(tok);
+  wireRotRow(tok); wireMoveModeRow(tok); wireVerticalMoveRow(tok);
   renderNpcSpells(tok);
   renderNpcAttacks(tok);
   renderNpcAbilities(tok);
@@ -2008,6 +2139,15 @@ function renderInv(){
         btns.push(`<button data-a="reveal" data-id="${it.id}">☠ reveal</button>`);
       if (isDM && it.curse && it.curse.whisper)
         btns.push(`<button data-a="whisper" data-id="${it.id}" title="whisper the stored curse text to the current owner">☠ whisper</button>`);
+      // D113: arming (which event + which effect cell) and activation are DM
+      // authoring over the SAME curse metadata; they are orthogonal to reveal —
+      // the server keeps activation independent of disclosure.
+      if (isDM && it.curse && it.curse.trigger && it.curse.effects)
+        btns.push(it.curse.active
+          ? `<button data-a="deactivate" data-id="${it.id}" title="curse is ACTIVE and will fire">🔮 active</button>`
+          : `<button data-a="activate" data-id="${it.id}" title="curse is armed but DORMANT — switch it on">💤 dormant</button>`);
+      if (isDM && it.curse)
+        btns.push(`<button data-a="arm" data-id="${it.id}" title="choose which event fires this curse and its effect cell">⚙ arm</button>`);
       if (isDM && it.curse)
         btns.push(`<button data-a="cursee" data-id="${it.id}">☠ edit</button>` +
                   `<button data-a="cursex" data-id="${it.id}" style="color:var(--red)">☠ ✕</button>`);
@@ -2017,7 +2157,8 @@ function renderInv(){
       // whisper text only reaches its target through the private chat channel.
       const curse = it.curse ? "☠ " + esc(it.curse.name || "A curse") +
                     (it.curse.desc ? " — " + esc(it.curse.desc) : "") +
-                    (isDM && it.curse.whisper ? " 📜" : "") : "";
+                    (isDM && it.curse.whisper ? " 📜" : "") +
+                    (isDM && it.curse.active ? " 🔮" : "") : "";
       const sub = [known ? esc(it.desc || "") : "unidentified", curse,
                    it.weight ? it.weight + " lb" : ""].filter(Boolean).join(" · ");
       return `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind] || "🎒"} ${esc(it.name)}${it.qty > 1 ? " ×" + it.qty : ""}</span>` +
@@ -2050,6 +2191,9 @@ function renderInv(){
           if (window.confirm("Remove the curse from this item?"))
             wsSend({ type: "curse", action: "clear", char_id: ch.id, item_id: id, op_id: invOpId() });
         }
+        else wsSend({ type: "curse", action: a, char_id: ch.id, item_id: id, op_id: invOpId() });
+      } else if (a === "arm" || a === "activate" || a === "deactivate"){
+        if (a === "arm") curseArm({ char_id: ch.id }, inv.find(i => i.id === id) || { id });
         else wsSend({ type: "curse", action: a, char_id: ch.id, item_id: id, op_id: invOpId() });
       }
     });
@@ -2196,6 +2340,20 @@ function curseEdit(scope, it){
            name, desc, whisper, op_id: invOpId() });
 }
 
+function curseArm(scope, it){
+  // D113: choose WHICH event arms this curse and the effect-grammar cell it
+  // runs (the same grammar a magic item uses). The server validates the cell and
+  // refuses a bad one; activation stays a separate, orthogonal switch (⚙/🔮).
+  const c = it.curse || {};
+  const trig = window.prompt("Trigger event that fires the curse\n(use, equip, unequip, on_hit, on_damaged, on_transfer)", c.trigger || "");
+  if (trig === null) return;
+  const effects = window.prompt("Effect cell — JSON, e.g. {\"ops\":[{\"op\":\"condition\",\"key\":\"prone\",\"until\":\"end\"}]}",
+                                c.effects || "");
+  if (effects === null) return;
+  wsSend({ type: "curse", action: "arm", ...scope, item_id: it.id,
+           trigger: trig.trim(), effects, op_id: invOpId() });
+}
+
 function applyCurseUpdate(p){
   // DM-only authoritative patch: the server tells us the stored truth for
   // exactly this instance; local panels render THAT, so they can never drift
@@ -2275,7 +2433,13 @@ function renderInvChest(){
       `<input id="tk-q-${it.id}" type="number" min="1" max="${it.qty}" value="1" style="width:52px">` +
       `<button data-tk="${it.id}" ${ch ? "" : "disabled"}>${src === "loot" ? "Loot" : "Take"}</button>`) +
     (isDM ? `<button data-ce="${it.id}">${it.curse ? "☠ edit" : "☠ curse"}</button>` +
-            (it.curse ? `<button data-cx="${it.id}" style="color:var(--red)">☠ ✕</button>` : "") : "") +
+            (it.curse ? `<button data-arm="${it.id}">⚙ arm</button>` +
+              (it.curse.trigger && it.curse.effects
+                ? `<button data-act="${it.id}">${it.curse.active ? "🔮 active" : "💤 dormant"}</button>` : "") +
+              `<button data-cx="${it.id}" style="color:var(--red)">☠ ✕</button>` : "") : "") +
+    // D112: authorise THIS NPC item as stealable (Model B subset). Only an NPC
+    // container can be flagged here; the server re-inspects so the label flips.
+    (isDM && src === "npc" ? `<button data-pk="${it.id}" title="Authorise this item for a pickpocket steal (Model B)">${it.pick ? "🤝 steal ✓" : "🤝 steal"}</button>` : "") +
     (isDM && src !== "loot" ? `<button data-rm="${it.id}" style="color:var(--red)">Remove</button>` : "") +
     `</span></div>`).join("") || `<div class="meta">${cs.loading ? "opening…" : (src === "loot" ? "Nothing to loot." : "Empty.")}</div>`;
   const own = (ch && ch.items || []).filter(i => !i.unidentified);
@@ -2310,9 +2474,21 @@ function renderInvChest(){
   });
   box.querySelectorAll("button[data-ce]").forEach(b => b.onclick = () =>
     curseEdit(_curseScope, (cs.items || []).find(i => String(i.id) === b.dataset.ce) || { id: b.dataset.ce }));
+  box.querySelectorAll("button[data-arm]").forEach(b => b.onclick = () =>
+    curseArm(_curseScope, (cs.items || []).find(i => String(i.id) === b.dataset.arm) || { id: b.dataset.arm }));
+  box.querySelectorAll("button[data-act]").forEach(b => {
+    const it = (cs.items || []).find(i => String(i.id) === b.dataset.act) || {};
+    wsSend({ type: "curse", action: it.curse && it.curse.active ? "deactivate" : "activate",
+             ..._curseScope, item_id: b.dataset.act, op_id: invOpId() });
+  });
   box.querySelectorAll("button[data-cx]").forEach(b => b.onclick = () => {
     if (window.confirm("Remove the curse from this item?"))
       wsSend({ type: "curse", action: "clear", ..._curseScope, item_id: b.dataset.cx, op_id: invOpId() });
+  });
+  box.querySelectorAll("button[data-pk]").forEach(b => {
+    const it = (cs.items || []).find(i => String(i.id) === b.dataset.pk) || {};
+    wsSend({ type: "pickable", token_id: cs.token_id, item_id: b.dataset.pk,
+             action: it.pick ? "clear" : "set", op_id: invOpId() });
   });
   const put = $("chest-put");
   if (put) put.onclick = () => {

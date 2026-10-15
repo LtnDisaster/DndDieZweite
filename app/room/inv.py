@@ -10,7 +10,7 @@ authorised inspect — never via /state or broadcasts.
 from .. import db, events, floors as FLOOR, gear, inventory as INV
 from . import authz, chat as CHAT
 from .interact import _reach_cells
-from .net import broadcast, get_map, send_to, send_user, sys_msg
+from .net import broadcast, dm_whisper, get_map, send_to, send_user, sys_msg
 
 OPID = 40
 
@@ -186,6 +186,36 @@ async def handle_inv_adjust(ws, room_id, user, is_dm, msg):
     await broadcast(room_id, "inv_changed", None)
 
 
+async def _item_transfer_effects(room_id, to_char_id, item_name, op_id=""):
+    """D113 on_transfer seam: after an OWNERSHIP change committed, the NEW owner's
+    carried curse fires IF it is active AND armed on_transfer. Reuses the one
+    effect core; the claim is keyed to the transfer op_id so a replay or a racing
+    duplicate transfer cannot fire the curse twice. Curse fragments are DM-only.
+    A plain read/sync never calls this — only the committed mutation handlers do."""
+    from .. import effectops
+    tok = db.q1("SELECT * FROM tokens WHERE character_id=? AND room_id=? "
+                "ORDER BY id LIMIT 1", (to_char_id, room_id))
+    fresh = db.q1("SELECT items FROM characters WHERE id=?", (to_char_id,))
+    if tok is None or fresh is None:
+        return
+    items = gear.clean_items(db.j(fresh["items"], []), keep_curse=True)
+    cands = [i for i in items if i["name"] == item_name
+               and _curse_armed(i, "on_transfer")]
+    if not cands:
+        return
+    fired = await effectops.fire(room_id, "on_transfer", token=tok, caster=None,
+                                 items=cands, round_uid=str(op_id or "") + ":transfer")
+    for ctx in fired:
+        for frag in ctx["log"]:
+            await dm_whisper(room_id, f"✨ {frag}")
+
+
+def _curse_armed(item, event):
+    cur = item.get("curse")
+    return bool(isinstance(cur, dict) and cur.get("active")
+                and str(cur.get("trigger", "")) == event and cur.get("effects"))
+
+
 async def handle_inv_transfer(ws, room_id, user, is_dm, msg):
     """Player hands items to another room member's character. Sender must own
     the source sheet (or be DM); the receiver needs no action — but BOTH
@@ -213,11 +243,49 @@ async def handle_inv_transfer(ws, room_id, user, is_dm, msg):
         await send_to(ws, "whisper", {"text": "⚠️ That transfer was already applied."})
         return
     await broadcast(room_id, "inv_changed", None)
+    await _item_transfer_effects(room_id, to["id"], res["name"], _op(msg) or "")
     line = f"🤝 {ch['name']} hands {res['qty']} × {res['name']} to {to['name']}."
     sys_msg(room_id, line)
 
 
 # ---------- equipment ----------
+
+async def _item_equip_effects(room_id, ch, res, op_id=""):
+    """D111 equip/unequip seam — fired AFTER the authoritative swap. The worn
+    set is re-read from the DB (never from the pre-move sheet copy); the op_id
+    rides the claim so a retry cannot fire twice."""
+    from .. import effectops
+    if not isinstance(res, dict):
+        return
+    tok = db.q1("SELECT * FROM tokens WHERE character_id=? AND room_id=? "
+                "ORDER BY id LIMIT 1", (ch["id"], room_id))
+    fresh = db.q1("SELECT items, equipment FROM characters WHERE id=?", (ch["id"],))
+    if tok is None or fresh is None:
+        return
+    items = gear.clean_items(db.j(fresh["items"], []), keep_curse=True)
+    equip = db.j(fresh["equipment"], {}) or {}
+    if res.get("item"):
+        worn = {v for v in equip.values() if v}
+        cands = [i for i in items if i["id"] in worn]
+        event = "equip"
+    else:
+        prev = res.get("prev")
+        cands = [i for i in items if i["id"] == prev]
+        event = "unequip"
+    if not cands:
+        return
+    fired = await effectops.fire(room_id, event, token=tok, caster=tok,
+                                 items=cands, round_uid=str(op_id or ""))
+    for ctx in fired:
+        # An item's OWN effect is the wearer's; a CURSE's effect is not — an
+        # un-revealed curse must not name itself to the owner (D113).
+        curse_src = ctx.get("src") == "curse"
+        for frag in ctx["log"]:
+            if curse_src:
+                await dm_whisper(room_id, f"✨ {frag}")
+            else:
+                await send_user(room_id, ch["user_id"], "whisper", {"text": f"✨ {frag}"})
+
 
 async def handle_inv_equip(ws, room_id, user, is_dm, msg):
     ch = await _sheet_char(ws, room_id, user, is_dm, msg)
@@ -234,6 +302,7 @@ async def handle_inv_equip(ws, room_id, user, is_dm, msg):
         await send_to(ws, "whisper", {"text": "⚠️ That action was already applied."})
         return
     await broadcast(room_id, "inv_changed", None)
+    await _item_equip_effects(room_id, ch, res, _op(msg) or "")
 
 
 async def handle_inv_grip(ws, room_id, user, is_dm, msg):
@@ -575,6 +644,7 @@ async def handle_loot(ws, room_id, user, is_dm, msg):
     await reply()
     await broadcast(room_id, "inv_changed", None)     # the TAKING sheet must refresh
     if action == "take":
+        await _item_transfer_effects(room_id, ch["id"], res["name"], _op(msg) or "")
         sys_msg(room_id, f"💰 {user['username']} loots {res['qty']} × {res['name']}"
                          f" from the fallen {tok['label'] or 'creature'}.")
         events.emit(events.make("container_moved", room_id=room_id, actor_id=user["id"],
@@ -593,7 +663,8 @@ async def handle_loot(ws, room_id, user, is_dm, msg):
 # name one — and delivery rides the existing private whisper system (chat.
 # post_chat), so other players see nothing on the wire and nothing in history.
 
-CURSE_ACTIONS = ("set", "clear", "reveal", "conceal", "whisper")
+CURSE_ACTIONS = ("set", "clear", "reveal", "conceal", "whisper",
+                 "arm", "activate", "deactivate")
 
 
 def _curse_fields(msg):
@@ -604,6 +675,23 @@ def _curse_fields(msg):
         "name": CHAT.clean_text(msg.get("name"), gear.CURSE_NAME),
         "desc": CHAT.clean_text(msg.get("desc"), gear.CURSE_DESC),
         "whisper": CHAT.clean_text(msg.get("whisper"), gear.CURSE_WHISPER)})
+
+
+def _arm_fields(msg):
+    """D113: validate a DM-authored curse ARM (which event + which effect cell).
+    The effect cell is the SAME grammar a magic item carries — run through the
+    one effectops validator, never a second engine. Returns (trigger, canon_cell)
+    or (None, error_message)."""
+    from .. import effectops
+    trigger = str(msg.get("trigger", "")).strip().lower()
+    if trigger not in effectops.CURSE_TRIGGERS:
+        return None, f"Unknown curse trigger (use one of {', '.join(effectops.CURSE_TRIGGERS)})."
+    raw = msg.get("effects")
+    try:
+        ops = effectops.validate(raw)
+    except effectops.EffectError as ex:
+        return None, f"Invalid effect: {ex}"
+    return trigger, effectops.canon(ops)
 
 
 def _curse_of_char(char_id, item_id):
@@ -683,15 +771,28 @@ async def handle_curse(ws, room_id, user, is_dm, msg):
         elif action == "clear":
             res = (INV.curse_clear(room_id, char["id"], item_id, _op(msg))
                    if char else INV.container_curse_clear(room_id, oid, item_id, _op(msg)))
-        else:                                          # reveal / conceal
-            res = INV.curse_reveal(room_id, char["id"], item_id,
-                                   action == "reveal", _op(msg))
+        elif action == "arm":
+            trigger, cell = _arm_fields(msg)
+            if trigger is None:
+                return await fail(cell)                       # cell carries the message
+            res = (INV.curse_arm(room_id, char["id"], item_id, trigger, cell, _op(msg))
+                   if char else INV.container_curse_arm(room_id, oid, item_id, trigger, cell, _op(msg)))
+        elif action in ("activate", "deactivate"):
+            on = action == "activate"
+            res = (INV.curse_active(room_id, char["id"], item_id, on, _op(msg))
+                   if char else INV.container_curse_active(room_id, oid, item_id, on, _op(msg)))
+        elif action in ("reveal", "conceal"):          # D110 fix: "whisper" must
+            res = INV.curse_reveal(room_id, char["id"], item_id,   # NEVER reach here —
+                                   action == "reveal", _op(msg))    # it only delivers text;
+        else:                                                      # the old else-branch also
+            res = None                                             # flipped revealed back off
+
     except INV.InvError as ex:
         return await fail(str(ex))
     if res == "replay":
         return await send_to(ws, "whisper", {"text": "⚠️ That action was already applied."})
 
-    if action in ("set", "clear", "reveal", "conceal"):
+    if action in ("set", "clear", "reveal", "conceal", "arm", "activate", "deactivate"):
         await done({"char_id": char["id"] if char else None,
                     "object_id": None if char else oid,
                     "item_id": res["item_id"], "curse": res.get("curse"), "action": action})
@@ -701,6 +802,12 @@ async def handle_curse(ws, room_id, user, is_dm, msg):
             await send_to(ws, "whisper", {"text": f"🪡 Curse removed from {res['name']}."})
         elif action == "conceal":
             await send_to(ws, "whisper", {"text": f"🪡 Curse on {res['name']} is undisclosed again."})
+        elif action == "arm":
+            await send_to(ws, "whisper", {"text": f"⚙️ Curse on {res['name']} armed on “{res['curse']['trigger']}”."})
+        elif action in ("activate", "deactivate"):
+            await send_to(ws, "whisper", {"text": f"🔮 Curse on {res['name']} is now "
+                                           + ("ACTIVE" if action == "activate" else "dormant")
+                                           + "."})
 
     if action == "reveal":
         # Server-side disclosure: ONLY the owning user receives the released

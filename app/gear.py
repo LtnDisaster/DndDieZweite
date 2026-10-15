@@ -1,6 +1,7 @@
 """Magic items, armor, potions: schema validation, AC computation, unidentified masking."""
 import re
 
+from . import content as _content
 from . import db
 
 KINDS = ("armor", "shield", "potion", "scroll", "wand", "staff", "ring",
@@ -129,6 +130,7 @@ def _norm_attr_bonus(v):
 CURSE_NAME = 48
 CURSE_DESC = 200
 CURSE_WHISPER = 1000
+CURSE_EFFECTS = 4000            # same ceiling as one effect-grammar cell
 
 
 def clean_curse(c):
@@ -136,16 +138,40 @@ def clean_curse(c):
     the same as no dict at all). Values are re-sanitised on EVERY trusted read,
     so a hand-edited DB row can never smuggle a control char or an overlong
     field into a DM view or a whisper. 'revealed' is the DM's disclosure flag
-    for the CURRENT owner — gear.curse_view() gates it."""
+    for the CURRENT owner — gear.curse_view() gates it.
+
+    D113 adds the AUTOMATIC-EFFECT trio, kept STRICTLY orthogonal to 'revealed':
+      'trigger' — which item event arms the curse (a subset of effectops
+                  TRIGGERS; '' = none);
+      'effects' — the effect-grammar cell that event runs (same grammar as a
+                  magic item's props.effects, never a second engine);
+      'active'  — whether the armed curse currently fires at all.
+    All three are OMITTED when at their default (no trigger / no cell / not
+    active), so every curse stored before D113 round-trips BYTE-IDENTICALLY and
+    is DORMANT by default — a schema extension can never switch an old curse on.
+    The DM is the only one who activates a curse, and reveal/conceal/whisper
+    never touch any of these (they only move text knowledge)."""
     if not isinstance(c, dict):
         return None
     name = str(c.get("name", "")).strip()[:CURSE_NAME]
     desc = str(c.get("desc", "")).strip()[:CURSE_DESC]
     whisper = str(c.get("whisper", "")).strip()[:CURSE_WHISPER]
-    if not (name or desc or whisper):
+    from . import effectops
+    trigger = str(c.get("trigger", "")).strip().lower()[:16]
+    if trigger not in effectops.CURSE_TRIGGERS:
+        trigger = ""
+    effects = str(c.get("effects", "")).strip()[:CURSE_EFFECTS]
+    active = bool(c.get("active"))
+    if not (name or desc or whisper or trigger or effects):
         return None
-    return {"name": name, "desc": desc, "whisper": whisper,
-            "revealed": bool(c.get("revealed"))}
+    out = {"name": name, "desc": desc, "whisper": whisper, "revealed": bool(c.get("revealed"))}
+    if trigger:
+        out["trigger"] = trigger
+    if effects:
+        out["effects"] = effects
+    if active:
+        out["active"] = True
+    return out
 
 
 def curse_view(items, mode="strip"):
@@ -234,6 +260,10 @@ def clean_items(items, keep_curse=False):
             "def_id": str(it.get("def_id", ""))[:24],
             "grip": "two" if str(it.get("grip", "")).lower() in ("two", "2h", "two-handed") else "one",
             "props": props,
+            # D112: a DM-set "on a thief's person / stealable" authorization flag.
+            # It is DATA (which items a thief MAY attempt to lift), never a rule;
+            # the pickpocket handler reads it to bound what a steal can reveal.
+            "pick": bool(it.get("pick")),
         })
         if not out[-1]["id"]:
             out[-1]["id"] = f"it{len(out)}"
@@ -277,6 +307,24 @@ def clean_props(props):
             continue
         if k in ("damage_type", "extra_damage_type"):
             if isinstance(v, str) and v.lower() in DAMAGE_TYPES:
+                out[k] = v.lower()
+            continue
+        if k == "mastery":                     # D109: the SRD 5.2.1 property name
+            if isinstance(v, str) and v.lower() in _content.MASTERIES:
+                out[k] = v.lower()
+            continue
+        if k == "effects":                     # D111: canonical op-list JSON or drop
+            from . import effectops
+            try:
+                c = effectops.canon(str(v or ""))
+            except effectops.EffectError:
+                continue                       # never execute a corrupt definition
+            if c:
+                out[k] = c
+            continue
+        if k == "trigger":                     # D111: firing mode of an item's ops
+            from . import effectops
+            if isinstance(v, str) and v.lower() in effectops.TRIGGERS:
                 out[k] = v.lower()
             continue
         if k == "ability":
@@ -375,9 +423,15 @@ def weapon_profiles(ch):
                     "reach_ft": _clampi(p.get("reach_ft", 0), 0, 60),
                     "ranged": ranged, "two_handed": bool(p.get("two_handed")),
                     "versatile": bool(p.get("versatile")), "grip": "two" if grip_two else "one",
-                    "finesse": bool(p.get("finesse")), "gated": gated,
-                    "extra_dmg": extra.lstrip("+").lower(),
-                    "extra_dmg_type": p.get("extra_damage_type") or ""})
+            "finesse": bool(p.get("finesse")), "gated": gated,
+            "extra_dmg": extra.lstrip("+").lower(),
+            "extra_dmg_type": p.get("extra_damage_type") or "",
+            # D109: the weapon's mastery property (content prop) — owning it
+            # on the weapon unlocks NOTHING; the entitlement is checked
+            # separately against the build ledger (charbuild.masteries).
+            "mastery": p.get("mastery") or "",
+            "light": bool(p.get("light")),
+            "mod_to_dmg": bool(p.get("mod_to_damage", True))})
     return out
 
 
@@ -437,6 +491,12 @@ def can_equip(item, slot, equipment=None, items=None):
         if ps is False or ps in ("", 0):
             return False                         # explicit: never equippable
         return str(ps) == slot                   # explicit: exactly this slot
+    # D109 (Nick): a LIGHT weapon may occupy the off hand — the 2024 two-weapon
+    # fighting precondition. Additive branch; every other kind/slot pairing and
+    # the non-light refusal stay exactly as before.
+    if slot == "off_hand" and item.get("kind") == "weapon":
+        return bool(item.get("light") or (item.get("props") or {}).get("light")) \
+            and not wields_two_handed(item)
     if item.get("kind") not in SLOT_KINDS.get(slot, ()):
         return False
     if wields_two_handed(item) and slot == "off_hand":

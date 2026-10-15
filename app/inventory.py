@@ -99,6 +99,8 @@ def _stack_key(it):
         return None
     if it.get("curse"):
         return None
+    if it.get("pick"):        # D112: a DM-flagged stealable instance is its own
+        return None           # truth — never dilute it by merging with a normal stack
     return (it["def_id"], it.get("charges", -1), bool(it.get("identified", True)),
             it.get("heal", ""))
 
@@ -272,8 +274,11 @@ def equip_slot(room_id, char_id, slot, item_id, op_id=None):
 
     def fn(items, equip):
         if item_id is None:
+            prev = equip.get(slot)
             equip[slot] = None
-            return {"slot": slot, "item": None}
+            # D111: carry the vacated id out of the mutation so the caller can
+            # fire the item's unequip trigger — nothing else reads 'prev'.
+            return {"slot": slot, "item": None, "prev": prev}
         it = find(items, item_id)
         if it is None:
             raise InvError("Item not found")
@@ -630,6 +635,42 @@ def container_remove_coins(room_id, object_id, cp, op_id=None):
     return {"cp": cp}
 
 
+# ---------- D112: DM authorization of "pickable" (stealable) instances ----------
+# The `pick` flag is DATA a DM sets on a specific instance to authorize that a
+# thief may attempt to lift exactly that item and, on a clean steal, be shown
+# its name. It is the ONLY way an item becomes stealable at all (the pickpocket
+# handler refuses any unflagged item), which is what keeps a successful steal
+# from ever leaking an unauthorised inventory. Additive to the item entry.
+
+def set_pick_char(room_id, char_id, item_id, value, op_id=None):
+    """DM toggles the stealable flag on one of a CHARACTER's items."""
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        it["pick"] = bool(value)
+        return {"item_id": it["id"], "name": it["name"], "pick": bool(value)}
+    return mutate_char(room_id, char_id, fn, op_id, f"pick:{bool(value)}")
+
+
+def container_set_pick(room_id, object_id, item_id, value, op_id=None):
+    """DM toggles the stealable flag on one item inside a container (incl. an
+    NPC's ``tok:<id>`` gear) — a living NPC's gear, which looting never opens."""
+    def fn(items):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        it["pick"] = bool(value)
+        return {"item_id": it["id"], "name": it["name"], "pick": bool(value)}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_pick", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res
+
+
 # ---------- D106: secret per-instance curses (DM metadata, storage side) ----------
 # THE single mutation site for the curse field — handlers authorise, these
 # write. Everything here runs inside the same tx/op_id machinery as every other
@@ -664,15 +705,24 @@ def _curse_target(items, item_id):
 
 
 def _curse_store(it, curse, revealed=None):
-    """Author the metadata on the resolved entry. revealed=None keeps the
-    current disclosure flag (editing the text does not un-disclose it)."""
+    """Author metadata on the resolved entry. The authored dict overrides ONLY
+    the keys it carries; anything else the entry already had (D113 trigger /
+    effects / active) is PRESERVED, so editing the secret text never silently
+    dis-arms a curse and re-arming never rewrites the text. revealed=None keeps
+    the current disclosure flag (editing the text does not un-disclose it)."""
     if curse is None:
         it.pop("curse", None)
         return None
     prev = it.get("curse") or {}
-    it["curse"] = dict(curse, revealed=bool(prev.get("revealed"))
-                       if revealed is None else bool(revealed))
-    return it["curse"]
+    merged = dict(prev)
+    merged.update(curse)
+    rev = bool(prev.get("revealed")) if revealed is None else bool(revealed)
+    stored = gear.clean_curse(dict(merged, revealed=rev))
+    if stored:
+        it["curse"] = stored
+    else:
+        it.pop("curse", None)
+    return stored
 
 
 def curse_set(room_id, char_id, item_id, curse, op_id=None):
@@ -696,7 +746,9 @@ def curse_clear(room_id, char_id, item_id, op_id=None):
 
 def curse_reveal(room_id, char_id, item_id, revealed, op_id=None):
     """Flip the disclosure flag for the CURRENT owner. The DM handler pairs
-    True with a private whisper of the released fields."""
+    True with a private whisper of the released fields. NEVER touches the D113
+    activation trio — knowing a curse's text and having it fire are independent
+    states (a curse can fire while unknown, or be revealed yet dormant)."""
     def fn(items, equip):
         it = find(items, item_id)
         if it is None:
@@ -708,6 +760,38 @@ def curse_reveal(room_id, char_id, item_id, revealed, op_id=None):
         it["curse"] = curse
         return {"name": it["name"], "item_id": it["id"], "curse": curse}
     return mutate_char(room_id, char_id, fn, op_id, f"curse_reveal:{int(bool(revealed))}")
+
+
+def curse_arm(room_id, char_id, item_id, trigger, effects, op_id=None):
+    """D113 DM-author: choose WHICH event an active curse fires and the
+    effect-grammar cell it runs. The cell is validated by the caller BEFORE
+    this is reached; here it is stored verbatim (re-validated at fire time).
+    Preserves the secret text and the current activation flag."""
+    def fn(items, equip):
+        it = _curse_target(items, item_id)
+        stored = _curse_store(it, {"trigger": trigger, "effects": effects})
+        if stored is None:
+            raise InvError("Arming needs a trigger and an effect")
+        return {"name": it["name"], "item_id": it["id"], "curse": stored}
+    return mutate_char(room_id, char_id, fn, op_id, "curse_arm")
+
+
+def curse_active(room_id, char_id, item_id, active, op_id=None):
+    """D113 DM-author: switch an armed curse on/off. This is the ONLY thing that
+    changes activation, and it changes nothing else (text, trigger, effects and
+    the disclosure flag all survive). An unarmed curse stays inert even here."""
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        curse = gear.clean_curse(it.get("curse"))
+        if curse is None:
+            raise InvError("That item carries no curse")
+        if not (curse.get("trigger") and curse.get("effects")):
+            raise InvError("Nothing is armed on that curse yet")
+        it["curse"] = gear.clean_curse(dict(curse, active=bool(active)))
+        return {"name": it["name"], "item_id": it["id"], "curse": it["curse"]}
+    return mutate_char(room_id, char_id, fn, op_id, f"curse_active:{int(bool(active))}")
 
 
 def container_curse_set(room_id, object_id, item_id, curse, op_id=None):
@@ -733,6 +817,43 @@ def container_curse_clear(room_id, object_id, item_id, op_id=None):
         return {"name": it["name"], "item_id": it["id"]}
     with db.tx() as c:
         if not _claim(c, op_id, room_id, "container_curse_clear", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res
+
+
+def container_curse_arm(room_id, object_id, item_id, trigger, effects, op_id=None):
+    def fn(items):
+        it = _curse_target(items, item_id)
+        stored = _curse_store(it, {"trigger": trigger, "effects": effects})
+        if stored is None:
+            raise InvError("Arming needs a trigger and an effect")
+        return {"name": it["name"], "item_id": it["id"], "curse": stored}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_curse_arm", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res
+
+
+def container_curse_active(room_id, object_id, item_id, active, op_id=None):
+    def fn(items):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        curse = gear.clean_curse(it.get("curse"))
+        if curse is None:
+            raise InvError("That item carries no curse")
+        if not (curse.get("trigger") and curse.get("effects")):
+            raise InvError("Nothing is armed on that curse yet")
+        it["curse"] = gear.clean_curse(dict(curse, active=bool(active)))
+        return {"name": it["name"], "item_id": it["id"], "curse": it["curse"]}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_curse_active", object_id):
             return "replay"
         items = container_load(c, room_id, object_id)
         res = fn(items)

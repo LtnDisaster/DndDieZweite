@@ -80,3 +80,10 @@ def walk_budget(speed_ft) -> int:
         return max(0, int(speed_ft) // SQ)
     except (TypeError, ValueError):
         return 30 // SQ
+
+
+def vertical_cost(units: int = 1) -> int:
+    """D114 cost of one vertical FLOOR step. One declared level is exactly
+    10 ft, hence two 5 ft squares. This is still the same square-unit budget;
+    it is not a second movement economy."""
+    return max(0, int(units)) * (10 // SQ)

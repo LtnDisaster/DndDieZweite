@@ -1,7 +1,7 @@
 """DM token management (add / remove NPC tokens + edit NPC stat blocks)."""
 import re
 
-from .. import assets, db, footprint, floors, mapmodel, npc
+from .. import assets, db, footprint, floors, mapmodel, npc, vertical
 from . import movement
 from .net import broadcast, get_map, map_lock, send_to, sys_msg
 from .visibility import (broadcast_token_add, broadcast_token_step,
@@ -127,6 +127,37 @@ async def handle_token_visual(ws, room_id, user, is_dm, msg):
     db.x("UPDATE tokens SET vw=?, vh=? WHERE id=?", (vw, vh, tok["id"]))
     await send_property_to_interested(room_id, tok, "token_visual",
                                       {"token_id": tok["id"], "vw": vw, "vh": vh})
+
+
+async def handle_token_height(ws, room_id, user, is_dm, msg):
+    """D114: owner (or DM) sets the token's VERTICAL body — `height_ft` (physical
+    vertical extent; blank/unset = the size-category default, NOT a ceiling: a
+    Gargantuan dragon may be authored 30 ft+) and `elevation_ft` (its under-edge
+    above the standing surface, 0 = grounded). Both server-validated to a
+    technical band; a height change alone never moves, refits or re-planes the
+    token. Whether that body actually reaches another plane is gated by vertical
+    openings in the map (Phase 4/5) — this only records/validates the volume."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    if not (is_dm or tok["owner_user_id"] == user["id"]):
+        await send_to(ws, "error", {"msg": "Not your token"})
+        return
+    new_h = (vertical.clean_height_ft(msg.get("height_ft")) if "height_ft" in msg
+             else tok.get("height_ft"))
+    new_e = (vertical.clean_elevation_ft(msg.get("elevation_ft")) if "elevation_ft" in msg
+             else (tok.get("elevation_ft") or 0))
+    if (tok.get("height_ft"), (tok.get("elevation_ft") or 0)) == (new_h, new_e):
+        return                                   # idempotent, no broadcast storm
+    db.x("UPDATE tokens SET height_ft=?, elevation_ft=? WHERE id=?",
+         (new_h, new_e, tok["id"]))
+    tok["height_ft"], tok["elevation_ft"] = new_h, new_e
+    await send_property_to_interested(room_id, tok, "token_height",
+                                      {"token_id": tok["id"], "height_ft": new_h,
+                                       "elevation_ft": new_e})
+    from .visibility import reevaluate_visibility   # the body's plane join changed
+    await reevaluate_visibility(room_id)
 
 
 async def handle_token_image(ws, room_id, user, is_dm, msg):

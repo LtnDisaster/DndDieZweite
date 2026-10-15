@@ -240,6 +240,10 @@ window.addEventListener("unhandledrejection", function(ev){
         <button id="mh-go" class="primary">Move</button>
         <button id="mh-cancel" class="ghost">Cancel</button>
       </div>
+      <div id="traphud" class="hidden" title="Search or disarm a trap on your token's cell (a DM can target any adjacent cell)">
+        <button id="btn-trap-search" class="ghost">🔍 Search</button>
+        <button id="btn-trap-disarm" class="ghost">🔧 Disarm</button>
+      </div>
     </div>
     <aside class="side">
       <div class="row side-tabs" id="side-tabs" role="tablist" title="Group sidebar panels">
@@ -616,6 +620,7 @@ window.addEventListener("unhandledrejection", function(ev){
             <button class="brush" data-b="low" title="Low obstacle (passable, 2× cost; climbable)">🪨</button>
             <button class="brush" data-b="raise" title="Raise elevation +1 (step = 1 unit)">⛰️+</button>
             <button class="brush" data-b="lower" title="Lower elevation −1">⛰️−</button>
+            <button class="brush" data-b="openv" title="Toggle a vertical opening in the ceiling above this cell (D114)">⬆️⬇️</button>
             <button class="brush" data-b="trap" title="Hidden trap">⚠️</button>
             <button class="brush" data-b="loot" title="Hidden loot">🎁</button>
             <button class="brush" data-b="obj" title="World object: lever/switch/chest — data-driven, allowlisted actions">🕹️</button>
@@ -634,6 +639,12 @@ window.addEventListener("unhandledrejection", function(ev){
             <input id="trap-label" placeholder="Trap label" maxlength="80" value="Poison Needle">
             <input id="trap-dc" type="number" min="1" max="30" value="13" title="Save DC (DEX)" style="width:52px">
             <input id="trap-dmg" placeholder="dmg" maxlength="16" value="2d6" title="Damage dice" style="width:58px">
+            <input id="trap-search" type="number" min="0" max="30" placeholder="find DC" title="Search DC (0 = hidden until triggered)" style="width:64px">
+            <input id="trap-disarm" type="number" min="0" max="30" placeholder="disarm DC" title="Disarm DC (0 = cannot be disarmed)" style="width:72px">
+            <label title="Trap re-arms for the next creature instead of springing once"><input id="trap-repeat" type="checkbox"> repeat</label>
+          </div>
+          <div class="row trapfields hidden" id="trap-effect-row">
+            <textarea id="trap-effects" rows="2" placeholder='Data-driven effect cell (JSON). Leave empty to use the Save DC + dmg above. e.g. {"v":2,"ops":[{"op":"save","ability":"dex","dc":15,"success":[],"failure":[{"op":"condition","key":"prone","target":"target"}]}]}' style="width:100%;box-sizing:border-box"></textarea>
           </div>
           <div class="row trapfields hidden" id="pin-fields">
             <input id="pin-title" placeholder="Pin title" maxlength="80">

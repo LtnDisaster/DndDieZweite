@@ -17,6 +17,8 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY --from=node22 /usr/local/bin/node /usr/local/bin/node
 COPY app ./app
 COPY tests ./tests
+# D109: test_generator_is_byte_idempotent runs the generator
+COPY scripts ./scripts
 COPY pytest.ini ./
 ENV VTT_DATA_DIR=/tmp/vtt-data
 CMD ["pytest"]

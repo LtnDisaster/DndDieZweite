@@ -91,3 +91,61 @@ async def build_origin_apply(request: Request, code: str, cid: int,
             await room_net.broadcast(room["id"], "snapshot", None)
         return {"ok": True, "result": result}
     return {"ok": False, **result}
+
+
+# -------------------------------------------------------- D109: masteries
+@router.get("/{code}/{cid}/mastery")
+def build_mastery(request: Request, code: str, cid: int, user=Depends(require_user)):
+    """Weapon-mastery report: grants with sources, pending picks and their
+    pools, resolved entitlements (mirrors the origin report-then-grant pattern)."""
+    room = _authorize(request, code, cid)
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (int(cid),))
+    if ch is None:
+        raise HTTPException(404, "Unknown character")
+    return charbuild.mastery_options(ch, room["id"])
+
+
+@router.post("/{code}/{cid}/mastery")
+async def build_mastery_pick(request: Request, code: str, cid: int,
+                             user=Depends(require_user)):
+    """Resolve ONE pending level-grant. Body may carry ONLY ``pick`` — the
+    mastery must be in that grant level's pool; already-granted masteries are
+    immutable here (a DM grant is the only way to add more)."""
+    room = _authorize(request, code, cid)
+    ratelimit.limit("charbuild-mastery", request, max_n=10, window=60)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Body must be a JSON object")
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (int(cid),))
+    if ch is None:
+        raise HTTPException(404, "Unknown character")
+    ok, result = charbuild.apply_mastery(cid, body.get("pick"), room["id"])
+    if not ok:
+        return {"ok": False, **result}
+    await room_net.broadcast(room["id"], "snapshot", None)
+    return {"ok": True, "result": result}
+
+
+@router.post("/{code}/{cid}/mastery/grant")
+async def build_mastery_grant(request: Request, code: str, cid: int,
+                              user=Depends(require_user)):
+    """DM-only mastery grant (audited in the ledger with the granting actor).
+    The ONLY path to extra or later masteries — never retroactive, never
+    client-side."""
+    user, room = room_of(request, code)
+    if room.get("_role") != "dm":
+        raise HTTPException(403, "DM only")
+    room = _authorize(request, code, cid)
+    if not db.q1("SELECT 1 AS ok FROM room_members WHERE room_id=? AND character_id=?",
+                 (room["id"], int(cid))):
+        raise HTTPException(403, "Character not assigned to this room")
+    ratelimit.limit("charbuild-mastery-grant", request, max_n=10, window=60)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Body must be a JSON object")
+    ok, result = charbuild.grant_mastery(cid, body.get("mastery"),
+                                         user.get("username", "DM"), room["id"])
+    if not ok:
+        return {"ok": False, **result}
+    await room_net.broadcast(room["id"], "snapshot", None)
+    return {"ok": True, "result": result}

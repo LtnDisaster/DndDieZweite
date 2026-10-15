@@ -13,6 +13,7 @@ from .conditions import (handle_cond_add, handle_cond_remove,
 from .death import handle_death_clear, handle_death_save
 from .doors import handle_door
 from .encounters import handle_spawn_encounter
+from .grapple import handle_escape, handle_grapple, handle_shove
 from .dice import (handle_cast, handle_long_rest, handle_npc_attack, handle_resource,
                    handle_roll, handle_short_rest)
 from .items import handle_attune, handle_identify, handle_recharge, handle_use_item
@@ -26,17 +27,19 @@ from .movement import handle_move, handle_path_preview, handle_stop_move
 from .moveforced import handle_forced_move
 from .net import broadcast, get_map, map_lock, send_to, set_map, sys_msg
 from .pings import handle_ping
+from .pickpocket import handle_pickable, handle_pickpocket, handle_pickpocket_take
 from .progression import handle_class_levels
 from .quests import (handle_quest_add, handle_quest_complete, handle_quest_delete,
                      handle_quest_fail, handle_quest_obj_add, handle_quest_obj_done,
                      handle_quest_update)
 from .secret_events import handle_secret_event
 from .status import handle_exhaustion, handle_inspiration, handle_temp_hp
+from .traps import handle_trap                    # D113: data-driven discover/disarm
 from .tokens import (handle_add_token, handle_del_token, handle_token_controller,
                      handle_token_mount, handle_token_rotate, handle_token_span,
                      handle_token_visual, handle_update_npc, handle_token_image,
                      handle_token_floor, handle_token_light,
-                     handle_token_darkvision)
+                     handle_token_darkvision, handle_token_height)
 
 
 async def handle_map_edit(ws, room_id, user, is_dm, msg):
@@ -90,6 +93,12 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
                 trap["discovered"] = bool(prev.get("discovered"))
                 trap["triggered"] = bool(prev.get("triggered"))
                 trap["triggered_by"] = prev.get("triggered_by")
+                # D113 Phase 5: a disarmed trap stays disarmed — a stale editor
+                # snapshot must not silently re-arm one the players already
+                # disabled (same authoritative-runtime-flag rule as the rest).
+                if prev.get("disarmed"):
+                    trap["disarmed"] = True
+                    trap["triggered"] = True
         old_loot = {e.get("id"): e for e in old.get("loot", [])}
         for loot in mp_new.get("loot", []):
             prev = old_loot.get(loot.get("id"))
@@ -118,6 +127,9 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
     if dark_changed:
         from .visibility import reevaluate_visibility
         await reevaluate_visibility(room_id)
+    if old.get("openv") != mp_new.get("openv"):
+        from .visibility import reevaluate_visibility
+        await reevaluate_visibility(room_id)
 
 
 HANDLERS = {
@@ -143,6 +155,7 @@ HANDLERS = {
     "knock_prone": handle_knock_prone,
     "token_span": handle_token_span,
     "token_visual": handle_token_visual,      # D82: presentation bounds only
+    "token_height": handle_token_height,      # D114: vertical body (height_ft/elevation_ft)
     "token_image": handle_token_image,        # D85: server-validated artwork asset only
     "token_floor": handle_token_floor,        # D86: change the occupancy/visibility plane
     "token_light": handle_token_light,        # D87: light radius in cells (dark rooms)
@@ -203,6 +216,13 @@ HANDLERS = {
     "npc_inv": handle_npc_inv,                 # D105: DM manages NPC inventories
     "loot": handle_loot,                       # D105: looting a downed NPC
     "curse": handle_curse,                     # D106: DM-authored secret item curses
+    "grapple": handle_grapple,                 # D112: 2024 Grapple (check→save)
+    "shove": handle_shove,                     # D112: 2024 Shove (prone | 5-ft push)
+    "escape": handle_escape,                   # D112: escape a grapple (fixed DC)
+    "pickpocket": handle_pickpocket,           # D112: concealed steal attempt (DM)
+    "pickpocket_take": handle_pickpocket_take,  # D112: auto-steal a DM-'pick' item
+    "pickable": handle_pickable,               # D112: DM authorizes stealable items
+    "trap": handle_trap,                        # D113: data-driven search/disarm/spring
 }
 
 

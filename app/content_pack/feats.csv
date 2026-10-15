@@ -1,5 +1,6 @@
-id,name,requires,ability_boost,skill_prof,spells_grant,effect,category,manual
-feat_keen,Keen Mind,Perception 5 ranks,wis+1,"perception, investigation",,+1 Wisdom; +1 to Perception and Investigation checks,general,demo feat (house rule); the 2024 SRD has no such prerequisite
-feat_nimble,Nimble Steps,,dex+1,,,+1 Dexterity (max 20),general,the 5 ft speed increase is not automated today
-feat_quick_study,Quick Study,,,investigation,,Proficiency in Investigation; you can recall a book's exact wording,origin,demo origin feat (house rule) for bg_scholar
-feat_alley_cat,Alley Cat,,,stealth,,Proficiency in Stealth; you always know the nearest way out of a building,origin,demo origin feat (house rule) for bg_urchin
+id,name,requires,ability_boost,skill_prof,spells_grant,effect,category,effects,manual
+feat_keen,Keen Mind,Perception 5 ranks,wis+1,"perception, investigation",,+1 Wisdom; +1 to Perception and Investigation checks,general,,demo feat (house rule); the 2024 SRD has no such prerequisite
+feat_nimble,Nimble Steps,,dex+1,,,+1 Dexterity (max 20),general,,the 5 ft speed increase is not automated today
+feat_quick_study,Quick Study,,,investigation,,Proficiency in Investigation; you can recall a book's exact wording,origin,,demo origin feat (house rule) for bg_scholar
+feat_alley_cat,Alley Cat,,,stealth,,Proficiency in Stealth; you always know the nearest way out of a building,origin,,demo origin feat (house rule) for bg_urchin
+martyr,Martyr's Guard,,,,,Once per fight: 2d4+2 temporary hit points,general,"{""ops"":[{""expr"":""2d4+2"",""op"":""temp_hp"",""target"":""self""}],""v"":1}",D111 demo: active feat — registers as castable ability feat_martyr

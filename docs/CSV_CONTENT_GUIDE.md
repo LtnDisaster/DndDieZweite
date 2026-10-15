@@ -49,6 +49,7 @@ Pro Art gibt es **einen** kanonischen Dateinamen:
 | `backgrounds.csv` | `background` | ein Hintergrund |
 | `feats.csv` | `feat` | ein Talent |
 | `creatures.csv` | `creature` | eine Kreatur |
+| `conditions.csv` | `condition` | eine Zustands-/Marker-**Definition** (Hooks + Lebenszyklus-Effekte, D111) |
 
 Unbekannte Dateien (z. B. `notizen.csv`) werden **übersprungen**, nicht als
 Fehler gewertet — sie erscheinen aber markiert im Bericht.
@@ -207,7 +208,8 @@ alles rein Beschreibende gehört nach `desc`/`manual`.
 | `recharge` | `` / `long` | Regeneration |
 | `attune` | bool | erfordert Einstimmung |
 | `magic` | bool | magischer Gegenstand |
-| `duration`,`trigger` | Text | Wirkungsdauer/Auslöser (Anzeige) |
+| `duration`,`trigger` | Text | `trigger` (`use`/`equip`/`unequip`/`on_hit`/`on_damaged`) **weckt** die `effects`-Kette (D111); `duration` bleibt Anzeige |
+| `effects` | JSON | **Effektgrammatik v1** (`docs/EFFECT_GRAMMAR.md`) — `use` am Verbrauch, `equip`/`unequip` getragen, `on_hit` als Waffe, `on_damaged` getroffen; replay-geschützt |
 | `light` | bool | leuchtend |
 | `image`,`desc`,`manual` | | Bild, Beschreibung, Hinweis |
 
@@ -245,13 +247,28 @@ die Zusatzwürfel müssen deshalb **dieselbe Würfelseitenzahl** wie der Basiste
 (`8d6` + `+1d6` ✓, `1d8` + `+1d6` ✗ → dann bleibt es beim Grundwurf und der `manual`-
 Hinweis greift; nichts wird vorgetäuscht). Flache Boni (`+2`) sind im Würfelterm erlaubt.
 
+`effects` (D111): versionierte JSON-Op-Kette (Schaden/Heilung/Temp-HP/
+Zustand/Rettung/Probe/Zwangsbewegung/Ressource) — gültig nur gegen die
+Grammatik (`docs/EFFECT_GRAMMAR.md`); unbekannte Ops/Felder → **Zeile wird
+beim Import verworfen**, defekte Zellen auf Items werden beim Laden verworfen.
+
 ### 4.6 `backgrounds.csv` — Hintergrund
 `id`**F**, `name`**F**, `skill_prof`, `tool_prof`, `languages`, `starting_items`
 (Komma-Liste von Gegenstands-IDs), `feature`, `manual`.
 
 ### 4.7 `feats.csv` — Talent
 `id`**F**, `name`**F**, `requires` (Voraussetzung, Anzeige), `ability_boost`
-(Attributs-Boni), `skill_prof`, `spells_grant`, `effect` (Text), `manual`.
+(Attributs-Boni), `skill_prof`, `spells_grant`, `effect` (Text), `manual`,
+`effects` (D111: JSON-Op-Kette → das Talent wird als `feat_<id>` wirksam).
+
+### 4.8a `conditions.csv` — Zustand (D111)
+`id`**F**, `name`**F**, `glyph`, `color`, `group` (`condition`/`marker`),
+die acht Hook-Flags (`blocks_movement`, `speed_delta`, `my_attacks_dis`,
+`my_checks_dis`, `my_saves_dis`, `attacks_against_me_adv`,
+`attacks_against_me_dis`, `auto_fail_saves`), `effects` (Hook-Dict
+`on_start`/`on_round`/`on_expire`, siehe `docs/EFFECT_GRAMMAR.md`), `manual`.
+Eine Zeile mit SRD-Key **überschreibt** den verdrahteten Builtin-Hook;
+Instanzen (Uhren, `cond_add`) bleiben unverändert.
 
 ### 4.8 `creatures.csv` — Kreatur
 `id`**F**, `name`**F**, `size`, `type`, `ac` (Standard 10), `hp`,
@@ -304,6 +321,10 @@ Regeln:
 * `ac_base`/`ac_bonus`/`ac_max_dex` fließen in die AC-Berechnung (`gear.compute_ac`).
 * Zaubern: `level` → Slot-Kosten; `targeting/shape/size_ft/range_ft`,
   `resolution/save/on_save`, `damage_dice`/`_type`, `heal_dice`, `concentration`.
+* **Effektgrammatik v1 (D111):** `effects`-Zellen in `spells`/`feats`/`items`
+  und die `conditions.csv`-Kette (Hook-Flags + `on_start`/`on_round`/
+  `on_expire`) werden von der bestehenden Engine ausgeführt — gültig ist,
+  was `docs/EFFECT_GRAMMAR.md` hergibt; unbekannte Ops verwirft der Import.
 * `heal_dice` an Konsumgegenständen heilt.
 * **Ausrüstung & magische Gegenstände (D98, Phase D):** Getragene/geführte Werte
   werden **abgeleitet** (Overlay in `gear`), nie gespeichert — Ausrüsten, Ablegen,
@@ -343,8 +364,9 @@ Regeln:
   nicht aus dem Bogen) bleiben Sache der Spielleitung.
 
 **Nur Anzeige (`manual`/`needs_choice`), weil keine Engine es auswertet:**
-`properties`, `duration`, `trigger`, `hit_dice_bonus`, Kreaturen-Angriffe und der
-`manual`-Text selbst. Diese Werte sind **richtig gespeichert** und sichtbar — die
+`properties`, `duration`, `hit_dice_bonus`, Kreaturen-Angriffe und der
+`manual`-Text selbst. (`trigger` ist seit **D111** mechanisch, sofern eine
+`effects`-Kette dahintersteht — ohne Kette bleibt es Anzeige.) Diese Werte sind **richtig gespeichert** und sichtbar — die
 Spielleitung entscheidet am Tisch.
 (*Hinweis: Übungs-/Attributs-/Dunkelsicht-/Tempo-Gaben **von Gegenständen** waren
 früher hier — seit D98 werden sie getragen, siehe oben. `weight`/`value_gp` und
@@ -614,7 +636,7 @@ siehe Abschnitt 8.3.)*
 4. **Anwenden**. Bei bewusster Überschreibung: **Ersetzen**.
 5. **Export**, um die gespeicherte Wahrheit zu vergleichen / zu versionieren.
 
-## 11. Eignung für D&D 5e (2024) — Stand D108 (Ursprungs-Schicht umgesetzt)
+## 11. Eignung für D&D 5e (2024) — Stand D109 (Ursprungs- und Mastery-Schicht umgesetzt)
 
 Verbindliche Regelbasis ist **5e (2024)** nach dem offiziell lizenzierten
 **SRD 5.2.1** (Quelle + Attribution in `ATTRIBUTION.md`). Das D107-Audit wurde
@@ -645,10 +667,26 @@ in D108 gegen das SRD korrigiert; Matrix und priorisierte R-Liste:
 * **Noch 2014/alt, aber nur Daten (nicht automatisch angewandt):**
   `species.csv: ability_bonuses` — 2024 erhöhen Species keine Werte; die Engine
   wendet die Spalte nie mechanisch an. Der Mensch liest sie als Bookkeeping.
-* **Weiter offen (nur dokumentiert, NICHT umgesetzt):** `items.csv` ohne
-  Weapon-Mastery-Feld. Die 2024er Masteries sind Cleave, Graze, Nick, Push,
-  Sap, Slow, Topple, Vex — getrennt von den Waffeneigenschaften (Ammunition,
-  Finesse, Heavy, Light, Loading, Range, Reach, Thrown, Two-Handed, Versatile).
+* **Neu und aktiv (D109): Weapon-Masteries.** Die 2024er Masteries sind
+  Cleave, Graze, Nick, Push, Sap, Slow, Topple, Vex — getrennt von den
+  Waffeneigenschaften (Ammunition, Finesse, Heavy, Light, Loading, Range,
+  Reach, Thrown, Two-Handed, Versatile).
+  – `items.csv` (bzw. die `props` der Waffe): neue Spalte/Prop **`mastery`**
+    (`cleave|graze|nick|push|sap|slow|topple|vex`, leer = keine). Das Feld
+    beschreibt NUR die Waffe; ob ein Charakter eine Mastery nutzen darf, ist
+    sein Build-Ledger (`characters.build.masteries.grants`) — beides muss
+    zusammenkommen, und der Angriff muss die Mastery aktiv anfordern.
+  – `classes.csv`: **`mastery_gain`** (Integer pro Level-Zeile, geschenkt beim
+    Anwenden dieses Levels; Demo: Scout/Warden Level 1 = 1) und
+    **`mastery_options`** (kommagetrennte Auswahl-IDs, leer = frei aus allen
+    acht). Beides additiv; leere Werte = Schema bleibt 2014-kompatibel.
+  – Vergabe: beim Level-Anwenden (`apply`) wandern die Grants als
+    `pending`-Vorschläge ins Ledger; die tatsächliche Auswahl erfolgt
+    sichtbar über `POST /api/build/{code}/{cid}/mastery`
+    (`{"pick":"graze"}`) oder per DM-Grant `POST …/mastery/grant`.
+    Bestehende Charaktere werden NIE rückwirkend geändert (D108-Prinzip).
+  – Off-Hand: eine Waffe darf den Off-Hand-Slot nur belegen, wenn sie
+    `light` ist (2024-Zwei-Waffen-Regel, Voraussetzung für Nick).
 * **Lizenz:** 2024-Mechanik in eigenen Worten zu beschreiben ist ok; fremde
   SRD-5.2.1-Regeltexte 1:1 zu kopieren nur unter der CC-By-4.0-Attribution
   (siehe `ATTRIBUTION.md`). Die ausgelieferten Demo-Packs bleiben projekt-

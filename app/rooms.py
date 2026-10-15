@@ -15,6 +15,7 @@ from .room import death as D
 from . import events as game_events
 from .room import gamelog
 from .room import net as room_net
+from .room import vertical3d
 from .room.net import sys_msg
 from .auth import COOKIE, cookie_secure, hash_pw, make_token, require_user, room_of, verify_pw
 
@@ -643,12 +644,15 @@ def _viewer_token_view(room, user, tokens_all, view_floor, mp):
     broadcast; explored fog and ghost memory are only READ."""
     uid = user["id"]
     visible = ws.viewer_visible_cells(room["id"], uid, mp, floor=view_floor)
-    # D86: which planes this viewer stands on (floors of own/operated
-    # tokens). Tokens on other planes are ELSEWHERE, not hidden — they
-    # must not even be listed, so their plane leaks nothing either.
-    planes = {(t.get("floor") or "") for t in tokens_all
-              if t["owner_user_id"] == uid
-              or t.get("controller_user_id") == uid}
+    # D86/D114: the planes this viewer stands on — home plane plus every plane
+    # their body legitimately reaches through an opening. Without an opening the
+    # set is exactly the token-floor planes, preserving D86.
+    vmaps = vertical3d.maps_for(room["id"])
+    vlm = vertical3d.level_map(room["id"])
+    planes = set()
+    for t in tokens_all:
+        if t["owner_user_id"] == uid or t.get("controller_user_id") == uid:
+            planes.update(vertical3d.body_planes(room["id"], t, vmaps, vlm))
     _plane_cache = {"": (mp, visible)}
     def _plane(fl):
         # D88: sight must be evaluated on the map the token STANDS ON —
@@ -659,15 +663,22 @@ def _viewer_token_view(room, user, tokens_all, view_floor, mp):
                                                               mp_p, floor=fl))
         return _plane_cache[fl]
     def _visible_token(t):
-        fl = t.get("floor") or ""
-        if fl not in planes:
-            return False                      # D86: different plane = elsewhere
         if t["owner_user_id"] == uid or t.get("controller_user_id") == uid:
             return True                       # D82: controllers always see their token
-        mp_p, vis_p = _plane(fl)
-        origin, side = footprint.occupied_origin(mp_p, t)
-        return any((i := mapmodel.flat_idx(mp_p, x, y)) is not None and i in vis_p
-                   for (x, y) in footprint.origin_cells(mp_p, origin, side))   # D72
+        # D114: a token on a plane the viewer stands on is seen on normal 2D LOS;
+        # a token on ANOTHER plane is seen only where it is legitimately joined to
+        # a plane the viewer stands on — its body protruding there, or an open
+        # shaft. observable_cells returns EMPTY for unjoined planes, so with no
+        # openings this is byte-identical to the old "different plane = elsewhere".
+        for P in planes:
+            obs = vertical3d.observable_cells(room["id"], t, P, vmaps, vlm)
+            if not obs:
+                continue
+            mp_p, vis_p = _plane(P)
+            if any((i := mapmodel.flat_idx(mp_p, x, y)) is not None and i in vis_p
+                   for (x, y) in obs):
+                return True                   # D72
+        return False
     tokens = [t for t in tokens_all if _visible_token(t)]
     for t in tokens:                                   # NPC stat blocks are DM-only
         t["npc"] = None
@@ -680,6 +691,8 @@ def _viewer_token_view(room, user, tokens_all, view_floor, mp):
             t.pop("vw", None)                    # D82: nor the visual silhouette
             t.pop("vh", None)
             t.pop("rot", None)
+            t.pop("height_ft", None)             # D114: nor its vertical body
+            t.pop("elevation_ft", None)          # D114: nor how high it floats
             t.pop("controller_user_id", None)    # D82: nor who leads it
             t.pop("image", None)                 # D85: nor what artwork it wears
             t.pop("floor", None)                 # D86: nor which plane it stands on
@@ -751,6 +764,13 @@ def room_state(code: str, request: Request):
         "view_floor": view_floor,
         "grid": mapmodel.visible_map(mp, user["id"], room["_role"] == "dm", visible),
         "initiative": db.j(st.get("initiative"), {"combat": False, "order": [], "active": -1}),
+        # D111: presentation-only view of the MERGED condition catalog (built-in
+        # + this room's conditions.csv) — labels/glyphs/colors for chips and
+        # canvas dots, never the definition's mechanics cells.
+        "cond_catalog": {k: {"n": d.get("name", k), "g": d.get("glyph", "•"),
+                             "c": d.get("color", "#7f8c8d"),
+                             "m": d.get("group") == "marker"}
+                         for k, d in C.catalog(room["id"]).items()},
         "quests": questlog.visible_for(room["id"], room["_role"] == "dm"),
         "characters": [_char_row(c, curse="owner") for c in db.q("SELECT * FROM characters WHERE user_id=?", (user["id"],))],
         # D92: the DM's item-definition library travels to the DM only; players

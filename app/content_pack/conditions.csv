@@ -1,0 +1,4 @@
+id,name,glyph,color,group,blocks_movement,speed_delta,my_attacks_dis,my_checks_dis,my_saves_dis,attacks_against_me_adv,attacks_against_me_dis,auto_fail_saves,effects,manual
+smouldering,Smouldering,🔥,#e74c3c,condition,,,,,,,,,"{""on_start"":[{""expr"":""1d4"",""op"":""damage"",""target"":""self"",""type"":""fire""}]}",
+shaken,Shaken,😰,#f39c12,condition,,,1,1,,,,,,
+slicked,Slicked,💧,#29b3f6,condition,,-10,,,,,,,,

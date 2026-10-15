@@ -26,6 +26,11 @@ async def handle_cond_add(ws, room_id, user, is_dm, msg):
     db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), tok["id"]))
     sys_msg(room_id, f"{tok['label']} is now {C.label(str(msg.get('key','')).strip())}.")
     await send_cond_bump(room_id, tok, conds)     # SPRINT-21: hidden NPC stays hidden
+    # D113 (2024): a concentration-ending state landing (DM-authored too) ends a
+    # concentrating creature's concentration outright — re-reads the just-written
+    # state and, if it now blocks, clears the flag + every linked condition.
+    from .concentration import enforce_after_condition
+    await enforce_after_condition(room_id, tok)
 
 
 async def handle_cond_remove(ws, room_id, user, is_dm, msg):

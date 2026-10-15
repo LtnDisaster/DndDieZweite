@@ -12,7 +12,7 @@ players walk to. Positioning within a floor stays the D80-D84 contract.
 import json
 import re
 
-from . import db
+from . import db, vertical
 
 MAX_FLOORS = 8
 NAME_MAX = 24
@@ -102,3 +102,56 @@ def remove(room_id, value):
     db.x("UPDATE rooms SET floors=? WHERE id=?", (json.dumps(floors), room_id))
     db.x("DELETE FROM floor_maps WHERE room_id=? AND floor=?", (room_id, name))  # D88
     return True, floors
+
+
+# ---------------------------------------------------------------------------
+# D113 Phase 7: the declared floor ORDER is the vertical stack, on the canonical
+# 10 ft scale (primary = 0). This is a GEOMETRY/REPORTING convention only —
+# planes stay collision/visibility independent (D86/D88): a token two floors up
+# is 20 ft higher, it does NOT collide or cast cover through the scale below.
+# ---------------------------------------------------------------------------
+
+def level(room_id, name):
+    """Vertical level of a floor: the primary floor is 0; each further declared
+    floor sits one level (10 ft) above the previous, in declaration order."""
+    if not name:
+        return 0
+    room = db.q1("SELECT floors FROM rooms WHERE id=?", (room_id,))
+    if room is None:
+        return 0
+    names = parse(room)
+    return names.index(name) + 1 if name in names else 0
+
+
+def absolute_height_ft(room_id, floor_name, elev_units=0):
+    """Absolute height in feet: the floor's 10 ft/level offset + the ground cell
+    elevation (also 10 ft/unit)."""
+    return vertical.absolute_ft(vertical.floor_to_ft(level(room_id, floor_name)),
+                                elev_units)
+
+
+# ---------------------------------------------------------------------------
+# D114: a token's absolute VERTICAL SEGMENT on the shared 10 ft scale. `z` is the
+# maintained mirror of the ground cell's elevation unit, so a token's under-edge
+# = its floor's level offset + z·10 + elevation_ft; top = under-edge + height_ft.
+# These are pure reporting/geometry helpers — whether that segment actually
+# reaches another plane is gated by vertical openings (Phase 4/5), never assumed.
+# ---------------------------------------------------------------------------
+
+def token_base_ft(room_id, token):
+    """Absolute height (ft) of a token's under edge on its home plane."""
+    ground = absolute_height_ft(room_id, (token or {}).get("floor") or "",
+                                (token or {}).get("z") or 0)
+    return vertical.base_ft(ground, vertical.token_elevation_ft(token))
+
+
+def token_top_ft(room_id, token):
+    """Absolute height (ft) of a token's top edge."""
+    return vertical.top_ft(token_base_ft(room_id, token), vertical.token_height_ft(token))
+
+
+def token_levels_spanned(room_id, token):
+    """Floor LEVELS whose 10 ft band the token's body segment overlaps (by height
+    alone). Cross-plane PRESENCE additionally needs an opening (Phase 4/5)."""
+    return vertical.levels_between(token_base_ft(room_id, token),
+                                   token_top_ft(room_id, token))

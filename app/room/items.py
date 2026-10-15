@@ -4,7 +4,7 @@ import json
 from .. import db, gear, inventory as INV
 from . import death as D
 from .dice import do_roll
-from .net import broadcast, send_to, send_user, sys_msg
+from .net import broadcast, dm_whisper, send_to, send_user, sys_msg
 
 
 async def handle_use_item(ws, room_id, user, is_dm, msg):
@@ -23,7 +23,7 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
     if it["magic"] and not it["identified"] and not is_dm:
         await send_user(room_id, user["id"], "whisper", {"text": "✨ You don't know what this item does yet."})
         return
-    if not it["heal"]:
+    if not it["heal"] and not (it.get("props") or {}).get("effects"):
         await send_to(ws, "error", {"msg": f"{it['name']} isn't usable"})
         return
     if it["charges"] == 0:
@@ -56,8 +56,38 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
                 c.execute("UPDATE tokens SET death=NULL WHERE id=?", (tok["id"],))
     sys_msg(room_id, f"{ch['name']} uses {it['name']}.")
     extra = " (depleted)" if it["charges"] == 0 and it["chargesMax"] >= 0 else ""
-    await send_user(room_id, ch["user_id"], "whisper",
-                    {"text": f"🧪 {it['name']}: {it['heal']} = +{healed} → {hp}/{ch['max_hp']} HP{extra}"})
+    if it["heal"]:
+        await send_user(room_id, ch["user_id"], "whisper",
+                        {"text": f"🧪 {it['name']}: {it['heal']} = +{healed} → {hp}/{ch['max_hp']} HP{extra}"})
+    effect_cell = (it.get("props") or {}).get("effects")
+    if effect_cell:
+        # D111: the SAME effect core; its replay claim rides a distinct id so
+        # a re-sent op can neither heal twice nor fire twice.
+        from .. import effectops
+        try:
+            ops = effectops.validate(effect_cell)
+            ctx = effectops.make_ctx(room_id, caster=tok, target=tok, trigger="use",
+                                     op_id=(str(msg.get("op_id", "")) + ":fx")[:40]
+                                     if op_id else "")
+            ctx["self"] = tok
+            await effectops.run_ops(ops, ctx)
+            for frag in ctx["log"]:
+                await send_user(room_id, ch["user_id"], "whisper", {"text": f"✨ {frag}"})
+        except effectops.EffectError as ex:
+            await send_user(room_id, ch["user_id"], "whisper",
+                            {"text": f"⚠️ {it['name']}: effect refused ({ex})"})
+    cur = it.get("curse")
+    if isinstance(cur, dict) and cur.get("active") \
+            and str(cur.get("trigger", "")) == "use" and cur.get("effects"):
+        # D113: an ACTIVE use-armed curse answers the same "use", through the one
+        # effect core; the owner is never told (its fragment goes to the DM only).
+        from .. import effectops
+        fired = await effectops.fire(
+            room_id, "use", token=tok, caster=tok, items=[it],
+            round_uid=(str(op_id) + ":curse") if op_id else "")
+        for ctx in fired:
+            for frag in ctx["log"]:
+                await dm_whisper(room_id, f"✨ {frag}")
     await broadcast(room_id, "snapshot", None)
 
 

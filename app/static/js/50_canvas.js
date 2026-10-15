@@ -275,6 +275,10 @@ function drawTactical(){
       if (el){ ctx.fillStyle = el > 0 ? "#8fb3ff" : "#b0785a";
         ctx.font = `${Math.max(8, c/4)}px sans-serif`;
         ctx.fillText((el > 0 ? "+" : "") + el, sx+3, sy+c-4); }
+      if (gm.openv && gm.openv[i]){
+        ctx.fillStyle = "#7fd1ff"; ctx.font = `${Math.max(9, c/3)}px sans-serif`;
+        ctx.fillText("↕", sx + c - 14, sy + 14);
+      }
       ctx.strokeStyle = "#232735"; ctx.strokeRect(sx+.5, sy+.5, c, c);
     }
     if (state.bg && state.bg.complete && state.bg.naturalWidth){
@@ -438,6 +442,12 @@ function drawTactical(){
     ctx.fillText(dth && dth.dead ? "☠" : (hasArt ? "" : t.label.slice(0, 2).toUpperCase()), tx, ty + 4);
     ctx.font = "11px sans-serif";
     ctx.fillText(t.label, tx, ty + ey + 14);
+    const vertE = tokenElevationFt(t), vertH = t.height_ft != null;
+    if (vertE || vertH){
+      ctx.fillStyle = "#7fd1ff";
+      ctx.fillText(`${vertE ? "↑" + vertE + "ft" : ""}${vertE && vertH ? " " : ""}${vertH ? "↕" + tokenHeightFt(t) + "ft" : ""}`,
+                   tx, ty - ey - 18);
+    }
     const m = state.room.members.find(x => x.user_id === t.owner_user_id);
     if (m && m.char){
       const ch = m.char, pct = Math.max(0, ch.hp/ch.max_hp);
@@ -475,18 +485,28 @@ function canMove(t){
   return state.room.role === "dm" || t.owner_user_id === state.me.id
       || t.controller_user_id === state.me.id;
 }
-/* D86 floors: the viewer stands on the plane of their own token. Tokens and
-   ghosts on other planes are elsewhere — not rendered, not clickable.
-   D102: the DM BROWSES planes (viewFloor) — a plane's map shows exactly that
-   plane's tokens, not every plane's tokens floating over one another. The
-   server /state still lists all planes for the DM's tables; the canvas obeys
-   the viewed plane. */
+/* D86/D114: the plane a viewer is considered to stand on. A DM browses the
+   explicitly viewed plane; a player normally follows their own token's plane.
+   Cross-plane tokens are not filtered locally: the server has already decided
+   which rows are legitimately observable to this viewer. */
 function viewerPlane(){
-  if (state.room && state.room.role === "dm") return String(state.viewFloor || "");
-  const mine = (state.tokens || []).find(t => state.me && t.owner_user_id === state.me.id);
-  return (mine && mine.floor) || "";
+  if (!state.room) return null;
+  if (typeof state.viewFloor === "string") return state.viewFloor;
+  if (state.room.role === "dm") return null;
+
+  const me = state.me && state.me.id;
+  const own = (state.tokens || []).find(t =>
+    t.owner_user_id === me || t.controller_user_id === me);
+
+  return own ? (own.floor || "") : null;
 }
+
+/* D86/D114: DM browsing remains plane-local. Players and character previews
+   may render/click exactly the rows delivered by the server — a second,
+   client-side visibility engine must not be introduced. */
 function onPlane(t){
+  if (state.preview || !state.room || state.room.role !== "dm") return true;
+
   const p = viewerPlane();
   return p === null || (t.floor || "") === p;
 }
@@ -609,6 +629,7 @@ function paint(cx, cy){
   else if (b === "barrier") gm.cells[i] = 3;
   else if (b === "low") gm.cells[i] = 4;
   else if (b === "erase"){ gm.cells[i] = 0;
+    if (gm.openv && gm.openv.length === gm.w * gm.h) gm.openv[i] = 0;
     gm.traps = gm.traps.filter(t => !(t.x===cx && t.y===cy));
     gm.loot = gm.loot.filter(l => !(l.x===cx && l.y===cy));
     gm.objects = (gm.objects||[]).filter(o => !(o.x===cx && o.y===cy)); }
@@ -620,12 +641,24 @@ function paint(cx, cy){
     gm.elev = gm.elev && gm.elev.length === gm.w * gm.h ? gm.elev : new Array(gm.w * gm.h).fill(0);
     gm.elev[i] = Math.max(-6, Math.min(6, (gm.elev[i] || 0) + (b === "raise" ? 1 : -1)));
   }
+  else if (b === "openv"){
+    gm.openv = gm.openv && gm.openv.length === gm.w * gm.h ? gm.openv : new Array(gm.w * gm.h).fill(0);
+    gm.openv[i] = gm.openv[i] ? 0 : 1;
+  }
   else if (b === "trap"){
     gm.traps = gm.traps.filter(t => !(t.x===cx && t.y===cy));
     const label = ($("trap-label").value || "").trim().slice(0,80) || "Trap";
     let dc = +$("trap-dc").value; if (!(dc >= 1 && dc <= 30)) dc = 13;
     const dmg = ($("trap-dmg").value || "").trim().slice(0,16) || "1d4";
-    gm.traps.push({ id: eid(), x:cx, y:cy, label, dc, dmg, discovered:false });
+    const t = { id: eid(), x:cx, y:cy, label, dc, dmg, discovered:false };
+    // D113 Phase 5: optional data-driven fields. Only added when set, so a plain
+    // trap stays byte-identical. `effects` (JSON grammar cell) wins at runtime.
+    const eff = ($("trap-effects") ? ($("trap-effects").value||"").trim() : "");
+    if (eff){ try { t.effects = JSON.parse(eff); } catch(e){ toast("Trap effect cell is not valid JSON"); return; } }
+    const sdc = +(($("trap-search")||{}).value||0); if (sdc >= 1 && sdc <= 30) t.search_dc = sdc;
+    const adc = +(($("trap-disarm")||{}).value||0); if (adc >= 1 && adc <= 30) t.disarm_dc = adc;
+    if (($("trap-repeat")||{}).checked) t.repeat = true;
+    gm.traps.push(t);
   }
   else if (b === "loot"){
     gm.loot = gm.loot.filter(l => !(l.x===cx && l.y===cy));
@@ -1018,9 +1051,11 @@ function edResize(){
                objects: (old.objects||[]).filter(o => inW(o.x, o.y)),
                doors: (old.doors||[]).filter(d => inW(d.x, d.y) && (d.dir === "v" ? inW(d.x+1, d.y) : inW(d.x, d.y+1))) };
   gm.elev = new Array(w*h).fill(0);
+  gm.openv = new Array(w*h).fill(0);
   for (let y = 0; y < Math.min(h, old.h); y++) for (let x = 0; x < Math.min(w, old.w); x++){
     gm.cells[y*w+x] = old.cells[y*old.w+x];
     if (old.elev) gm.elev[y*w+x] = old.elev[y*old.w+x];   // row-wise carry (D70)
+    if (old.openv) gm.openv[y*w+x] = old.openv[y*old.w+x]; // D114 vertical openings
   }
   state.editMap = gm;
 }

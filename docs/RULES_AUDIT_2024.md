@@ -47,7 +47,7 @@ Prioritäten: **R-P0** Regel-Identität, **R-P1** spürbare Lücke, **R-P2** Kom
 | A4 | Krit = Würfel verdoppeln — `room/dice.py:127` | „Roll all of the attack's damage dice twice" | `[2024]` ✓ | — |
 | A5 | Cover manuell +2/+5/total — `room/dice.py:408` | Half +2, Three-Quarter +5, Total (nicht anvisierbar) | `[2024]` ✓ (3/4-Deckung fehlt als Auswahl) | R-P2 |
 | A6 | Advantage/Disadvantage nur manuell; Conditions sind Meta | Bedingungen 2024 erzwingen Modi automatisch | `[HR]` (DM-Hoheit, bewusst) | R-P2 |
-| A7 | Passive Perception nirgends | **in 2024 entfallen** — Nichtvorhandensein ist konform | `[2024]` ✓ | — |
+| A7 | Passive Perception nirgends | **in 2024 entfallen** — Nichtvorhandensein ist konform; Taschendiebstahl-„bemerkt" (D112) löst ohne passive Wahrnehmung: feste `notice_dc` ODER echter Wahrnehmungs-Wurf | `[2024]` ✓ | — |
 | A8 | AC ungerüstet = manueller Sheet-Wert `ac` — `gear.py:472` | Basis-AC-Berechnung „10 plus your Dexterity modifier" | `[HR]` (nichts wird abgeleitet; Sheet bleibt Autorität) | R-P2 |
 | A9 | Traglast STR×15 — `gear.py:948` | Small/Medium Carry STR×15; bei Überschreitung Speed 5 ft (Encumbered existiert nicht als Condition) | `[2024]` ✓ (Speed-Strafe nicht automatisiert) | R-P2 |
 | A10 | Attunement-Kap 3 — `gear.py:10` | „no more than three magic items" | `[2024]` ✓ | — |
@@ -76,7 +76,7 @@ Prioritäten: **R-P0** Regel-Identität, **R-P1** spürbare Lücke, **R-P2** Kom
 
 | # | Befund | SRD 5.2.1 | Einstufung | Prio |
 |---|---|---|---|---|
-| D1 | Konzentration als Flag/Zustand, kein Save bei Schaden | CON-Save, DC = max(10, halber Schaden ↓), Cap 30 | `[lück]` | **R-P1** |
+| D1 | Konzentration 2024 vollständig (D113) | CON-Save, DC = max(10, halber tatsächlicher Schaden ↓), kein Cap; 0 HP/Inkapazität bricht ohne Wurf; Effekte enden mit der Konzentration | `[2024]` ✓ | **R-P1** (D113) |
 | D2 | attack/save/half-Auflösung, Upcast, Areas | Grundmodell gleich | `[2024]` ✓ | — |
 
 ### E · Waffen & Ausrüstung
@@ -98,7 +98,7 @@ Prioritäten: **R-P0** Regel-Identität, **R-P1** spürbare Lücke, **R-P2** Kom
 | F4 | Exhaustion 0–6 Counter, keine Stufeneffekte — `status.py:71` | Stufeneffekte: −2/−5ft je Level, Tod bei 6 | `[Anz.]` | R-P2 |
 | F5 | 15 Zustände + `concentrating`; **`incapacitated` fehlt** — `conditions.py:20` | 15 Conditions inkl. eigenem **Incapacitated** | `[2014]`-Liste | R-P2 |
 | F6 | Inspiration Boolean — `status.py:45` | Heroic Inspiration: verbraubarer Reroll; Doppelgewinn → weitergeben | `[Anz.]` | R-P2 |
-| F7 | kein Grapple-Contest | Grappling-Regeln vorhanden (SRD) | `[lück]` | R-P2 |
+| F7 | Grapple/Shove/Escape umgesetzt (D112, `app/room/grapple.py`) — 2024-Weg: Angriffs-Wert (max unbewaffnet/Athletik) als DC, Ziel **rettet** Str/Geschick (höhere, DM-override), kein 2014-Athletik-Wettkampf; Ende bei Reichweitenverlust/Grappler-weg | Grappling/Shoving (SRD 5.2.1: check→save) | `[2024]` ✓ | — |
 | F8 | Help zum Stabilisieren (DC 10 Medicine) nicht automatisiert | existiert als Standard-Regel | `[lück]` | R-P2 |
 
 ---
@@ -148,8 +148,10 @@ datengetrieben ✓.
 Bonusangriff (E2); Origin-Feat-Wahlablauf + Species-Bonus-Feats (B5).
 **R-P2:** `incapacitated`-Condition (F5); Exhaustion-Effekte (F4); Short-Rest-
 HD-Cap prüfen (F2); Long-Rest 16-h-Gate/Exhaustion (F3); 3/4-Cover (A5);
-Grapple (F7); Stabilize-Help (F8); Inspiration-Punkte-Semantik (F6); Prepare-
+Stabilize-Help (F8); Inspiration-Punkte-Semantik (F6); Prepare-
 Ablauf (C3); Requires-Terminologie (B6); Auto-Modi-Diskussion (A6, bewusst HR).
+*(Grapple/Shove/Escape und Taschendiebstahl F7 wurden in D112 erledigt, 2024-
+korrekt — siehe §9.)*
 
 ## 6. Lizenzstand (R-L0 — gelöst)
 
@@ -165,3 +167,126 @@ Keine Weapon-Masteries, keine vollständigen 2024er Klassen-/Feat-/Spell-Packs,
 keine Automatisierung der R-P1-Mechaniken, keine retroaktive Migration
 bestehender Charaktere (Ursprung wird nie automatisch gesetzt). Kein Git-Zugriff,
 keine Änderungen an `55_diorama.js`. Kanonischer Stand: `TODO.md` Sprint-37.
+
+## 8. R-P0 umgesetzt (D109): Weapon-Mastery-Schicht
+
+Die acht SRD-5.2.1-Masteries (Cleave, Graze, Nick, Push, Sap, Slow, Topple,
+Vex) sind serverautoritativ implementiert. Modell in drei Achsen — jede ist
+für sich nötig, keine ersetzt die andere:
+
+1. **Waffeneigenschaft:** `items.mastery` (bzw. Prop) sagt, was die Waffe
+   KANN. Getrennt von den Properties, wie das Audit es fordert.
+2. **Berechtigung:** das Build-Ledger `characters.build.masteries`
+   (`grants` + `pending`) sagt, was der DARF. Zustände: Level-Anwendung
+   (forward-only, nie rückwirkend), DM-Grant-Route, Auswahl aus der Level-
+   Auswahl der Klassen-CSV (`mastery_options`, leer = frei).
+3. **Absicht + Legalität im Kampf:** der roll-Request trägt `mastery`
+   (Opt-in — ein normaler Angriff würfelt nie ungefragt mit Mastery); die
+   Validierung passiert VOR dem ersten Würfelwurf (Property, Ledger,
+   Modus, Initiative-Anker, Hände, Reichweite, Einmal-pro-Turn für Cleave
+   und Nick via `initiative.turn.m_cleave`/`m_nick`).
+
+Mechanik-Verankerung ohne zweite Engine: Graze/Cleave/Nick laufen rein im
+Angriffsauflöser; Push ist ein `apply_forced_move`-Aufruf (Art „push",
+Hindernisse truncieren wie alle erzwungenen Bewegungen); Topple nutzt den
+bestehenden Rettungs-/Prone-Pfad; Sap/Slow/Vex schreiben bestehende
+Condition-Marker (`sapped`/`slowed`/`vexed`) mit `src`-Anker, deren Ablauf
+ausschließlich in der bestehenden D80-Turn-Lifecycle-Stelle passiert;
+Nachteile/Vorteile kombinieren über die bestehende adv+dis=Konfusion-Regel;
+`slowed` wirkt über den einen `_speeds`-Hook (−10 ft, nicht stapelbar).
+
+**Dokumentierte Abweichungen/Grenzen (bewusst):** (a) „when you deal
+damage" (Slow/Vex) ist als servergewürfelter Schaden > 0 realisiert — HP
+bleibt manuell gepflegt; (b) Sap/Slow/Vex-Marker brauchen aktive Initiative
+und gelistete Token (src-Ablauf ist an die Turn-Hooks gebunden);
+(c) Spell-Angriffe können Marker nur verbrauchen, wenn die Anfrage eine
+eigene Token-Referenz trägt — Angriffe ohne Token bleiben marker-neutral;
+(d) magische Flat-Boni und Extra-Schadenswürfel bleiben bei Cleave erhalten,
+nur der Ability-Modifikator entfällt (außer negativ). Kanonischer Stand:
+`TODO.md` Sprint-38, Tests `tests/test_d109_mastery.py`.
+
+## 9. R-P2 teilweise umgesetzt (D112): Grapple/Shove/Escape + Taschendiebstahl, 2024-korrekt
+
+**Kontesto als Helfer, nicht als Regel-Engine.** `app/room/opposed.py` löst
+die drei Formen (Wurf-vs-Wurf, Wurf→DC→Rettung, Wurf-vs-feste-DC) über den
+BESTEHENDEN Würfelkanal; eigener Regelcode: keiner. Tie per Default
+`defender` (d20-Gleichstand → Verteidiger, „DC muss erreicht werden"),
+DM-Delegation über `tie="dm"`/`Tie` — nie ein stiller Münzwurf.
+
+**Grapple/Shove/Escape (F7) = 2024, nicht 2014.** Der 2014er
+Athletik-gegen-Athletik-Wettkampf existiert in SRD 5.2.1 so nicht; umgesetzt ist
+der 2024-Weg: der Sonderkampf-Wert des Angreifers (`melee_attack_number` = max
+unbewaffneter Angriffsbonus / Athletik-Wurf) wird zur DC, auf die das Ziel mit
+einer **Rettung** antwortet — per Default die höhere der beiden Stärke/
+Geschicklichkeit (`better_save`), DM kann `save` vorgeben. Shove teilt denselben
+Wurf: Niederringen über den bestehenden Prone-Pfad, 5-ft-Stoß über
+`moveforced.apply_forced_move`. Der Grapple-Zustand endet bei Reichweitenverlust
+(`end_grapples_out_of_reach` an allen drei Bewegungs-Enden: erzwungene Bewegung,
+normaler Lauf, DM-Teleport) oder wenn der Grappler weg/kampunfähig ist; Entkommen
+= Athletik **oder** Akrobatik gegen die am `grappled`-Cond gespeicherte `dc`.
+Reichweite/Nachbarschaft = dieselbe Eckpunkt-Geometrie (Chebyshev ≤ 1) wie der
+Würfelkanal; Größengate „höchstens eine Größenkategorie größer" (`npc.SIZES`).
+
+**Taschendiebstahl ohne passive Wahrnehmung (A7).** Da 2024 passive Perception
+entfällt, ist „bemerkt" entweder eine DM-feste `notice_dc` oder ein echter
+Wahrnehmungs-Wurf (`opposed_wins`, Tie→defender); die Engine erzwingt keinen
+Modus. Verborgene Fingerfertigkeits-Probe, Ergebnis nur an den DM; Entdeckung
+getrennt vom Diebstahl gemeldet; beide Adjudikationsmodelle (DM-vermittelt und
+`pick`-Teilmenge-Auto-Entnahme) mit atomarer, flucherhaltender Übertragung.
+
+**Grenze (bewusst, → S42):** die Kontesto-Auflösung ist (noch) kein Op der
+Effektgrammatik — CSV kann keine Probe-gegen-Probe autorisieren. Die Helfer-
+Schnittstelle ist in `docs/EFFECT_GRAMMAR.md` §6a dokumentiert und wird dort
+eingewickelt. Tests: `tests/test_d112_contested.py`. Kanonischer Stand: D112,
+883 passed / 1 skipped / 0 failed.
+
+## 10. R-P1/R-P2 umgesetzt (D113, Sprint 42): Konzentration 2024, Opposed-Op, automatische Flüche
+
+**Konzentration (D1, R-P1).** D&D 2024: Bei Schaden muss der Konzentrierende
+einen Konstitutions-Rettungswurf gegen `DC = max(10, halber Schaden)` bestehen.
+Der Schaden zählt dabei **tatsächlich verlorene Lebenspunkte** (nach Resistenz
+**und** Temp-HP-Absorption), die DC hat ein Minimum von 10 und **kein Cap**
+(70 Schaden → DC 35). Runtergehen auf 0 HP oder ein Inkapazitätszustand bricht
+die Konzentration ohne Wurf. Eine neue Konzentration beendet die alte; eine
+beendete Konzentration beendet die Zauber-Effekte, die an ihr hängen.
+Umsetzung: `app/room/concentration.py` (Lebenszyklus), `conc`-Link-Feld an
+Conditions (additiv, `app/conditions.py`), Save über `room.opposed.save_roll`,
+Anschluss in `room.health.change_hp` (HP-Verlust nach Resistenz/Temp) und in
+`app/abilities.py` (neue Konzentration zuerst, `conc`-Stempel). 2024-Bonus: das
+Wirken eines neuen Konzentration-Zaubers beendet den alten **vor** dessen
+eigenen Effekten.
+
+**Opposed als Grammatik-Op (D112-Grenze → S42, R-P2).** Die in D112 offene Grenze
+„Kontesto ist noch kein Op" ist geschlossen: `effectops` v2 kennt einen
+`opposed`-Op, der denselben `room.opposed`-Kern nutzt (kein zweiter Mechanismus).
+Konfrontatives Wettkampfwerfen ist damit auch datengetrieben (CSV-Zelle) möglich.
+
+**Automatische Flüche (2024-Auslegung).** Ein Fluch ist eine DM-Autorisierung auf
+einer Item-Instanz: `trigger` (Wann: equip/unequip/use/on_hit/on_damaged/
+on_transfer) + `effects` (Was: dieselbe Wirkgrammatik) + `active` (Ob überhaupt).
+2024-getreu ist kein Unequip/Besitzerwechsel automatisch ein Ende des Fluchs —
+Dauer/Bindung/Entfernung sind ausdrücklich zu setzen. `active` und Enthüllung
+(`revealed`) sind unabhängig: Ein Fluch kann wirken, ohne dass der Besitzer ihn
+kennt; Enthüllen/Verbergen/Whisper ändern die Aktivierung nie. Die
+Wirk-Auslieferung respektiert die Disclosure-Grenze (`curse_view` für Daten,
+DM-only-Wisper für curse-origin-Texte). Kein alter Fluch wird durch die
+Erweiterung aktiv (Omit-when-Default).
+
+**Fallen datengetrieben (D113 Phase 5, SRD 5.2.1 „Traps").** Eine Falle ist eine
+Map-Entität mit DM-autorierten Feldern, keine eigene Engine und keine `traps.csv`.
+Auslösung (Schritt auf das Feld), Rettungswurf und Folge laufen über die eine
+Wirkgrammatik (`save`/`check`/`damage`/`condition`/`forced_move`), der
+`random.randint`-Würfel ist entfallen. Entdecken (WIS/Wahrnehmung gegen
+`search_dc`) und Entschärfen (DEX-Wurf gegen `disarm_dc`) sind Checks über die
+Opposed-Primitive — keine neue Werkzeug-Proficiency-Engine (Vorteil vergibt der
+DM). 2024-treu: passives Wahrnehmen gibt es nicht (A7), Entdecken ist ein
+aktiver Check; eine entschärfte/runtergegangene Falle federt nicht mehr.
+
+**Vertikale Skala (D113 Phase 7, SRD 5.2.1 „The Environment" Höhen/Stockwerk).**
+Eine Höhen-Einheit der `elev`-Ebene und eine deklarierte Stockwerk-Ebene
+entsprechen JEDEM exakt 10 ft — die Stockwerk-zu-Stockwerk-Distanz ist damit
+fest und konsistent (`app/vertical.py`). Das ist die SKALA, kein Höhenkampf:
+Sturzschaden, Deckung durch Höhe und Flug/Schwimm-/Kletter-Kosten bleiben die
+bewusst nicht gebaute Engine-Kante (D70/D83). Passives Wahrnehmen existiert nicht
+(A7),ebenso erzwingt die Engine keine Höhen-Regel — sie liefert nur die
+eindeutige Fuß-Größe je Einheit/Stockwerk.

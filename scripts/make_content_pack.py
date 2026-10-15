@@ -45,7 +45,7 @@ emit("species", [
 
 # ------------------------------------------------------------ classs
 emit("class", [
-    {'id': 'scout', 'level': '1', 'name': 'Scout', 'hit_die': '8', 'hp_base': '14', 'hp_per_level': '5', 'saves': 'dex, int', 'skill_options': 'acrobatics, athletics, deception, insight, intimidation, investigation, perception, performance, persuasion, sleight_of_hand, stealth', 'skill_count': '4', 'weapon_prof': 'simple, martial', 'armor_prof': 'light', 'features': 'Expertise; Sly Strike', 'expertise': '1', 'subclass_family': 'scout_traditions', 'starting_items': 'dagger_surge, potion_heal x2', 'starting_choices': 'weapon=bow_long|sword_versatile; kit=gloves_thief|goggles_night'},
+    {'id': 'scout', 'level': '1', 'name': 'Scout', 'hit_die': '8', 'hp_base': '14', 'hp_per_level': '5', 'saves': 'dex, int', 'skill_options': 'acrobatics, athletics, deception, insight, intimidation, investigation, perception, performance, persuasion, sleight_of_hand, stealth', 'skill_count': '4', 'weapon_prof': 'simple, martial', 'armor_prof': 'light', 'features': 'Expertise; Sly Strike', 'expertise': '1', 'subclass_family': 'scout_traditions', 'starting_items': 'dagger_surge, potion_heal x2', 'starting_choices': 'weapon=bow_long|sword_versatile; kit=gloves_thief|goggles_night', 'mastery_gain': '1'},
     {'id': 'scout', 'level': '2', 'features': 'Nimble Dodge'},
     {'id': 'scout', 'level': '3', 'features': 'Tradition feature', 'subclass_choice': '1'},
     {'id': 'scout', 'level': '4', 'ability_boost_or_feat': '1'},
@@ -85,7 +85,7 @@ emit("class", [
     {'id': 'adept', 'level': '18', 'cantrips_known': '5', 'spells_known': '32', 'slot_progression': '1:4;2:3;3:3;4:3;5:3;6:2;7:1;8:1;9:1', 'spell_first_level': '1'},
     {'id': 'adept', 'level': '19', 'cantrips_known': '5', 'spells_known': '34', 'slot_progression': '1:4;2:3;3:3;4:3;5:3;6:2;7:1;8:1;9:1', 'spell_first_level': '1'},
     {'id': 'adept', 'level': '20', 'features': 'Arcane Mastery', 'cantrips_known': '5', 'spells_known': '36', 'slot_progression': '1:4;2:3;3:3;4:3;5:3;6:2;7:2;8:1;9:1', 'spell_first_level': '1'},
-    {'id': 'warden', 'level': '1', 'name': 'Warden', 'hit_die': '10', 'hp_base': '12', 'hp_per_level': '5', 'saves': 'wis; cha', 'skill_options': 'animal_handling;athletics;insight;perception;survival', 'skill_count': '2', 'weapon_prof': 'simple; martial', 'armor_prof': 'all armor; shields', 'features': "Warden's Bond", 'starting_choices': 'focus=ring_warding|gloves_giant'},
+    {'id': 'warden', 'level': '1', 'name': 'Warden', 'hit_die': '10', 'hp_base': '12', 'hp_per_level': '5', 'saves': 'wis; cha', 'skill_options': 'animal_handling;athletics;insight;perception;survival', 'skill_count': '2', 'weapon_prof': 'simple; martial', 'armor_prof': 'all armor; shields', 'features': "Warden's Bond", 'starting_choices': 'focus=ring_warding|gloves_giant', 'mastery_gain': '1'},
     {'id': 'warden', 'level': '2', 'hit_die': '10', 'hp_base': '12', 'hp_per_level': '5', 'saves': 'wis; cha', 'spellcasting_ability': 'wis', 'cantrips_known': '2', 'spells_known': '2', 'slot_progression': '1:2', 'spell_first_level': '2'},
     {'id': 'warden', 'level': '3', 'hit_die': '10', 'hp_base': '12', 'hp_per_level': '5', 'saves': 'wis; cha', 'spellcasting_ability': 'wis', 'cantrips_known': '2', 'spells_known': '2', 'slot_progression': '1:3', 'spell_first_level': '2'},
     {'id': 'warden', 'level': '4', 'hit_die': '10', 'hp_base': '12', 'hp_per_level': '5', 'saves': 'wis; cha', 'ability_boost_or_feat': '1', 'spellcasting_ability': 'wis', 'cantrips_known': '2', 'spells_known': '2', 'slot_progression': '1:3', 'spell_first_level': '2'},
@@ -151,15 +151,16 @@ emit("feat", [
     {'id': 'feat_nimble', 'name': 'Nimble Steps', 'ability_boost': 'dex+1', 'effect': '+1 Dexterity (max 20)', 'category': 'general', 'manual': 'the 5 ft speed increase is not automated today'},
     {'id': 'feat_quick_study', 'name': 'Quick Study', 'skill_prof': 'investigation', 'effect': "Proficiency in Investigation; you can recall a book's exact wording", 'category': 'origin', 'manual': 'demo origin feat (house rule) for bg_scholar'},
     {'id': 'feat_alley_cat', 'name': 'Alley Cat', 'skill_prof': 'stealth', 'effect': 'Proficiency in Stealth; you always know the nearest way out of a building', 'category': 'origin', 'manual': 'demo origin feat (house rule) for bg_urchin'},
+    {'id': 'martyr', 'name': "Martyr's Guard", 'effect': 'Once per fight: 2d4+2 temporary hit points', 'category': 'general', 'effects': '{"ops":[{"expr":"2d4+2","op":"temp_hp","target":"self"}],"v":1}', 'manual': 'D111 demo: active feat — registers as castable ability feat_martyr'},
 ])
 
 # ------------------------------------------------------------ items
 emit("item", [
     {'id': 'sword_plus1', 'name': 'Sword +1', 'category': 'weapon', 'kind': 'weapon', 'weight': '3', 'value_gp': '25', 'damage_dice': '1d8', 'attack_bonus': '1', 'damage_bonus': '1', 'damage_type': 'slashing', 'magic': '1', 'desc': 'Adds +1 to attack and +1 to damage, but only when you attack with this sword.'},
-    {'id': 'sword_versatile', 'name': 'Versatile Sword', 'category': 'weapon', 'kind': 'weapon', 'weight': '3', 'value_gp': '20', 'damage_dice': '1d8', 'damage_dice_two_handed': '1d10', 'versatile': '1', 'desc': 'One-handed 1d8. Two-handed 1d10. Choose the grip.'},
-    {'id': 'axe_great', 'name': 'Great Axe', 'category': 'weapon', 'kind': 'weapon', 'weight': '7', 'value_gp': '30', 'damage_dice': '1d12', 'two_handed': '1', 'damage_type': 'slashing', 'desc': 'Requires two hands to wield.'},
-    {'id': 'bow_long', 'name': 'Long Bow', 'category': 'weapon', 'kind': 'weapon', 'weight': '2', 'value_gp': '50', 'damage_dice': '1d8', 'two_handed': '1', 'range_normal_ft': '150', 'range_long_ft': '600', 'damage_type': 'piercing', 'desc': 'Normal range 150 ft, long range 600 ft.'},
-    {'id': 'dagger_surge', 'name': 'Dagger of the Surge', 'category': 'weapon', 'kind': 'weapon', 'weight': '1', 'damage_dice': '1d4', 'finesse': '1', 'attack_bonus': '1', 'extra_damage_dice': '+1d8', 'extra_damage_type': 'lightning', 'magic': '1', 'desc': '+1 to attack. On a hit it deals an extra 1d8 lightning damage.'},
+    {'id': 'sword_versatile', 'name': 'Versatile Sword', 'category': 'weapon', 'kind': 'weapon', 'weight': '3', 'value_gp': '20', 'damage_dice': '1d8', 'damage_dice_two_handed': '1d10', 'versatile': '1', 'mastery': 'topple', 'desc': 'One-handed 1d8. Two-handed 1d10. Choose the grip.'},
+    {'id': 'axe_great', 'name': 'Great Axe', 'category': 'weapon', 'kind': 'weapon', 'weight': '7', 'value_gp': '30', 'damage_dice': '1d12', 'two_handed': '1', 'damage_type': 'slashing', 'mastery': 'cleave', 'desc': 'Requires two hands to wield.'},
+    {'id': 'bow_long', 'name': 'Long Bow', 'category': 'weapon', 'kind': 'weapon', 'weight': '2', 'value_gp': '50', 'damage_dice': '1d8', 'two_handed': '1', 'range_normal_ft': '150', 'range_long_ft': '600', 'damage_type': 'piercing', 'mastery': 'vex', 'desc': 'Normal range 150 ft, long range 600 ft.'},
+    {'id': 'dagger_surge', 'name': 'Dagger of the Surge', 'category': 'weapon', 'kind': 'weapon', 'weight': '1', 'damage_dice': '1d4', 'finesse': '1', 'attack_bonus': '1', 'extra_damage_dice': '+1d8', 'extra_damage_type': 'lightning', 'magic': '1', 'mastery': 'nick', 'desc': '+1 to attack. On a hit it deals an extra 1d8 lightning damage.'},
     {'id': 'ring_warding', 'name': 'Ring of Warding', 'category': 'wondrous', 'kind': 'ring', 'ac_bonus': '2', 'attune': '1', 'magic': '1', 'desc': 'While attuned this ring grants +2 to AC.'},
     {'id': 'leather_vest', 'name': 'Leather Vest', 'category': 'armor', 'kind': 'armor', 'weight': '5', 'value_gp': '10', 'ac_base': '11', 'ac_max_dex': '2', 'desc': 'Base AC 11 plus your Dexterity modifier up to +2.'},
     {'id': 'gloves_thief', 'name': 'Gloves of the Thief', 'category': 'other', 'kind': 'wondrous', 'skill_prof': 'stealth, sleight_of_hand', 'attune': '1', 'magic': '1', 'desc': 'While worn grants proficiency in Stealth and Sleight of Hand.'},
@@ -167,6 +168,9 @@ emit("item", [
     {'id': 'gloves_giant', 'name': 'Gloves of the Giant', 'category': 'other', 'kind': 'wondrous', 'attribute_set': 'str=15', 'attune': '1', 'magic': '1', 'desc': 'While worn your Strength equals 15 (it never lowers a higher score).'},
     {'id': 'potion_heal', 'name': 'Healing Draught', 'category': 'potion', 'kind': 'potion', 'value_gp': '25', 'heal_dice': '2d4+2', 'desc': 'Drink to regain 2d4+2 hit points.'},
     {'id': 'talisman_fate', 'name': 'Talisman of Fate', 'category': 'other', 'kind': 'wondrous', 'attune': '1', 'magic': '1', 'manual': 'Reroll one failed saving throw once per dawn. The DM resolves this manually.'},
+    {'id': 'oil_vial', 'name': 'Vial of Slick Oil', 'category': 'potion', 'kind': 'potion', 'value_gp': '10', 'desc': 'Throw it: the target is slicked for 3 rounds.', 'trigger': 'use', 'effects': '{"ops":[{"key":"slicked","op":"condition","rounds":3,"target":"target","until":""}],"v":1}'},
+    {'id': 'ring_ember', 'name': 'Emberheart Ring', 'category': 'wondrous', 'kind': 'ring', 'magic': '1', 'desc': 'When you take damage, the ember grants 1d4+1 temporary hit points.', 'trigger': 'on_damaged', 'effects': '{"ops":[{"expr":"1d4+1","op":"temp_hp","target":"self"}],"v":1}'},
+    {'id': 'blade_quake', 'name': 'Quakeblade', 'category': 'weapon', 'kind': 'weapon', 'weight': '3', 'value_gp': '60', 'damage_dice': '1d8', 'damage_type': 'bludgeoning', 'magic': '1', 'desc': 'On a hit the target is shaken until the end of its next turn.', 'trigger': 'on_hit', 'effects': '{"ops":[{"key":"shaken","op":"condition","rounds":1,"target":"target","until":"end"}],"v":1}'},
 ])
 
 # ------------------------------------------------------------ spells
@@ -181,12 +185,20 @@ emit("spell", [
     {'id': 'restoration', 'name': 'Lesser Restoration', 'level': '1', 'school': 'necromancy', 'casting_ability': 'wis', 'targeting': 'single', 'range_ft': '5', 'casting_time': '1 action', 'duration': 'instant', 'resolution': 'auto', 'heal_dice': '2d4+2', 'class_list': 'warden; seer'},
     {'id': 'ward_ice', 'name': 'Guarded Frost', 'level': '3', 'school': 'evocation', 'casting_ability': 'int', 'targeting': 'area', 'shape': 'circle', 'size_ft': '20', 'range_ft': '120', 'casting_time': '1 action', 'duration': 'instant', 'resolution': 'save', 'save': 'dex', 'on_save': 'half', 'damage_dice': '6d6', 'damage_type': 'cold', 'upcast_step': '+1d6', 'upcast_scaling': '1', 'class_list': 'adept; warden; seer'},
     {'id': 'curse', 'name': 'Dread Curse', 'level': '2', 'school': 'necromancy', 'casting_ability': 'cha', 'targeting': 'single', 'range_ft': '90', 'casting_time': '1 action', 'duration': 'instant', 'concentration': 'True', 'resolution': 'save', 'save': 'wis', 'on_save': 'half', 'damage_dice': '3d6', 'damage_type': 'necrotic', 'upcast_step': '+1d6', 'upcast_scaling': '1', 'class_list': 'seer'},
+    {'id': 'thunder_lure', 'name': 'Thunder Lure', 'level': '1', 'school': 'evocation', 'casting_ability': 'int', 'targeting': 'single', 'range_ft': '60', 'casting_time': '1 action', 'duration': 'instant', 'resolution': 'auto', 'class_list': 'adept; warden; seer', 'desc': '2d6 thunder; STR save DC 12 or pushed 2 cells away.', 'manual': 'D111 demo: op-list spell (damage + save branch + forced move)', 'effects': '{"ops":[{"expr":"2d6","op":"damage","target":"target","type":"thunder"},{"ability":"str","dc":12,"failure":[{"cells":2,"from":"caster","kind":"push","op":"forced_move","target":"target"}],"op":"save","success":[],"target":"target"}],"v":1}'},
 ])
 
 # ------------------------------------------------------------ creatures
 emit("creature", [
     {'id': 'wolfkin', 'name': 'Wolfkin', 'size': 'medium', 'type': 'beast', 'ac': '13', 'hp': '11', 'speed_ft': '40', 'str': '12', 'dex': '15', 'con': '12', 'int': '3', 'wis': '12', 'cha': '6', 'cr': '1/4', 'skills': 'perception, stealth', 'saves': 'dex, wis', 'attacks': 'Bite +4 to hit; 1d6+2 piercing', 'tags': 'companion, beast', 'companion': '1'},
     {'id': 'hawkkin', 'name': 'Hawk-kin', 'size': 'tiny', 'type': 'beast', 'ac': '14', 'hp': '7', 'speed_ft': '10', 'fly_ft': '60', 'str': '4', 'dex': '18', 'con': '11', 'int': '2', 'wis': '14', 'cha': '7', 'cr': '1/4', 'skills': 'perception', 'attacks': 'Talons +6 to hit; 1d4+4 piercing', 'darkvision_ft': '60', 'tags': 'companion, mount, flyer', 'companion': '1'},
+])
+
+# ------------------------------------------------- conditions (D111 definitions)
+emit("condition", [
+    {'id': 'smouldering', 'name': 'Smouldering', 'glyph': '\U0001F525', 'color': '#e74c3c', 'group': 'condition', 'effects': '{"on_start":[{"expr":"1d4","op":"damage","target":"self","type":"fire"}]}'},
+    {'id': 'shaken', 'name': 'Shaken', 'glyph': '\U0001F630', 'color': '#f39c12', 'group': 'condition', 'my_attacks_dis': '1', 'my_checks_dis': '1'},
+    {'id': 'slicked', 'name': 'Slicked', 'glyph': '\U0001F4A7', 'color': '#29b3f6', 'group': 'condition', 'speed_delta': '-10'},
 ])
 
 print("done.")

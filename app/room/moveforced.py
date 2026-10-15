@@ -123,6 +123,12 @@ async def apply_forced_move(room_id, tok, kind, dest, notify_ws=None, floor=None
                 set_map(room_id, mp, fl)
                 await send_to_plane_viewed(room_id, fl, "explored",
                                            fog_patch(mp, newly, fl))
+        # D112: a grapple ends when the grappled creature leaves the grappler's
+        # reach — a shove (or any push/throw/teleport) moving the grappled token,
+        # or moving a grappler away from what it holds. Lazy import: grapple
+        # imports this module, so the reference is resolved only at call time.
+        from .grapple import end_grapples_out_of_reach
+        await end_grapples_out_of_reach(room_id, tok)
         squares = max(abs(final[0] - origin[0]), abs(final[1] - origin[1]))
         if chronicle:
             sys_msg(room_id, chronicle)

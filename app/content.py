@@ -38,6 +38,10 @@ SKILLS = ("acrobatics", "animal_handling", "arcana", "athletics", "deception",
           "nature", "perception", "performance", "persuasion", "religion",
           "sleight_of_hand", "stealth", "survival")
 SIZES = ("tiny", "small", "medium", "large", "huge", "gargantuan")
+# D109: the eight 2024 weapon mastery properties (SRD 5.2.1, "Weapon
+# Mastery"/"Mastery Properties" — SSOT for item.mastery and for every
+# entitlement check in gear/charbuild/dice).
+MASTERIES = ("cleave", "graze", "nick", "push", "sap", "slow", "topple", "vex")
 DAMAGE_TYPES = ("acid", "bludgeoning", "cold", "fire", "force", "lightning",
                 "necrotic", "piercing", "poison", "psychic", "radiant",
                 "slashing", "thunder")
@@ -104,6 +108,12 @@ SCHEMAS = {
         # Resolved ONLY through the starting-gear route's parser — never free
         # item ids from a client.
         ("starting_items", False, "text", ""), ("starting_choices", False, "text", ""),
+        # D109: 2024 weapon mastery acquisition. 'mastery_gain' = number of
+        # masteries the class grants AT THIS LEVEL (accrued only when the
+        # level is applied after D109 — never retroactively);
+        # 'mastery_options' = optional "nick|vex|…" pool (empty = all eight).
+        # Choices are validated and stored in the build ledger, not here.
+        ("mastery_gain", False, "int:0-8", 0), ("mastery_options", False, "text", ""),
     ],
     "subclass": [
         ("id", True, "id", ""), ("class_id", True, "id", ""),
@@ -137,6 +147,11 @@ SCHEMAS = {
         ("attune", False, "bool", False), ("magic", False, "bool", False),
         ("duration", False, "str", ""), ("trigger", False, "str", ""),
         ("light", False, "bool", False),
+        # D109: the weapon's 2024 mastery property (SRD 5.2.1). Owning the
+        # property on the weapon NEVER unlocks it for the wielder — the
+        # entitlement lives in the build ledger (charbuild masteries).
+        ("mastery", False, "choices:" + "|".join(MASTERIES), ""),
+        ("effects", False, "effects", ""),      # D111: use/equip/on_hit/on_damaged ops
         ("image", False, "asset", ""), ("desc", False, "text", ""), ("manual", False, "text", ""),
     ],
     "spell": [
@@ -154,6 +169,7 @@ SCHEMAS = {
         ("upcast_step", False, "diceb", ""), ("upcast_scaling", False, "bool", False),
         ("scale_tiers", False, "str", ""),
         ("class_list", False, "str", ""), ("scaling_note", False, "text", ""),
+        ("effects", False, "effects", ""),      # D111: versioned op list (optional)
         ("manual", False, "text", ""),
     ],
     "background": [
@@ -178,6 +194,20 @@ SCHEMAS = {
         # "general"; ONLY an explicit "origin" qualifies a row as a background's
         # Origin feat.
         ("category", False, "choices:|origin|general|fighting_style|epic_boon", ""),
+        ("effects", False, "effects", ""),      # D111: active feat -> castable effect
+        ("manual", False, "text", ""),
+    ],
+    "condition": [   # D111: the condition DEFINITION layer (instances unchanged)
+        ("id", True, "id", ""), ("name", True, "str", ""),
+        ("glyph", False, "str", ""), ("color", False, "str", ""),
+        ("group", False, "choices:|condition|marker", ""),
+        ("blocks_movement", False, "int:0-1", 0), ("speed_delta", False, "int:-100-100", 0),
+        ("my_attacks_dis", False, "int:0-1", 0), ("my_checks_dis", False, "int:0-1", 0),
+        ("my_saves_dis", False, "int:0-1", 0),
+        ("attacks_against_me_adv", False, "int:0-1", 0),
+        ("attacks_against_me_dis", False, "int:0-1", 0),
+        ("auto_fail_saves", False, "ab", ""),
+        ("effects", False, "effects", ""),
         ("manual", False, "text", ""),
     ],
     "creature": [
@@ -201,6 +231,7 @@ FILE_KIND = {
     "species.csv": "species", "classes.csv": "class", "subclasses.csv": "subclass",
     "items.csv": "item", "spells.csv": "spell", "backgrounds.csv": "background",
     "feats.csv": "feat", "creatures.csv": "creature",
+    "conditions.csv": "condition",
 }
 KIND_FILE = {v: k for k, v in FILE_KIND.items()}
 ALL_KINDS = list(SCHEMAS)
@@ -364,6 +395,16 @@ def coerce(kind, key, vtype, raw):
     if vtype == "attribute_set":
         v, e = _parse_attribute_set(s)
         return (None, e) if e else (v, None)
+    if vtype == "effects":
+        # D111: strict effect-grammar cell -> canonical JSON (byte-stable for
+        # export/generator). An invalid definition refuses the ROW.
+        from . import effectops
+        if not s:
+            return "", None
+        try:
+            return effectops.canon(s), None
+        except effectops.EffectError as ex:
+            return None, f"invalid effects: {ex}"
     return None, f"unknown vtype {vtype}"      # internal bug guard
 
 
@@ -498,7 +539,8 @@ def _project_item(room_id, row):
                "darkvision_ft", "speed_bonus_ft", "heal_dice", "hit_dice_bonus",
                "skill_prof", "save_prof", "expertise", "attribute_set", "attribute_bonus",
                "attune", "versatile", "finesse", "damage_dice_two_handed", "trigger",
-               "duration", "light", "hands", "charges", "recharge", "carry_bonus"):
+               "duration", "light", "hands", "charges", "recharge", "carry_bonus",
+               "mastery", "effects"):
         v = row.get(pk)
         if v in ("", None, 0, False, []):
             continue
@@ -564,6 +606,17 @@ def map_to_ability(row):
             defn["damage_type"] = row["damage_type"]
     if row.get("heal_dice"):
         defn["heal"] = row["heal_dice"]
+    if row.get("effects"):
+        # D111: a spell with an op list runs the SHARED effect core inside this
+        # very shell (same targeting/DC/cost/chronicle) — no second engine.
+        from . import effectops
+        try:
+            ops = effectops.validate(row["effects"])
+        except effectops.EffectError:
+            return None                          # row coerced valid; paranoia guard
+        if not isinstance(ops, list):
+            return None                          # hook-dict belongs in conditions.csv
+        defn["ops"] = ops
     if lvl > 0:
         defn["cost"] = {"type": "spell_slot", "level": lvl}
     # scaling metadata (D97): applied generically in abilities.execute — the engine
@@ -656,6 +709,14 @@ def apply_rows(kind, room_id, clean_rows, mode="apply"):
             except Exception:
                 stats.setdefault("warnings", []).append(
                     f"spell '{row['id']}' stored but not registered (manual)")
+        elif kind == "feat":
+            d = feat_to_ability(row)             # D111: active feats are abilities
+            if d is not None:
+                from . import abilities as _AB
+                _AB.register(d)
+    if kind == "condition":
+        from . import conditions as _CND
+        _CND.invalidate(room_id)               # merged catalog is cached per room
     return stats
 
 
@@ -793,7 +854,10 @@ def export_package(room_id, kinds=None):
 
 
 def load_registered_abilities():
-    """Startup hook: re-register every stored spell so casts survive a restart."""
+    """Startup hook: re-register every stored spell so casts survive a restart.
+    D111: an EFFECTS-bearing feat registers as the castable ability ``feat_<id>``
+    — the entitlement still rides characters.abilities (charbuild writes the id
+    when the feat is taken), same _rollable_by gate as any spell."""
     from . import abilities
     n = 0
     for r in db.q("SELECT data FROM content WHERE kind='spell'"):
@@ -805,4 +869,32 @@ def load_registered_abilities():
                 n += 1
         except Exception:                              # a bad row must not break boot
             continue
+    for r in db.q("SELECT data FROM content WHERE kind='feat'"):
+        row = db.j(r["data"], {}) or {}
+        try:
+            defn = feat_to_ability(row)
+            if defn is not None:
+                abilities.register(defn)
+                n += 1
+        except Exception:
+            continue
     return n
+
+
+def feat_to_ability(row):
+    """D111: the active half of a feat — its op list as a self-targeted,
+    zero-cost ability id feat_<id>. None for feats without effects."""
+    if not str(row.get("effects") or "").strip():
+        return None
+    from . import abilities, effectops
+    try:
+        ops = effectops.validate(row["effects"])
+    except effectops.EffectError:
+        return None
+    if not isinstance(ops, list):
+        return None                              # hook-dict is a conditions.csv cell
+    return abilities.clean_definition({
+        "id": f"feat_{str(row['id'])[:22]}", "name": row.get("name", row["id"]),
+        "ability": "con", "range_ft": 0, "targeting": "self",
+        "resolution": "auto", "concentration": False, "ops": ops,
+    })

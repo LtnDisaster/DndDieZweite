@@ -52,6 +52,18 @@ function tokenSpeeds(t){
   const walk = +n.speed || (m && m.char && +m.char.speed) || 30;
   return { walk: walk, fly: +n.fly || 0, swim: +n.swim || 0, climb: +n.climb || 0 };
 }
+/* D114: vertical token volume — presentation mirrors of app/vertical.py only.
+   The server owns all cross-plane geometry; these helpers never derive occupancy. */
+const SIZE_HEIGHT_FT = { Tiny:5, Small:5, Medium:5, Large:10, Huge:15, Gargantuan:20 };
+function tokenDefaultHeightFt(t){
+  return SIZE_HEIGHT_FT[((t && t.size) || "Medium").replace(/^\w/, c => c.toUpperCase())] || 5;
+}
+function tokenHeightFt(t){
+  const h = t && t.height_ft;
+  return h === null || h === undefined ? tokenDefaultHeightFt(t) : Math.max(0, Math.min(200, +h || 0));
+}
+function tokenElevationFt(t){ return Math.max(0, Math.min(200, +((t && t.elevation_ft) || 0) || 0)); }
+
 /* D82: VISUAL bounds ≠ MECHANICAL OCCUPANCY. tokenSpan() stays the gameplay
    truth (client mirror of footprint.token_span); visualSpan() is THE single
    presentation derivation — explicit vw/vh win per axis, otherwise the base
@@ -86,9 +98,13 @@ const CONDITIONS = {
   invisible:["Invisible","#5dade2"], paralyzed:["Paralyzed","#2980b9"], petrified:["Petrified","#95a5a6"],
   poisoned:["Poisoned","#27ae60"], prone:["Prone","#d35400"], restrained:["Restrained","#34495e"],
   stunned:["Stunned","#f1c40f"], unconscious:["Unconscious","#7f8c8d"], concentrating:["Concentrating","#d4a017"],
+  sapped:["Sapped","#a1887f"], slowed:["Slowed","#90a4ae"], vexed:["Vexed","#7e57c2"],
 };
-const condLabel = k => (CONDITIONS[k] ? CONDITIONS[k][0] : String(k).slice(0, 24));
-const condColor = k => (CONDITIONS[k] ? CONDITIONS[k][1] : "#7f8c8d");
+/* D111: the server ships state.cond_catalog (built-in + conditions.csv merged,
+   presentation fields only) — it wins over this mirror wherever present. */
+const _cat = k => (typeof st !== "undefined" && st && st.cond_catalog && st.cond_catalog[k]) ? st.cond_catalog[k] : null;
+const condLabel = k => { const d = _cat(k); return d ? d.n : (CONDITIONS[k] ? CONDITIONS[k][0] : String(k).slice(0, 24)); };
+const condColor = k => { const d = _cat(k); return d ? d.c : (CONDITIONS[k] ? CONDITIONS[k][1] : "#7f8c8d"); };
 
 /* ---------- world <-> storage coordinates (D72) ----------
    Everything on the wire (tokens, pins, doors, traps, preview cells) lives in

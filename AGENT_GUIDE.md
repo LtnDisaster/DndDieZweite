@@ -18,12 +18,31 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   - WebSocket router mounted from `app/ws.py`.
 - **WebSockets**:
   - One connection per user per room: `/ws/{code}`.
-  - Room clients are tracked in `app/room/net.py::_clients`.
+  - Room clients are tracked in `app/room/net.py::_clients`. The owning
+    event loop lives ON the socket (`ws._iio_loop`) — never keyed by
+    `id(ws)`: CPython reuses ids and a dead-loop `wrap_future` would hang
+    the delivery forever (D111 hardening; `_send` also times out cross-loop
+    sends and refuses stopped loops).
   - Messages are dispatched through `app/room/dispatch.py::HANDLERS`.
 - **SQLite persistence**:
   - `app/db.py` defines schema and additive migrations.
   - Thread-local SQLite connections use WAL mode and `busy_timeout`.
   - Multi-statement writes use `db.tx()`.
+- **Effect grammar (D111)**: `app/effectops.py` — versioned, validated op
+  cells (`damage/heal/temp_hp/condition/condition_remove/break_concentration/
+  save/check/forced_move/resource`) executed by the EXISTING engines; trigger
+  seams (`use/equip/unequip/on_hit/on_damaged`) ride the existing room
+  handlers, claim-guarded (once per round/op, no trigger chains, cost paid
+   only when allowed). Reference: `docs/EFFECT_GRAMMAR.md`.
+- **Contested primitive (D112)**: `app/room/opposed.py` is a thin helper over the
+  EXISTING dice channel + `gear` bonuses implementing the three contested shapes
+  (check-vs-check, check→DC→save, check-vs-fixed-DC) with NO rules of its own
+  (tie default `defender`; `tie="dm"` defers via `Tie`). The 2024 special-melee
+  family (`app/room/grapple.py`: Grapple/Shove/Escape) and both pickpocket models
+  (`app/room/pickpocket.py`) run on it; grapple state stays additive on the
+  `grappled` cond (`src`+`dc`) and ends via `end_grapples_out_of_reach` at the
+  movement ends. `pick`/`grappled.dc` are additive data only. Reference:
+  `docs/EFFECT_GRAMMAR.md` §6a (the S42 wrapping point — no second engine).
 - **Server-authoritative gameplay philosophy**:
   - Dice, HP, damage, saves, movement validation, traps, hidden information,
     visibility filtering, room membership, character ownership, and audio-source
@@ -71,10 +90,11 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/gear.py` | Shared sheet/item/skill/spell/defense math. D98: gear is a DERIVED, transient overlay (`effective_gear`) consumed by `_stat_mod`/`skill_bonus`/`save_bonus`/`compute_ac`/`clean_speeds`/`weapon_profiles` — never persisted, base stats untouched. One prop validator (`clean_props`). D99: currency SSOT (integer copper: `CURRENCIES`/`to_cp`/`cp_breakdown`/`cp_label`) + derived carrying (`carry_capacity`/`inventory_weight`/`encumbrance`, `CARRY_PER_STR`/`SIZE_CARRY`, `carry_bonus`) | `effective_gear()`, `clean_props()`, `weapon_profiles()`, `compute_ac()`, `save_bonus()`, `skill_bonus()`, `wields_two_handed()`, `to_cp()`, `cp_breakdown()`, `encumbrance()`, `carry_capacity()` |
 | `app/npc.py` | NPC stat-block model | `clean_npc()`, `load()`, `to_char()` |
 | `app/conditions.py` | Conditions catalog and logic | `clean_conds()`, `add()`, `remove()`, `step_rounds()` |
-| `app/path.py` | Footprint-aware server A* | `find_path()`, `path_footprint_cost()` |
+| `app/path.py` | Footprint-aware server A*; D114 3D state search | `find_path()`, `find_path_3d()`, `path_footprint_cost()` |
 | `app/footprint.py` | Token size and collision footprint | `FOOTPRINT`, `occupied_origin()`, `valid_final_position()`, `find_valid_origin()` |
 | `app/los.py` | Wall/door line of sight | `line_of_sight()`, `visible_cells()` |
-| `app/mapmodel.py` | Map schema, fog, doors, traps, loot, pins | `sanitize()`, `visible_map()`, `blocked_edges()`, `reveal_cells()` |
+| `app/mapmodel.py` | Map schema, fog, doors, traps, loot, pins, D114 `openv` | `sanitize()`, `visible_map()`, `blocked_edges()`, `reveal_cells()`, `openv_at()` |
+| `app/vertical.py` | D113/D114 canonical vertical scale + token volume defaults | `ELEV_FT`/`FLOOR_FT` (=10), `SIZE_HEIGHT_FT`, `token_height_ft()`, `base_ft()`, `top_ft()`; floor→level in `floors.level()` |
 | `app/quests.py` | Quest Log game operations (persistent, filtered) | `create_quest()`, `set_objective()`, `complete_quest()`, `visible_for()` |
 | `app/progression.py` | Multiclass-ready class model | `clean_class_levels()`, `total_character_level()`, `set_class_levels()` |
 | `app/events.py` | Plain-dict game-event facts + listener seam (D52) | `make()`, `emit()`, `subscribe()`, `recent` |
@@ -96,7 +116,10 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/room/health.py` | Central HP/temp/typed-damage/death reducer | `change_hp()`, `heal()`, `damage()` |
 | `app/room/dice.py` | Server dice parser/roller, rolls, saves, attacks, rests | `do_roll()`, `parse_roll()`, `handle_roll()`, `handle_cast()` |
 | `app/room/combat.py` | Initiative and HP handlers | `handle_init_start()`, `handle_init_next()`, `handle_hp()` |
-| `app/room/movement.py` | Walks, stop, trap auto-stop, path previews | `handle_move()`, `handle_stop_move()`, `handle_path_preview()`, `walk()` |
+| `app/room/movement.py` | Walks, stop, trap auto-stop, path previews; D114 explicit cross-plane move/teleport + animated 3D walk | `handle_move()`, `handle_stop_move()`, `handle_path_preview()`, `walk()`, `walk3d()`, `_move3d()`, `_teleport3d()` |
+| `app/room/opposed.py` | D112 contested/DC primitive — thin helper over the EXISTING dice channel + gear bonuses, NO own rules (three shapes are just composition) | `participant()`, `check_roll()`, `save_roll()`, `bonus_roll()`, `melee_attack_number()`, `better_save()`, `opposed_wins(att,def,tie=)`, `beats_dc()`, `Tie` (tie default `defender`; `tie="dm"` defers) |
+| `app/room/grapple.py` | D112 2024 special melee (NOT the 2014 Athletics contest): Grapple=check→save `better_save`, Shove prone/push, Escape vs stored `dc`; size+reach gates; ends on leaving reach | `handle_grapple()`, `handle_shove()`, `handle_escape()`, `end_grapples_out_of_reach()` (wired into `moveforced`+`movement` move ends) |
+| `app/room/pickpocket.py` | D112 steal, BOTH 2024 models: DM-mediated attempt + DM-`pick`-subset auto-take; hidden Sleight→DM only, notice via fixed `notice_dc` OR real Perception (no passive perc, A7); atomic curse-preserving transfer; `pick`-only leak guard, claim-before-spend | `handle_pickpocket()`, `handle_pickpocket_take()`, `handle_pickable()` (DM toggles `pick`) |
 | `app/room/fog.py` | DM manual exploration edits + room-wide fog on/off | `handle_fog_edit()`, `handle_fog_toggle()` |
 | `app/room/lights.py` | D104 DM lamp management over the D89 object model | `handle_lamp()` (add/update/remove — DM-only, plane-scoped) |
 | `app/room/tokens.py` | Token add/remove/NPC edits | `handle_add_token()`, `handle_update_npc()` |
@@ -106,7 +129,8 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
 | `app/room/authz.py` | The single token-control authority question (owner/controller/DM, D82) | `controls()`, `controlled_rows()` |
 | `app/floors.py` | Floor registry: named occupancy/visibility planes per room (D86/D88/D102) | `parse()`, `exists()`, `add()`, `rename()`, `remove()` |
 | `app/room/interact.py` | World-object interaction over allowlisted ops (D82) | `handle_interact()` |
-| `app/room/visibility.py` | Footprint LOS token delivery and ghosts | `viewer_visible_cells()`, `send_token_event()`, `broadcast_token_add()` |
+| `app/room/visibility.py` | Footprint LOS token delivery and ghosts; D114 body-plane vision sources | `viewer_visible_cells()`, `send_token_event()`, `broadcast_token_add()` |
+| `app/room/vertical3d.py` | D114 single cross-plane reasoning point: body planes, openings, sight/reach join and whole-volume fit | `body_planes()`, `body_cells()`, `observable_cells()`, `column_open()`, `occupied_volume()`, `volume_terrain_clear()`, `vertical_path_clear()`, `volume_final_valid()` |
 | `app/static/js/10_core.js` | Global `state`, API helper, toast | `state`, `api()`, `esc()`, `toast()` |
 | `app/static/js/30_room.js` | Room state, chat, sheet, journal, party rendering | `openRoom()`, `refreshRoom()`, `renderFeed()` |
 | `app/static/js/40_ws.js` | WebSocket event dispatch | `connectWS()`, `wsSend()` |
@@ -145,6 +169,7 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
     the lobby is one level further back via the prep screen's "← Lobby".
 - Tests:
   - `tests/test_integration.py`
+  - `tests/test_d111_effects.py`
   - `tests/test_room_delete.py` — authorization matrix, cascade, idempotency,
     `room_deleted` + registry purge
 
@@ -193,9 +218,12 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
     `DNDTABLE_AUTO_GROW=1` env; `maybe_grow_map` returns immediately when off.
     The machinery stays fully implemented and tested (`test_map_expand.py`
     enables the flag explicitly); DM map-editor resize is the manual path.
-  - `app/movecost.py` — cost SSOT (5e diagonals 1,2,1,2; difficult ×2; budget = speed//5).
+  - `app/movecost.py` — cost SSOT (5e diagonals 1,2,1,2; difficult ×2; budget = speed//5;
+    D114 one declared level = `10 ft = 2` units via `vertical_cost()`).
     A* weights in `path.py` stay 10/14 — cost is a route post-processing, not search.
-  - `app/path.py` — footprint-aware A*; optional `elev=` gates steps at |Δz| ≤ 1 (D70).
+  - `app/path.py` — footprint-aware A*; optional `elev=` gates steps at |Δz| ≤ 1 (D70);
+    D114 `find_path_3d()` searches `(floor, origin)` states while reusing the
+    horizontal step rules and delegated vertical callbacks.
   - `app/footprint.py` — size/anchor/collision SSOT.
     **Footprint invariant (D43+D81):** token `(x, y)` is the canonical anchor
     (centre of its top-left occupied cell); `footprint_width`/`footprint_height`
@@ -335,9 +363,13 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
     + D102 `renderFloorPanel()`/`editFloor()` (DM Floors panel: add / view /
     rename / delete; delete-refusals show the server reason); sheet floor row
     is read-only for players.
-  - `app/static/js/50_canvas.js` — `viewerPlane()`/`onPlane()` (DM compares
-    the VIEWED plane, players their token's plane; off-plane tokens are not
-    rendered and not clickable).
+  - `app/static/js/50_canvas.js` — `viewerPlane()`/`onPlane()` (DM browsing is
+    plane-local; players and character previews render only server-delivered
+    observable rows, so D114 cross-plane delivery needs no second client
+    visibility engine); D114 `openv` brush/rendering and vertical token hints.
+  - `app/static/js/30_room.js` — D114 token height/elevation rows and the
+    owner/DM vertical flight control; its `floor` wire field is an explicit move
+    intent, never inferred from an omitted field.
   - `app/static/js/40_ws.js` — `explored`/`fog_changed` carry `payload.floor`
     and are only applied when it equals `state.viewFloor`; a mismatch means
     the patch belongs to a plane this client is not looking at.
@@ -350,15 +382,25 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   - `app/room/combat.py`
   - `app/room/health.py`
   - `app/gear.py`
+  - `app/room/opposed.py` (D112 contested/DC primitive — helper over the dice
+    channel + gear bonuses, three shapes, tie `defender`/`attacker`/`dm`)
+  - `app/room/grapple.py` (D112 2024 Grapple/Shove/Escape, check→save
+    `better_save`, `end_grapples_out_of_reach` on the movement ends)
+  - `app/room/pickpocket.py` (D112 both steal models, `pick`-subset leak guard,
+    atomic curse-preserving transfer; authoring via `handle_pickable`)
 - Client:
   - `app/static/js/30_room.js`
 - Tests:
   - `tests/test_integration.py`
+  - `tests/test_d112_contested.py`
 
 ## Conditions / death saves / status
 
 - Server:
   - `app/conditions.py`
+  - `app/effectops.py` (condition DEFINITION layer: `conditions.csv` catalog
+    + `BUILTIN_HOOKS` as data, `on_start/on_round/on_expire` effect hooks,
+    `/state cond_catalog`; per-room catalog cache invalidated on import)
   - `app/room/conditions.py`
   - `app/room/death.py`
   - `app/room/status.py`
@@ -495,11 +537,15 @@ DnDTable is a self-hosted multiplayer virtual tabletop.
   `gear.stat_mod()`, `gear.ability_save_dc(char, ability, bonus=0)`,
   `gear.ability_attack_bonus(...)`; `spell_save_dc/spell_attack` delegate.
   Casting ability = data on the definition — never hard-coded by class (D57).
+- D111: a definition may carry an `effects` op-cell — `execute()` runs it in
+  the SAME shell (cost/chronicle/privacy unchanged); feats surface as
+  castable `feat_<id>` abilities (`charbuild` entitlement). Definition cells
+  are re-validated on every load.
 - Content: production registry is EMPTY; definitions register via
   `abilities.register(clean dict)` (tests use original names). No spell DB.
 - Multiclass caveat (D58): slot progression must NOT be derived from
   `total_character_level()` — separate axis, table attaches later.
-- Tests: `tests/test_abilities.py`
+- Tests: `tests/test_abilities.py`, `tests/test_d111_effects.py`
 
 ## Stability & table UX (Sprint 8)
 
@@ -631,9 +677,10 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `fog_edit` | `room.fog.handle_fog_edit` | DM | no | batch reveal/hide shared `explored` memory |
 | `fog_toggle` | `room.fog.handle_fog_toggle` | DM | no | room-wide `fog_off` flag: terrain+static visible to all, live NPCs stay LOS-filtered (D60) |
 | `lamp` | `room.lights.handle_lamp` | DM | no | D104 lamp add/update(bright,label,on,move)/remove on a plane — same canon + reevaluate as lamp-interact/map-edit; silent administration |
-| `map_edit` | `dispatch.handle_map_edit` | DM | no | map model sanitized; preserves trap/loot/fog runtime state; resize carries `explored` overlap |
+| `map_edit` | `dispatch.handle_map_edit` | DM | no | map model sanitized; preserves trap/loot/fog runtime state; resize carries `explored` overlap; D114 `openv` changes re-evaluate cross-plane visibility |
 | `door` | `room.doors.handle_door` | DM or adjacent player | no | closed/locked edges block movement and LOS |
 | `token_span` | `room.tokens.handle_token_span` | owner or DM | no | mechanical resize; complete rect must fit at the CURRENT anchor or it is rejected unchanged (D81/15B) |
+| `token_height` | `room.tokens.handle_token_height` | owner or DM | no | D114 vertical body: optional `height_ft`/`elevation_ft`, server-clamped to 0..200 ft; triggers visibility re-evaluation when the body may join another plane |
 | `token_visual` | `room.tokens.handle_token_visual` | owner or DM | no | D82 VISUAL bounds (vw/vh) — presentation; no clearance check, footprint untouched |
 | `token_rotate` | `room.tokens.handle_token_rotate` | owner or DM | no | D83 facing 0/90/180/270 — ORIENTS the mechanical footprint too; re-centres via `anchor_for_center`; illegal turn rejected whole; broadcast carries NO coordinates (the move rides the filtered step channel) |
 | `token_controller` | `room.tokens.handle_token_controller` | DM only | no | D82 assign/clear generic controller (must be a room member; revocable) |
@@ -656,6 +703,13 @@ async def handler(ws, room_id, user, is_dm, msg):
 | `npc_inv` | `room.inv.handle_npc_inv` | DM only | contents = inspect only | D105: manage `tok:<token_id>` gear (inspect/fill/remove/coins_*); silent to non-DM |
 | `loot` | `room.inv.handle_loot` | reach-gated, while NPC hp==0 | contents = inspect only | D105: inspect/take/coins_take on a downed NPC; forced direction via `container_give` |
 | `curse` | `room.inv.handle_curse` | DM only | full metadata = DM socket only | D106: {action:set/clear, item_id, name/desc/whisper} on a char-, chest- or NPC-carried instance; {action:reveal/conceal/whisper} additionally needs a seated PLAYER owner — recipient resolved server-side from the item's holder, delivered through `chat.post_chat` whisper (never broadcast, never in foreign histories). DM gets the authoritative `curse_updated` event; no `inv_changed` broadcast for curse ops (secrecy) |
+| `grapple` | `room.grapple.handle_grapple` | own token or DM | maybe | D112 2024 grapple: `{token_id, target_id, op_id, adv, save?}`. Adjacency (Chebyshev ≤1 closest footprint corners) + size (≤ one size larger, `npc.SIZES`) + visibility + authz ALL validated before anything is spent; claim(op) BEFORE the action slot. Attacker `melee_attack_number` → DC, target `save_roll` (default `better_save` Str/Dex, `save` field overrides). Emits `dice` (attacker self / save dm-visible) + `cond` (`grappled` with `src`+`dc`) + `initiative` |
+| `shove` | `room.grapple.handle_shove` | own token or DM | maybe | D112 2024 shove: `{token_id, target_id, mode:prone|push, op_id, adv}`. Same gate/economy as grapple; prone → existing prone path, push → `moveforced.apply_forced_move` (which itself fires `end_grapples_out_of_reach`) |
+| `escape` | `room.grapple.handle_escape` | own token or DM | maybe | D112 escape: `{token_id, op_id}` — no target. Athletics OR Acrobatics vs the stored `grappled.dc`; if the grappler is gone/incapacitated it auto-succeeds. Emits `dice` + `cond` |
+| `pickpocket` | `room.pickpocket.handle_pickpocket` | own token or DM | yes (DM) | D112 Model A: `{token_id, target_id, op_id, adv, notice_dc?}`. Hidden Sleight-of-Hand check reported ONLY to the DM (thief only gets a "made covertly" whisper, never the result); noticed = fixed `notice_dc` (`beats_dc`) OR a real Perception check (`opposed_wins`, tie→defender) — 2024 has no passive perception. Claim BEFORE spend; nothing is moved |
+| `pickpocket_take` | `room.pickpocket.handle_pickpocket_take` | own token or DM | yes (DM) | D112 Model B: `{token_id, target_id, item_id, qty?, op_id}`. Only DM-`pick`-flagged items stealable (`_pick_entry`), an unflagged/unknown item answers EXACTLY like a failed check (never an inventory oracle). Success = one atomic `inventory.transfer`/`container_give` preserving curse metadata + resetting `revealed`; emits `whisper` + `dice` + `inv_changed` |
+| `pickable` | `room.pickpocket.handle_pickable` | DM only | whisper | D112 authoring: `{token_id (NPC) OR char_id, item_id, action:set|clear, op_id}` toggles the `pick` flag (`container_set_pick`/`set_pick_char`); NPC path re-sends `inv_contents`, char path broadcasts `inv_changed`. `pick` never stacks (`_stack_key`) and rides the `clean_items` whitelist |
+| `trap` | `room.traps.handle_trap` | owner (search/disarm) · DM (all) | whisper | D113 Phase 5: data-driven trap. `{action, token_id, x, y, adv?, target_id?}` — `search` = WIS(Perception) check vs `search_dc` (reveals on success), `disarm` = DEX check vs `disarm_dc` on a DISCOVERED trap (→ `disarmed`+`triggered`), `trigger` = DM force-spring on `target_id`. The actor names a CELL, never a trap id; a missed/absent search and a hidden-trap miss answer byte-identically (no oracle). Springing is `hit_trap` → the trap's `effects` grammar cell |
 
 ## Important outbound event kinds
 
@@ -1035,7 +1089,20 @@ Private delivery uses the database fields plus server-side delivery; never only 
 | `tests/test_d103_editor_assets.py` | D103: void(5) blocks movement/teleport/placement but NOT vision/light; brush edits never touch wall/door/trap entities; void is plane-local (crypt pit ≠ primary); registry/sanitize keep legacy maps byte-identical; player map_edit refused; canonical `/assets/<id>` serves exactly like `/api/assets/<id>` (owner 200 PNG+nosniff, riding-DM 200, stranger/junk 404); assigned artwork roundtrip keeps DB canon; client brush/canvas wiring pinned |
 | `tests/test_d104_lights_preview.py` | D104: `lamp` channel roundtrip (add/update/off/remove, radius in/out, walls block glow like sight), darkness = memory+footstep only, darkvision effective, lamps plane-local AND plane-lighting, non-DM refused; `view_as` byte-equal to the player's own `/state`, leak-free (hidden NPC/traps/dm_only/secret doors/op payloads), purity (explored & player state unchanged), auth matrix (member 404/outsider 403/foreign char 404); reconnect reveals exactly by the light's reach; legacy rooms classic; toggled-off survives later map_edit; preview client wiring pinned |
 | `tests/test_d106_curses.py` | D106: per-instance curse metadata (twin daggers stay distinct, stack carve-out to qty=1, no merge into ordinary stacks, split refused), survival matrix (container move, loot, equip/unequip, use with charge debit, attune, identify, recharge, long rest, honest sheet-PUT round-trip), secrecy matrix (player /state, lobby sheet, gear snapshot/derived, chest+loot inspect, view_as, chat chronicle — no secret on any wire), REST tamper (forged curse ignored, stripped PUT cannot wipe), curse channel DM-only + foreign-room refusal, owner-change resets `revealed` but never the curse, whisper recipient forced server-side and invisible to peers (live + history), `del_token` atomicity incl. FK-failure rollback of BOTH token and container |
-| `tests/test_d108_origin.py` | D108 origin: report (abilities/feat/errors), both ASI modes, wrong/identical targets, 20-cap refuses, feat-category refusal, missing rows, 2014-background refusal, cross-room isolation, owner/DM/foreign authz, replay + concurrent double-post = one grant, reload-persistent ledger, no auto-migration, species stats untouched, gear never double, build-before/after origin replay once, PUT cannot forgery-erase | 
+| `tests/test_d108_origin.py` | D108 origin: report (abilities/feat/errors), both ASI modes, wrong/identical targets, 20-cap refuses, feat-category refusal, missing rows, 2014-background refusal, cross-room isolation, owner/DM/foreign authz, replay + concurrent double-post = one grant, reload-persistent ledger, no auto-migration, species stats untouched, gear never double, build-before/after origin replay once, PUT cannot forgery-erase |
+| `tests/test_d110_e2e.py` | D110 integration chain: ONE continuous A→F dungeon run over the real REST/WS handlers (pack import, 2024 origin+apply+mastery-pick+kit-gear, move/wall/door/fog/view-as/floors, initiative with Cleave/Topple/Graze/Vex + condition clocks, 0-HP loot with adjacency + atomic replay, curse set/reveal/whisper owner-only, reconnect snapshot equality + replay idempotency) + guardians (foreign token/cond control, view-as DM-only excerpt, cross-room content isolation, whisper history leak). Pins the two D110 P1 fixes: refused attacks never spend the turn slot; curse `whisper` never mutates `revealed` |
+| `tests/test_d111_effects.py` | D111 effect grammar + `conditions.csv`: validator/canon (unknown op/field/NaN refused, byte-stable canon), SRD `BUILTIN_HOOKS` wiring + CSV row overriding a builtin + cache invalidation on import, `clean_props`/`clean_definition` hardening (corrupt cells dropped), condition-expire without recursion, ops execute through the REAL WS for spell/feat/item-use/equip/on-hit/on-damaged with replay idempotency (one firing per fresh op), resource preflight (refused cast costs nothing), ping-pong condition chains across two tokens, cross-room isolation, `/state cond_catalog` ships | 
+| `tests/test_d112_contested.py` | D112 contested/2024 special-melee/pickpocket over the REAL WS: `save_roll`/`better_save`/`opposed_wins` tie (`defender`/`attacker`/`dm`→`Tie`) unit; full Grapple (check→save, DC stored on `grappled.dc`, size+adjacency gates, ends on forced move/walk-away/grappler-gone) + Shove prone/push + Escape (Athletics/Acrobatics vs `dc`, auto-succeed when grappler gone); both pickpocket models (DM-mediated hidden result, Model-B `pick`-subset auto-take), leak guard (unflagged/unknown item == a failed check, never an oracle), replay (claim-before-spend: a replay spends+rolls nothing), concurrency, cursed-item transfer preserving curse + resetting `revealed`, cross-room, cross-plane, action-economy (spends only in initiative). No new skips, no source pins |
+| `tests/test_d113_concentration.py` | D113 Phase 2: 2024 concentration lifecycle over the REAL WS — `conc`-linked condition ends room-wide with the concentration; CON save DC `max(10, floor(actual_hp_lost/2))` uncapped (temp-HP + resistance excluded from the DC); 0-HP and an incapacitating condition break WITHOUT a save; casting a new concentration ends the old first (old `conc` effects gone, new ones kept); `break_concentration` op; `on_damaged` depth gate (a trigger-originated damage does not re-fire the seam). Unrelated conditions are preserved |
+| `tests/test_d113_curses.py` | D113 Phase 3: automatic curses — active equip fires, dormant does NOT, trigger-mismatch no-fire; owner-change `on_transfer` fires exactly once and op-id claim is idempotent (replay no double-fire); reads/inspect never fire; activation (`activate`/`deactivate`) is orthogonal to disclosure (reveal/conceal/whisper never change `active`, activation never reveals); a curse-origin fragment goes to the DM ONLY (`net.dm_whisper`), the owner view stays `curse_view`-strict (no `active`/`trigger`/`effects` leak); legacy curse (no activation keys) round-trips byte-identically and stays dormant; player-authored `arm`/`activate` refused; invalid effect cell refused |
+| `tests/test_d113_opposed.py` | D113 Phase 4: effect grammar v2 — v1 and v2 validate, `v3`/`v0` refused, `opposed` accepted only under v2, required `success`/`failure` branches; `canon()` preserves the authored version (a v1 cell stays byte-identical `{"v":1}`, only explicit `{"v":2}` emits v2); `opposed` runs end-to-end through the real dice engine on deterministic rolls, taking the success branch on a win and the failure branch on a loss |
+| `tests/test_d113_traps.py` | D113 Phase 5: data-driven traps (map ENTITY, not a CSV). Legacy trap (dc/dmg only) round-trips byte-identical with NO stray keys; a modern trap stores an `effects` grammar cell (+ `search_dc`/`disarm_dc`/`repeat`); an invalid effect cell is dropped (fail-closed) yet the trap survives. Springing runs the grammar through `effectops.run_ops` (`trigger` → prone, no `random.randint`); `repeat` keeps `triggered=false` (re-arms) vs one-shot `triggered=true`. Leak-safe discovery: a missed search vs a hidden trap and a search of an empty cell answer byte-identically (never a trap oracle); a successful Perception check sets `discovered` and reveals it; a trap with no `search_dc` is indistinguishable from empty. Disarm is a DEX check vs `disarm_dc` (success → `disarmed`+`triggered`), and a hidden trap is never acknowledged on a disarm. `trigger` is DM-only |
+| `tests/test_d113_vertical.py` | D113 Phase 7: the canonical 10 ft vertical scale — `vertical.ELEV_FT==FLOOR_FT==10`; `elev_to_ft`/`floor_to_ft` (sign preserved, below-primary negative). The declared floor order IS the height stack (`floors.level`: primary 0, each added floor +1 level = +10 ft; holds after `rename`); `absolute_height_ft` = floor offset + ground elevation×10. Backward-compat pin: `mapmodel.sanitize` still clamps `elev` to -6..6 UNITS (the scale is reporting only; a +90 brush stays +6 units = 60 ft). No height combat, no movement-rule change |
+| `tests/test_d114_vertical.py` | D114 Phase 3: size defaults are not ceilings; owner height/elevation persistence/reload, server validation/clamps, non-owner refusal, DM authority, hidden-NPC vertical metadata strip parity |
+| `tests/test_d114_openings.py` | D114 Phase 4: `openv` default-solid/junk fail-closed, whole-footprint protrusion only through a matching opening, straight-shaft sight requires every intermediate column open, fog masks unexplored openings |
+| `tests/test_d114_phase5_integration.py` | D114 Phase 5 live handlers: protruding body shares upper-plane fog/delivery and melee attack; solid ceiling stays hidden/untargetable; shaft gives sight but not physical melee/grapple reach; live height growth triggers visibility recalc; protrusion reaches a plane-local object |
+| `tests/test_d114_phase6_vertical_movement.py` | D114 Phase 6: 30-ft whole-body projection across three open planes, solid-ceiling fail-closed, Large footprint cannot use a one-cell opening, flight crosses void while walking cannot, canonical vertical cost/budget, solid-ceiling move refusal and whole-volume target-plane collision |
+| `tests/test_d114_phase8_integration.py` | D114 Phase 8: real WS horizontal approach + vertical flight with canonical spend, walk-mode refusal through a shaft, named-plane `openv` map-edit roundtrip, and live server-delivered cross-plane token rendering/hit-testing through the real canvas JS harness |
 | `tests/test_d101_prep.py` | D101 prep screen: content `options` (member read, non-member/anon refused, empty room), `characters.background` roundtrip + no-PUT-wipe guard, `starting-gear` (resolves/skips/idempotent, authz mirrors build API, missing-data reported, `inv_changed` broadcast), `apply` broadcasts `snapshot` (reload-bug fix), and the prep UI wiring (source asserts — no browser runner) |
 | `tests/test_abilities.py` | DC/attack derivation, save-half, resist/immune through defense pipeline, death-pipeline entry, heal, condition, concentration flag, slot+resource consumption, upcast validation, attack-vs-AC+crit, footprint flank, LOS/door, range authority, actor spoofing refusal, hidden-token non-leak |
 | `tests/test_diorama_parity.py` | confirmed-path revalidation refusal (`route_invalid`), shared camera-space click math (Node vm), view-aware click/token/double-click, tool parity, sheet-crash guard |
@@ -1478,3 +1545,49 @@ links only; they never grant redistribution rights.
 - Manual verification for frontend changes: follow
   `MANUAL_BROWSER_CHECKLIST.md` — BUILD CHECK first (console `BUILD <token>`
   == `/api/build` == asset `?v=` == no mismatch banner), then the smoke test.
+
+---
+
+## D113 (Sprint 42) — Konzentration, automatische Flüche, `opposed`-Op
+
+- **Konzentration** bleibt dasselbe `concentrating`-Flag; NEU ist ein additives
+  Link-Feld `conc` = Token-ID an einer Condition (die Condition „gehört" zur
+  Konzentration und endet raumweit mit ihr). Lebenszyklus ONLY in
+  `app/room/concentration.py` (`end_previous`/`break_link`/`on_damage`/
+  `enforce_after_condition`); Save über `room.opposed.save_roll`; Anschluss in
+  `room.health.change_hp` (DC auf tatsächlich verlorene HP, kein Cap) und
+  `app/abilities.py` (neue Konzentration zuerst beenden, `conc`-Stempel). Keine
+  zweite Concentration-Engine.
+- **Flüche** sind DM-Autorisierung auf der Item-Instanz: `trigger` + `effects`
+  (Wirkgrammatik) + `active`. WS `curse` bekam die DM-Aktionen `arm`
+  (`trigger`,`effects`), `activate`, `deactivate` (`app/room/inv.py::handle_curse`,
+  `app/inventory.py::curse_arm`/`curse_active` + Container-Varianten). `active`
+  ⟂ `revealed`. `gear.clean_curse` speichert die neue Felder nur, wenn gesetzt
+  (Omit-when-Default) → alte Flüche bleiben byte-identisch und inaktiv.
+  `effectops.fire` behandelt einen aktiven Fluch als zusätzlichen Wirk-Träger
+  (`ctx["src"]="curse"`); curse-origin-Fragmente gehen via `net.dm_whisper` nur
+  an den DM; Owner-Ansicht bleibt `curse_view`-streng. `on_transfer` feuert beim
+  Besitzerwechsel, geclaimt an der Transfer-`op_id` (atomar, kein Doppel-Feuer).
+- **Grammatik v2:** `effectops` akzeptiert `v1`+`v2` (`V=2`, `V_MIN..V_MAX`),
+  neuer `opposed`-Op (nur v2) über `room.opposed`; `canon()` erhält die Version
+  des Cells. v3/unbekannt bleibt abgelehnt (closed world).
+- **UI (Englisch):** `⚙ arm`, `🔮 active`/`💤 dormant` im Charakterblatt und im
+  Container-Panel (`app/static/js/30_room.js`), `curseArm()` sendet `arm`.
+- **Fallen (Phase 5):** Map-ENTITÄT (kein `traps.csv`), optionale Felder
+  `effects`/`trigger`/`search_dc`/`disarm_dc`/`repeat` (Omit-when-Default → alte
+  Fallen byte-identisch). `hit_trap` führt den `effects`-Cell über
+  `effectops.run_ops` aus (kein `random.randint`). WS `trap`
+  (`room/traps.py::handle_trap`): `search` (WIS/Wahrnehmung vs `search_dc`),
+  `disarm` (DEX vs `disarm_dc`, nur bei enthüllter Falle), DM `trigger`.
+  Leak-frei: Fehlsuche == leeres Feld; `disarmed` überlebt Editor-Snapshots.
+  UI: Editor-Felder im Karten-Editor + 🔍/🔧-HUD am Token-Feld (`30_room.js`).
+- **Vertikale Skala (Phase 7):** `app/vertical.py` ist DIE eine Quelle:
+  `ELEV_FT=10`, `FLOOR_FT=10`, `elev_to_ft`/`floor_to_ft`/`absolute_ft`. Eine
+  `elev`-Einheit UND eine deklarierte Ebenen-Stufe = exakt 10 ft. Die
+  Ebenen-Reihenfolge ist der Höhen-Stack: `floors.level(room_id, name)`
+  (Primär=0, +1 je weiterer Ebene) und `floors.absolute_height_ft(room_id,
+  floor, elev_units)`. Rein Reporting — Ebenen bleiben unabhängig (D86/D88),
+  Pfad gateert weiter |Δz| ≤ 1 in EINHEITEN, `elev`-Klammer bleibt -6..6,
+  KEIN Höhenkampf (Sturz/Deckung/Flug bleiben D70/D83 aus). `55_diorama.js` tabu.
+- Sprint 42 (D113, Phasen 2–7) erledigt; offen bleibt nur der menschliche
+  Browser-Durchlauf der Phase-6-Oberflächen.

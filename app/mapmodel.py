@@ -70,6 +70,14 @@ def blocks_vision(v):
     return terrain(v)["blocks_vision"]
 
 
+def body_open(v):
+    """D114: is there free VOLUME in this cell for a vertical body / flying
+    creature? Void is deliberately open space (a pit is empty air), while wall
+    and barrier remain physical obstructions."""
+    t = terrain(v)
+    return not t["blocks_movement"] or t["name"] == "void"
+
+
 # ---------- world <-> storage coordinates (D72) ----------
 # Coordinates on the WIRE and in the DB are ALWAYS world coordinates: token
 # pixels, trap/loot/pin/door cells, preview cells, effect anchors. The raw
@@ -133,6 +141,15 @@ def elev_at(mp, x, y):
     return int(el[i]) if (el and i is not None and i < len(el)) else 0
 
 
+def openv_at(mp, x, y):
+    """D114 vertical-opening bit at a WORLD cell: 1 = an opening in the ceiling
+    ABOVE this cell (connects this plane to the one declared one level higher).
+    Missing layer / out of world => 0 (a solid ceiling, fail-closed)."""
+    ov = mp.get("openv") or []
+    i = flat_idx(mp, x, y)
+    return 1 if (ov and i is not None and i < len(ov) and ov[i]) else 0
+
+
 def explored_at(mp, x, y):
     i = flat_idx(mp, x, y)
     return i is not None and i < len(mp["explored"]) and bool(mp["explored"][i])
@@ -186,6 +203,7 @@ def _canon_door(x, y, dir_, w, h, ox=0, oy=0):
 def default_map(w=DEFAULT_W, h=DEFAULT_H):
     return {"w": w, "h": h, "cell": 50, "origin": [0, 0], "cells": [0] * (w * h),
             "elev": [0] * (w * h),
+            "openv": [0] * (w * h),
             "explored": [0] * (w * h), "traps": [], "loot": [], "doors": [], "pins": [],
             "objects": []}
 
@@ -214,6 +232,12 @@ def fit(mp, base):
         row = ex[y * ow: y * ow + min(ow, w)]
         exn[y * w: y * w + len(row)] = row
     out["explored"] = exn
+    ov = mp.get("openv") or []
+    ovn = [0] * (w * h)
+    for y in range(min(h, mp.get("h") or 0)):
+        row = ov[y * ow: y * ow + min(ow, w)]
+        ovn[y * w: y * w + len(row)] = row
+    out["openv"] = ovn
     return out
 
 
@@ -235,6 +259,25 @@ def _label(s, dflt="?"):
     return s if s and LABEL_RE.match(s) else dflt
 
 
+def _clean_effects(cell):
+    """D113 Phase 5: a trap may carry a data-driven effect cell — the SAME
+    grammar a magic item / curse uses, run through the one effectops validator.
+    A bad cell is dropped (fail-closed), never stored raw and never executable."""
+    if cell in (None, "", {}, []):
+        return None
+    # A DM-authored trap cell may be a bare ops list or an {"ops": [...]} dict
+    # with no explicit version — both are the legacy v1 shape (the validator
+    # only treats a bare LIST, not a v-less dict, as v1). An explicit {"v":2,...}
+    # is preserved untouched.
+    if isinstance(cell, dict) and "v" not in cell and "ops" in cell:
+        cell = cell["ops"]
+    try:
+        from . import effectops
+        return effectops.canon(effectops.validate(cell))
+    except Exception:
+        return None
+
+
 def _entity(e, w, h, ox=0, oy=0):
     if not isinstance(e, dict):
         return None
@@ -245,13 +288,33 @@ def _entity(e, w, h, ox=0, oy=0):
     out = {"id": str(e.get("id", ""))[:16] or re.sub(r"\W", "", _label(e.get("label")))[:12] or "x",
            "x": max(ox, min(ox + w - 1, x)), "y": max(oy, min(oy + h - 1, y)),
            "label": _label(e.get("label"))}
-    if "dc" in e or "dmg" in e:
-        try:
-            out["dc"] = max(1, min(30, int(e.get("dc", 12))))
-        except (ValueError, TypeError):
-            out["dc"] = 12
-        dmg = str(e.get("dmg", "1d4"))[:16]
-        out["dmg"] = dmg if re.match(r"^\d*d\d+([+-]\d+)?$", dmg.lower()) else "1d4"
+    is_trap = "dc" in e or "dmg" in e or "effects" in e
+    if is_trap:
+        if "dc" in e or "dmg" in e:
+            try:
+                out["dc"] = max(1, min(30, int(e.get("dc", 12))))
+            except (ValueError, TypeError):
+                out["dc"] = 12
+            dmg = str(e.get("dmg", "1d4"))[:16]
+            out["dmg"] = dmg if re.match(r"^\d*d\d+([+-]\d+)?$", dmg.lower()) else "1d4"
+        # D113 Phase 5: data-driven trap. `effects` (grammar cell) is the driver;
+        # `trigger` names the firing event (only "step" is wired today),
+        # `search_dc`/`disarm_dc` gate the new discover/disarm checks, `repeat`
+        # lets the trap re-arm instead of springing once. All optional and
+        # omitted-when-default so a legacy trap round-trips byte-identically.
+        eff = _clean_effects(e.get("effects"))
+        if eff is not None:
+            out["effects"] = eff
+        if e.get("trigger") not in (None, ""):
+            out["trigger"] = str(e.get("trigger")).strip().lower()[:16]
+        for k in ("search_dc", "disarm_dc"):
+            if e.get(k) not in (None, ""):
+                try:
+                    out[k] = max(1, min(30, int(e.get(k))))
+                except (ValueError, TypeError):
+                    out[k] = 15
+        if e.get("repeat"):
+            out["repeat"] = True
         out["discovered"] = bool(e.get("discovered"))
         # Runtime lifecycle, kept apart from visibility on purpose:
         # discovered = revealed to players; triggered = already sprung
@@ -260,6 +323,8 @@ def _entity(e, w, h, ox=0, oy=0):
         out["triggered"] = bool(e.get("triggered"))
         tb = e.get("triggered_by")
         out["triggered_by"] = int(tb) if isinstance(tb, (int, float)) else None
+        if e.get("disarmed"):
+            out["disarmed"] = True
     else:
         tb = e.get("taken_by")
         out["taken_by"] = int(tb) if isinstance(tb, (int, float)) else None
@@ -390,6 +455,8 @@ def sanitize(d):
         except (ValueError, TypeError):
             return None
     # Elevation layer (D70): integer height units per cell, missing/invalid -> flat.
+    # D113 Phase 7: one unit here = exactly 10 ft (app.vertical.ELEV_FT). The
+    # clamp stays in UNITS; the scale is reporting only — no height combat.
     raw_elev = d.get("elev")
     elev = [0] * size
     if isinstance(raw_elev, list) and len(raw_elev) == size:
@@ -402,8 +469,20 @@ def sanitize(d):
     if isinstance(raw_exp, list) and len(raw_exp) == size:
         for i, v in enumerate(raw_exp):
             explored[i] = 1 if v else 0
-    traps = [t for t in (_entity(e, w, h, ox, oy) for e in (d.get("traps") or [])[:100]) if t and "dc" in t]
-    loot = [l for l in (_entity(e, w, h, ox, oy) for e in (d.get("loot") or [])[:100]) if l and "dc" not in l]
+    # Vertical openings (D114): openv[i] = 1 marks a vertical opening in the
+    # ceiling ABOVE this cell, connecting this plane to the one declared one
+    # level higher. DEFAULT 0 = a solid floor/ceiling — so a map with no openv
+    # layer, a short/long array, or garbage behaves fully solid (fail-closed:
+    # old maps never gain free cross-floor sight or movement).
+    raw_openv = d.get("openv")
+    openv = [0] * size
+    if isinstance(raw_openv, list) and len(raw_openv) == size:
+        for i, v in enumerate(raw_openv):
+            openv[i] = 1 if v else 0
+    traps = [t for t in (_entity(e, w, h, ox, oy) for e in (d.get("traps") or [])[:100])
+             if t and ("dc" in t or "effects" in t)]
+    loot = [l for l in (_entity(e, w, h, ox, oy) for e in (d.get("loot") or [])[:100])
+            if l and "dc" not in l and "effects" not in l]
     doors, seen_edges = [], set()
     for e in (d.get("doors") or [])[:200]:
         if not isinstance(e, dict):
@@ -455,7 +534,8 @@ def sanitize(d):
     if len(ids) != len(set(ids)):
         return None
     out = {"w": w, "h": h, "cell": max(20, min(100, int(d.get("cell", 50)))),
-           "origin": [ox, oy], "cells": cells, "elev": elev, "explored": explored,
+           "origin": [ox, oy], "cells": cells, "elev": elev, "openv": openv,
+           "explored": explored,
            "traps": traps,
            "loot": loot, "doors": doors, "pins": pins, "objects": objects,
            "fog_off": bool(d.get("fog_off")),
@@ -512,6 +592,8 @@ def visible_map(mp, user_id, is_dm, visible_cells=()):
     cells = [mp["cells"][i] if seen[i] else None for i in range(w * h)]
     el = mp.get("elev") or [0] * (w * h)
     elev = [el[i] if seen[i] else None for i in range(w * h)]
+    ov = mp.get("openv") or [0] * (w * h)
+    openv = [ov[i] if seen[i] else 0 for i in range(w * h)]   # hidden opening leaks no vertical link
     traps = [t for t in mp["traps"] if t.get("discovered") or mp.get("fog_off")]
     loot = [l for l in mp["loot"] if l.get("taken_by") == user_id]
     doors = []
@@ -549,7 +631,7 @@ def visible_map(mp, user_id, is_dm, visible_cells=()):
                 copy["interact"]["on"] = bool((o.get("state") or {}).get("on", True))
         objects.append(copy)
     return {"w": w, "h": h, "cell": mp["cell"], "origin": origin_of(mp),
-            "cells": cells, "elev": elev,
+            "cells": cells, "elev": elev, "openv": openv,
             "explored": mp["explored"], "traps": traps, "loot": loot, "doors": doors,
             "pins": pins, "objects": objects, "fog_off": bool(mp.get("fog_off")),
             "dark": bool(mp.get("dark"))}
@@ -617,6 +699,7 @@ def grow_map(mp, dirs, chunk=EXPAND_CHUNK):
     grown["origin"] = [ox - dx, oy - dy]
     grown["cells"] = remap(mp["cells"], 0)
     grown["elev"] = remap(mp.get("elev") or [0] * (w * h), 0)
+    grown["openv"] = remap(mp.get("openv") or [0] * (w * h), 0)
     grown["explored"] = remap(mp["explored"], 0)
     # traps/loot/pins/doors: WORLD coordinates — unchanged by growth (D72).
     return grown, (dx, dy)

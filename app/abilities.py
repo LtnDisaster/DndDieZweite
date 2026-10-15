@@ -182,6 +182,15 @@ def clean_definition(raw):
                 if cnt > 0:
                     tiers.append((max(0, int(m.group(1))), f"{cnt}d{sides}"))
     out["scale_tiers"] = sorted(tiers)
+    ops = raw.get("ops")
+    if isinstance(ops, (list, tuple)) and ops:
+        # D111: a definition may carry the generic op list — validated, and
+        # re-validation of an already-normalised list is byte-idempotent.
+        from . import effectops
+        try:
+            out["ops"] = effectops.validate(list(ops))
+        except effectops.EffectError:
+            return None
     return out
 
 
@@ -495,18 +504,32 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
         dc = gear.ability_save_dc(actor_sheet, defn["ability"], defn["bonus"])
 
     entries, cond_bumps, changed = [], [], False
+    ops = defn.get("ops") or []
+    if defn["concentration"]:
+        # D113 (2024): casting a new concentration ENDS the previous one — run it
+        # BEFORE this spell's own effects, so the old concentration's linked
+        # conditions are cleared first and the fresh ones (stamped below with
+        # this caster's conc id) survive the clear.
+        from .room import concentration as _conc
+        await _conc.end_previous(room_id, tok)
     for t in targets:
         entry = {"token_id": t["id"], "label": t["label"]}
         sheet, saves = _sheet_and_saves(t)
         apply = True
         if sheet is not None and defn["resolution"] == "save" and t["id"] != tok["id"]:
-            roll = _roll_expr("1d20")
-            mod = gear.save_bonus(sheet, saves, defn["save"])
-            total = roll["kept"] + mod
-            success = total >= dc
-            entry["save"] = {"ability": defn["save"], "roll": roll["kept"], "mod": mod,
-                             "total": total, "success": success}
-            if success and defn["on_save"] == "negate":
+            conds = C.load(t)
+            if C.auto_fails_save(conds, room_id, defn["save"]):
+                entry["save"] = {"ability": defn["save"], "roll": 0, "mod": 0, "total": 0,
+                                 "success": False, "auto_fail": True}
+            else:
+                dis = "dis" if C.hook_bool(conds, room_id, "my_saves_dis") else None
+                roll = _roll_expr("1d20", dis)
+                mod = gear.save_bonus(sheet, saves, defn["save"])
+                total = roll["kept"] + mod
+                success = total >= dc
+                entry["save"] = {"ability": defn["save"], "roll": roll["kept"], "mod": mod,
+                                 "total": total, "success": success}
+            if entry["save"]["success"] and defn["on_save"] == "negate":
                 apply = False
         elif defn["resolution"] == "attack" and t["id"] != tok["id"]:
             roll = _roll_expr("1d20", adv if adv in ("adv", "dis") else None)
@@ -520,32 +543,57 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
             apply = hit                                    # crit doubles damage dice below
         damage = heal = 0
         dtype = defn["damage_type"] or None
-        if apply and defn["damage"] and sheet is not None:
-            expr = _scaled_expr(defn, defn["damage"], cast_level, char_level)
-            if entry.get("attack", {}).get("crit"):
-                expr = _crit_expr(expr)
-            res = _roll_expr(expr)
-            damage = res["total"]
-            if entry.get("save", {}).get("success") and defn["on_save"] == "half":
-                damage //= 2                               # floor BEFORE defense (documented)
-            r = await health.change_hp(room_id, t, -damage, damage_type=dtype,
-                                       broadcast_change=False)
-            if r:
-                entry["damage"] = r["damage"]              # POST-resistance/immunity amount
-                entry["immune"] = r.get("immune", False)
-                changed = changed or r.get("changed", False)
-        if apply and defn["heal"] and sheet is not None:
-            res = _roll_expr(defn["heal"])
-            r = await health.change_hp(room_id, t, res["total"], broadcast_change=False)
-            if r:
-                heal = entry["heal"] = r["healed"]
-                changed = changed or r.get("changed", False)
-        if apply and defn["condition"]:
-            conds = C.add(C.load(t), defn["condition"]["key"], defn["condition"]["rounds"])
-            db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), t["id"]))
-            entry["condition"] = defn["condition"]["key"]
-            cond_bumps.append({"tok": t, "conds": conds})
-        entry["applied"] = apply and (damage > 0 or heal > 0 or "condition" in entry)
+        if ops:
+            # D111: the generic op list runs INSIDE this one shell — same
+            # targeting, range, LOS, DC resolution, cost gate and chronicle.
+            # The fixed blocks below are the pre-D111 fast lane and stay
+            # byte-identical for every definition without an op list.
+            from . import effectops
+            if apply:
+                ctx = effectops.make_ctx(room_id, caster=tok, target=t,
+                                         trigger="cast",
+                                         conc=(tok["id"] if defn["concentration"] else None))
+                ctx["self"], ctx["dc"] = tok, dc
+                try:
+                    await effectops.run_ops(ops, ctx)
+                except effectops.EffectError as ex:
+                    return _fail(f"Effect refused: {ex}")
+                if ctx.get("replayed"):
+                    return {"ok": True, "replayed": True}
+                entry["ops"] = ctx["log"]
+                changed = changed or ctx["changed"]
+                for bump in ctx["cond_bumps"]:
+                    cond_bumps.append({"tok": bump, "conds": db.j(bump["conds"], [])})
+            entry["applied"] = apply
+        else:
+            if apply and defn["damage"] and sheet is not None:
+                expr = _scaled_expr(defn, defn["damage"], cast_level, char_level)
+                if entry.get("attack", {}).get("crit"):
+                    expr = _crit_expr(expr)
+                res = _roll_expr(expr)
+                damage = res["total"]
+                if entry.get("save", {}).get("success") and defn["on_save"] == "half":
+                    damage //= 2                           # floor BEFORE defense (documented)
+                r = await health.change_hp(room_id, t, -damage, damage_type=dtype,
+                                           broadcast_change=False)
+                if r:
+                    entry["damage"] = r["damage"]          # POST-resistance/immunity amount
+                    entry["immune"] = r.get("immune", False)
+                    changed = changed or r.get("changed", False)
+            if apply and defn["heal"] and sheet is not None:
+                res = _roll_expr(defn["heal"])
+                r = await health.change_hp(room_id, t, res["total"], broadcast_change=False)
+                if r:
+                    heal = entry["heal"] = r["healed"]
+                    changed = changed or r.get("changed", False)
+            if apply and defn["condition"]:
+                conds = C.add(C.load(t), defn["condition"]["key"],
+                              defn["condition"]["rounds"],
+                              conc=(tok["id"] if defn["concentration"] else None))
+                db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), t["id"]))
+                entry["condition"] = defn["condition"]["key"]
+                cond_bumps.append({"tok": t, "conds": conds})
+            entry["applied"] = apply and (damage > 0 or heal > 0 or "condition" in entry)
         entries.append(entry)
 
     if defn["concentration"]:                              # existing flag as state (D59)
@@ -574,7 +622,8 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
             if e.get("save"):
                 b = (f"{e['label']}: {e['save']['ability'].upper()} save "
                      f"{e['save']['total']} vs DC {dc} "
-                     f"{'— saved' if e['save']['success'] else '— failed'}")
+                     f"{'— saved' if e['save']['success'] else '— failed'}"
+                     + (" (auto-fail)" if e["save"].get("auto_fail") else ""))
             elif e.get("attack"):
                 b = (f"{e['label']}: {'HIT' if e['attack']['hit'] else 'MISS'}"
                      f"{' (crit!)' if e['attack']['crit'] else ''}")
@@ -584,6 +633,8 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
                 b += f" → +{e['heal']} HP"
             if e.get("condition"):
                 b += f" → {e['condition']}"
+            if e.get("ops"):                               # D111: op-chain outcome
+                b = ((b + " → ") if b else "") + "; ".join(e["ops"])
             if b:
                 bits.append(b)
         text = f"⚡ {tok['label']} — {defn['name']}" + (f" (DC {dc})" if dc else "") + \

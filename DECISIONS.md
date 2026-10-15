@@ -2374,3 +2374,430 @@ lines name conditions by design (public table record, D90).
   skips) + the untouched canonical suite; the corrected audit's remaining
   work is Weapon Mastery (R-P0), Concentration saves / Light bonus attack /
   origin-feat-choice flows (R-P1) and the display tier (R-P2).
+
+## D109 — The 2024 weapon masteries become a server-authoritative layer: property, entitlement and intent are three separate gates
+
+- **Context:** the D108 audit left R-P0 (weapon masteries) open. The eight
+  SRD 5.2.1 masteries (Cleave, Graze, Nick, Push, Sap, Slow, Topple, Vex) are
+  NOT weapon properties — a property says what a weapon can do, a character
+  feature says what they may do, and combat says whether THIS attack
+  qualifies. Merging those axes would let a magic sword silently hand out
+  class features or let a client opt a plain swing into extra effects.
+- **Three-gate model, validated before any die is touched:** (1) the item's
+  `mastery` prop (new additive `items.mastery` column, whitelist-registered
+  in content.SCHEMAS), (2) the build ledger `characters.build.masteries`
+  (`grants` + `pending` — granted only by applying a level with
+  `mastery_gain`, chosen from the class row's `mastery_options` pool, or by
+  an explicit DM-grant route; NEVER retroactively, same principle as D108's
+  origin), (3) the request's explicit `mastery` intent plus per-mastery
+  legality (mode, hands, initiative anchor, reach, once-per-turn markers
+  `m_cleave`/`m_nick` on the turn object). An invalid intent is refused
+  pre-roll — it never rolls a "free" attack.
+- **No second engine.** Push calls `apply_forced_move` (kind `push`, fixed
+  2 cells = up to 10 ft, obstacles truncate like every forced move); Topple
+  reuses the save/prone path; Sap/Slow/Vex write existing condition markers
+  (`sapped`/`slowed`/`vexed`) carrying a `src` token anchor whose expiry
+  lives ONLY in the existing D80 turn-lifecycle hook (`step_src`);
+  adv+dis stays the engine's confusion rule; `slowed` is a −10 ft hook in
+  the one `_speeds` function (flat, never stacks); a Light weapon may now
+  occupy the off hand (2024 two-weapon precondition for Nick).
+- **Documented deviations:** "when you deal damage" (Slow/Vex) = server-
+  rolled damage > 0 (HP stays manual); marker masteries need active
+  initiative and a listed token (src expiry is turn-hook-anchored); spell
+  attacks consume markers only with a token reference; Cleave's second hit
+  drops the ability modifier (unless negative) but keeps magic flat
+  bonuses and extra dice.
+- **Audit fixes folded in:** `apply_origin` and the persistent block of
+  `apply()` each run inside ONE `db.tx()` (BEGIN IMMEDIATE) — check-then-
+  write windows closed; the reach/range maths now measures authoritative
+  footprint CELLS ×5 ft instead of raw pixel deltas (latent D93 bug that
+  made any spaced target "out of reach").
+- **Consequences:** `tests/test_d109_mastery.py` (29 behaviour tests, no new
+  skips; a deterministic chat-sentinel drain helper replaces flaky event
+  loops), `Dockerfile` test stage now copies `scripts/` so the generator's
+  byte-idempotency test guards the shipped pack in the canonical image too.
+  Canonical: 826 passed, 1 skipped, 0 failed.
+
+## D110 — The "back-backlog" rule is retired for DnDTable; the engine's remaining wish-list becomes planned residual work, and one continuous integration chain guards the shipped paths
+
+- **Context:** Sprints 34–38 closed the rules gaps (D106–D109), but the
+  question "what is actually still missing to call this feature-complete?"
+  was only answerable from TODO prose — not from code evidence. The TODO
+  section "bewusst nicht gebaut" (deliberately-unbuilt timebox artefacts)
+  carried a "back-log it" framing imported from a different project.
+- **Decision:** (1) The framing is retired: everything still desired for
+  DnDTable is planned residual work, classified and sequenced in
+  `docs/FEATURE_COMPLETE_GAPS.md` (S40 genericity → S41 opposed/sleight →
+  S42 automatic magic → S43 combat R-P1 → S44 data projection → S45+
+  CSV content + operations). (2) The real state is now documented from
+  file:line evidence in `docs/FEATURE_MATRIX.md` and
+  `docs/CSV_ONLY_READINESS.md` — column ≠ mechanic is a named, measured
+  property (species/creatures are data-only; the executor cannot express
+  movement/check/duration-with-save effects; the condition catalogue is
+  hardcoded). (3) D110 itself ships no new mechanic: it integrates.
+- **The chain:** `tests/test_d110_e2e.py` drives one continuous A→F run
+  over the REAL REST/WS handlers — pack import → 2024 characters (origin,
+  class apply, mastery pick, kit-choice starting gear) → move/wall/door/
+  fog/view-as/floors → initiative with Cleave/Topple/Graze/Vex and real
+  condition clocks → down → adjacency-gated atomic loot → DM curse set/
+  reveal/whisper with owner-only delivery → reconnect snapshot equality +
+  replay idempotency. It is the machine-checkable twin of
+  `docs/SATURDAY_ACCEPTANCE.md`.
+- **Two P1 integration bugs found and fixed by the chain:**
+  (a) `room/dice.py` spent the turn's action (and the Nick marker) BEFORE
+  validating target visibility/reach/push-size/cleave-pair — every refused
+  attack burned a slot; slot accounting now runs after all pre-roll
+  validation. (b) `room/inv.py` let the curse action `whisper` fall into
+  the reveal/conceal branch, executing `curse_reveal(False)` — a whisper
+  silently UN-revealed a disclosed curse (latent since D106; the suite
+  never combined reveal→whisper). `whisper` now performs no mutation.
+- **Consequences:** the canonical suite grows the e2e file (5 tests, no
+  skips); D106/d109/combat/inventory neighbours re-verified green after
+  both fixes; the browser acceptance (Sat 2026-10-17) has a written script.
+
+## D111 — Effects become a validated, versioned data grammar executed by the existing engines, and the condition catalogue becomes CSV data with behaviour hooks
+
+- **Context:** D110 measured the gap (`docs/CSV_ONLY_READINESS.md`):
+  columns existed without mechanics — items could only `heal`, spells had no
+  movement/check/resource effects, the condition catalogue was 18 hardcoded
+  keys, and S40 of `docs/FEATURE_COMPLETE_GAPS.md` defined the generic base
+  every later sprint (S41–S44) builds on.
+- **Decision:** (1) One versioned cell grammar (`app/effectops.py`, `v:1`):
+  ops `damage/heal/temp_hp/condition/condition_remove/break_concentration/
+  save/check/forced_move/resource`, canonical JSON (byte-stable canon, strict
+  parse, hard node/op/cell/depth/dc/cell-count/cost limits), unknown op or
+  field REFUSES the row at import. (2) Cells run through the EXISTING
+  engines only — health/damage, movement's `apply_forced_move`, saves/checks
+  over the normal dice channel, conditions through the D80 clocks, resources
+  through `gear`/`inventory`; `abilities.execute()` runs the cell in its own
+  shell. No second engine. (3) Conditions gained a DEFINITION layer:
+  `conditions.csv` (hook flags `blocks_movement/speed_delta/my_*_dis/
+  attacks_against_me_*/auto_fail_saves` read by the existing movement/dice/
+  ability paths + `on_start/on_round/on_expire` effect hooks fired by the
+  turn lifecycle); the SRD keys became `BUILTIN_HOOKS` data a CSV row can
+  override. (4) Triggers `use/equip/unequip/on_hit/on_damaged` fire inline at
+  the authoritative handlers, claim-guarded (one firing per token+trigger+
+  carrier+round/op, no trigger chains, ≤8 carriers), with all-or-nothing
+  resource preflight inside the claim transaction — a refused action never
+  pays, a replayed one never re-fires. (5) Feats with a cell surface as
+  castable `feat_<id>` abilities (charbuild entitlement). Documented v1
+  non-goals (source-keyed hooks, reactions, auras, summons, components, the
+  concentration SAVE — S42) live in `docs/EFFECT_GRAMMAR.md`; 2024
+  simplifications (blanket disadvantage for frightened, blinded checks-dis,
+  DM-prone, grappled/restrained now blocking movement outright) are named
+  there too.
+- **One latent P1 infrastructure bug found by the new tests:**
+  `room/net.py` keyed cross-loop socket delivery by `id(ws)` — CPython reuses
+  ids, so a fresh socket could inherit a STOPPED owner loop and every send to
+  it awaited a future that could never resolve (hang). The owning loop now
+  lives on the socket (`ws._iio_loop`), stopped loops are refused, and
+  cross-loop sends carry a timeout. (D111's third ws session in one test
+  exposed it; production uvicorn had only ever had one loop.)
+- **Consequences:** S40 closed (`docs/FEATURE_COMPLETE_GAPS.md`);
+  `docs/EFFECT_GRAMMAR.md` is the author-facing reference and
+  `docs/CSV_ONLY_READINESS.md` re-scored per surface; the demo pack gained
+   `conditions.csv` + trigger/effect demo rows (generator byte-idempotent);
+   `tests/test_d111_effects.py` (21 tests, real WS paths, no source pins)
+   green; canonical suite grows accordingly.
+
+## D112 — Contested actions become ONE reusable primitive the 2024 special-melee and pickpocket rules run on; no second rules engine
+
+- **Context:** D111 gave effects a data grammar but left every *contested*
+  action (grapple, shove, escape, a secret steal) without a shared way to ask
+  "check vs check", "check → DC → save" or "check vs a fixed DC". S41 of
+  `docs/FEATURE_COMPLETE_GAPS.md` named exactly this: a generic opposed/DC
+  primitive plus the 2024 special-melee family and pickpocket, built on the
+  existing dice/conditions/inventory engines — explicitly NOT a parallel rules
+  engine, and 2024 (D107/D108) is the baseline, not 2014.
+- **Decision:** (1) `app/room/opposed.py` is a thin, reusable helper over the
+  EXISTING dice channel (`do_roll`/`_combine_adv`) and `gear` bonus sources —
+  `participant`, `check_roll`, `save_roll`, `bonus_roll`, `melee_attack_number`,
+  `better_save`, `opposed_wins(att, def, tie=)`, `beats_dc(total, dc)`, and a
+  `Tie` exception for a caller-deferred tie. It ships NO rules of its own; the
+  three shapes are just composition. The default tie rule is
+  `tie="defender"` (a d20 tie goes to the defender/roller-must-meet-DC);
+  `tie="attacker"` flips it; `tie="dm"` raises `Tie` so the caller defers to a
+  DM — never a silent coin flip. A closed-world *effect-grammar* op that would
+  let CSV data express an opposed check is deferred to S42; the interface is
+  documented in `docs/EFFECT_GRAMMAR.md` so S42 can wrap this helper without a
+  second implementation. (2) `app/room/grapple.py`: the **2024** special-melee
+  family, not the 2014 Athletics-vs-Athletics contest. Grapple = the attacker's
+  special-melee number — `melee_attack_number` = max(unarmed attack bonus, an
+  Athletics check) — becomes a DC the target answers with a **save** (`save_roll`),
+  by default the target's HIGHER of Str/Dex (`better_save`), DM-overridable
+  (`save` field); Shove (prone / 5-ft push) resolves the same check, push via
+  the existing `moveforced.apply_forced_move`. State is additive only: the
+  grappled `conds` entry carries the grappler `src` and a new optional `dc`
+  (int 1–30, `_clean_dc`) so escape is "Athletics or Acrobatics vs the stored
+  DC". The grapple ends when the target leaves the grappler's reach —
+  `end_grapples_out_of_reach` is wired into the three authoritative movement
+  ends (forced move incl. a shove, a normal walk, a DM teleport) — or when the
+  grappler is gone/incapacitated (escape then auto-succeeds). Reach and
+  adjacency use the SAME closest-footprint-corner geometry (Chebyshev ≤ 1) the
+  dice module already uses for reach; the size gate is "no more than one size
+  larger" via `npc.SIZES` index. (3) `app/room/pickpocket.py`: BOTH 2024
+  adjudication models ship. Model A `pickpocket` is the DM-mediated attempt — a
+  hidden Sleight-of-Hand check reported ONLY to the DM; Model B
+  `pickpocket_take` lets a thief choose one concrete DM-authorised item and
+  auto-transfer it on success. Because 2024 has NO passive perception
+  (`RULES_AUDIT_2024` A7), "noticed" is EITHER a DM-set fixed `notice_dc`
+  (`beats_dc`) OR a real Perception check the engine rolls and resolves with
+  `opposed_wins(tie="defender")` — the engine never forces a mode. Discovery is
+  reported to the DM *separately* from theft success. Success is one atomic
+  `inventory.transfer` (PC victim) or `inventory.container_give` (NPC
+  `tok:<id>`), with `_ownership_moves` preserving curse metadata and resetting
+  `revealed`. `handle_pickable` (DM only) toggles the new `pick` flag on a
+  character item (`set_pick_char`) or an NPC container (`container_set_pick`).
+  (4) Leak- and replay-guards are load-bearing: ONLY DM-flagged `pick` items are
+  stealable, and an unflagged/unknown item answers exactly like a failed check
+  (`_pick_entry` returns None) so the endpoint is never an inventory oracle;
+  the op-id guard (`inventory._claim`) is taken BEFORE the action slot is spent
+  and before any roll, so a replay spends and rolls nothing; every precondition
+  (room, floor, reach, visibility, authz, size, target-alive) is validated
+  before anything is spent. `pick` never stacks (`_stack_key` returns None) and
+  rides the `clean_items` whitelist; a fresh `VTT_DATA_DIR` and a replayed op
+  both stay idempotent. (5) UI (Phase 5) is actor+target only — the sheet names
+  who acts on whom and a fresh `op_id`; the whole resolution is server-side.
+  The DM authorises `pick` items from the NPC chest and the character sheet
+  (`🤝 steal`). No new reply kinds were needed: grapple/shove/escape reuse the
+  `dice`+`cond`+`initiative` kinds, pickpocket reuses `whisper`+`dice`+
+  `inv_changed`, `pickable` reuses `inv_contents`/`inv_changed` — `40_ws.js`
+  was untouched. `55_diorama.js` was not touched.
+- **Consequences:** S41 closed (`docs/FEATURE_COMPLETE_GAPS.md`);
+  `docs/FEATURE_MATRIX.md`, `docs/RULES_AUDIT_2024.md` (grapple/shove/escape +
+  pickpocket now implemented, 2024-correct) and `docs/CSV_ONLY_READINESS.md`
+  re-scored per surface; the opposed interface is documented as the S42
+  wrapping point in `docs/EFFECT_GRAMMAR.md`; `AGENT_GUIDE.md` gained the three
+  modules + six WS message types + test map; `MANUAL_BROWSER_CHECKLIST.md`
+  gained the D112 walkthrough; `tests/test_d112_contested.py` (31 tests, real
+  WS paths — save/tie unit, full grapple/shove/escape, both pickpocket models,
+  leak, replay, concurrency, cursed transfer, cross-room, cross-plane, action
+  economy) green; canonical suite: 883 passed, 1 skipped, 0 failed.
+
+## D113 — Konzentration, automatische Flüche und die Opposed-Wirkgrammatik werden 2024-konform datengetrieben (Sprint 42)
+
+- **Kontext:** Sprint 42 setzt die in D111 (Wirkgrammatik) und D112
+  (Opposed-Primitive) gelegten Grundlagen in drei echte 2024-Regeloberflächen um,
+  ohne irgendwo eine zweite Engine zu bauen: die 2024-Konzentration (Phase 2),
+  automatische, DM-autorierte Flüche (Phase 3) und ein `opposed`-Op der
+  Wirkgrammatik (Phase 4). Alle drei laufen ausschließlich über die vorhandenen
+  authoritativen Operationen (`room.health`, `app.conditions`, `room.opposed`,
+  `room.moveforced`, das Ressourcen-Ledger) und die D111-Triggerseams.
+  UI-Texte bleiben Englisch, diese Dokumentation ist Deutsch. `55_diorama.js`
+  wurde nicht angefasst; keine Git-/`.git`-Zugriffe.
+
+- **Entscheidung Phase 2 (Konzentration):** Konzentration behält ihre einzige
+  Darstellung — das `concentrating`-Flag in `conds` (D59). Neu ist ein
+  additives Link-Feld `conc` = Token-ID des Konzentrierenden an einer
+  Condition-Instanz: eine Condition „gehört" zu einer Konzentration und endet
+  raumweit mit ihr. Der Lebenszyklus liegt in `app/room/concentration.py`
+  (`end_previous`, `break_link`, `on_damage`, `enforce_after_condition`). Der
+  Wurf läuft über `room.opposed.save_roll` (derselbe d20-Kanal inkl.
+  `auto_fail_saves`/`my_saves_dis`), kein zweiter Würfelweg. Der Schadens-DC ist
+  `max(10, floor(HP_verlust / 2))` OHNE Cap, wobei HP_verlust die TATSÄCHLICH
+  verlorenen HP nach Resistenz UND Temp-HP-Absorption sind — `change_hp` übergibt
+  genau diesen Wert. Runtergehen auf 0 HP oder ein
+  Dekondensierungs-/Inkapazitätszustand bricht SOFORT ohne Wurf. Beim Zaubern
+  einer neuen Konzentration wird die alte BEVOR die neuen Effekte landen beendet
+  (`end_previous`), damit die alten Link-Effekte weg sind und die neuen bestehen
+  bleiben. Ein `break_concentration`-Op und ein inkapazitätsauslösende Condition
+  löschen zusätzlich alle `conc`-verlinkten Conditions des Wirkenden.
+
+- **Entscheidung Phase 3 (automatische Flüche):** `active` und `revealed` sind
+  vollständig unabhängige Zustände. Der DM kann mit `activate`/`deactivate`
+  schalten; Enthüllen/Verbergen/Whisper ändern die Aktivierung niemals. Die
+  Schemaerweiterung ist strikt rückwärtskompatibel: `clean_curse` speichert
+  `trigger`/`effects`/`active` NUR wenn gesetzt — ein alter Fluch round-trippt
+  byte-identisch und ist per Default inaktiv; keine Schemaänderung kann einen
+  alten Fluch versehentlich einschalten. Bewaffnet wird über `arm`
+  (`trigger` + Wirk-Cell), der Cell wird mit derselben `effectops`-Grammatik
+  validiert (keine zweite Fluch-/Effektengine). Ausgelöst wird nur an echten
+  Mutationen (`equip`/`unequip`/`use`/`on_hit`/`on_damaged`/`on_transfer`) und
+  nur wenn `active` UND `trigger` passen — ein bloßes Lesen/Anzeigen/Synchronisieren
+  von Inventar feuert nichts. Besitzerwechsel feuern `on_transfer` über
+  `_item_transfer_effects`, geclaimed an der Transfer-`op_id` (Replay/Race feuert
+  nicht doppelt), atomar über das bestehende `inventory`-Kommando.
+  Fluch-Herkunft wird nie an Spieler verraten: curse-origin-Fragmente gehen über
+  `net.dm_whisper` nur an den DM; die Owner-Ansicht bleibt `curse_view`-streng
+  (Name/Beschreibung nur wenn enthüllt; `active`/`trigger`/`effects` nie).
+  D111-Budget und Tiefen-Rekursionsschutz werden wiederverwendet. 2024-getreu
+  endet ein Fluch NICHT automatisch durch Unequip/Besitzerwechsel — Dauer,
+  Bindung und Entfernung sind ausdrücklich zu definieren; nichts entfernt einen
+  Fluch implizit.
+
+- **Entscheidung Phase 4 (Opposed-Op, Grammatik v2):** Die Grammatik akzeptiert
+  `v1` UND `v2` (`V=2`, `V_MIN..V_MAX=1..2`); alles andere (v0/v3) wird
+  weiterhin abgelehnt, unbekannte Ops/Felder bleiben closed-world. v2 fügt nur
+  den `opposed`-Op hinzu (unter v1 ausdrücklich verboten): ein Attributswurf des
+  Subjekts gegen denselben Wurf des Ziels, entschieden von `room.opposed`
+  (`check_roll` + `opposed_wins`, `tie` = defender/attacker/dm) — keine zweite
+  Opposed-Engine. `canon()` erhält die Version des Cells, sodass ein v1-Cell
+  byte-identisch bleibt und v2-Nahme keine gespeicherten Inhalte umschreibt.
+
+- **Konsequenzen:** Neue additive, rückwärtskompatible Felder ohne Migration
+  (`conc` an Conditions, `trigger`/`effects`/`active` an Curses, `on_transfer`
+  als Trigger). `tests/test_d113_concentration.py` (9),
+  `tests/test_d113_curses.py` (9) und `tests/test_d113_opposed.py` (6) decken
+  die Flächen über echte WS-Pfade ab; eine D111-Assertion (v2 war „falsche
+  Version") wurde auf v3 umgestellt, weil v2 jetzt gültig ist. Kanonische
+  Suite (Python 3.12): 917 passed, 1 skipped, 0 failed (inkl. 10 Fallen-Tests,
+  Phase 5). Erledigt in Sprint 42: datengetriebene Fallen (Phase 5) und die
+  Curse-/Fallen-Autoren-UI + diese Doku (Phase 6; Browser-Durchlauf bleibt
+  menschliche Abnahme). Offen bleibt nur vertikale 10-ft-Geometrie (Phase 7).
+
+- **Entscheidung Phase 5 (datengetriebene Fallen):** Eine Falle bleibt eine
+  MAP-ENTITÄT (kein `traps.csv`), nur ihre Felder werden erweiterbar. Neu und
+  optional (Omit-when-Default → alte Fallen round-trippen byte-identisch):
+  `effects` (Wirk-Cell derselben Grammatik), `trigger` (heute nur `step`
+  verdrahtet), `search_dc`, `disarm_dc`, `repeat`. Eine alte Falle (nur
+  `dc`+`dmg`) behält den unveränderten Einweg-Pfad. Die ganze Auslösung läuft
+  über `effectops.run_ops` (Save/Check/Schaden/Condition/Forced-Move) — der
+  `random.randint`-Wurf ist raus, kein zweiter Würfel-/Save-Kern. Entdecken ist
+  ein Weisheit-(Wahrnehmung)-Check gegen `search_dc`, Entschärfen ein
+  DEX-Geschicklichkeitswurf gegen `disarm_dc` über `room.opposed`
+  (`participant`/`check_roll`/`beats_dc`) — keine neue Werkzeug-Proficiency-Engine
+  (DM gewährt ggf. Vorteil). Neue WS-Nachricht `trap` (`search`/`disarm`/DM
+  `trigger`), Actor benennt ein FELD, nie eine Fallen-ID. Leak-Schutz: Die
+  Antwort auf „leeres Feld durchsucht" und „versteckte Falle, Wurf verpatzt" ist
+  byte-identisch — der Endpunkt ist kein Fallen-Oracle; `discovered` wird nur bei
+  Erfolg gesetzt und dann per `map_changed` enthüllt. `disarmed` ist ein
+  Runtime-Flag, das ein veraltetes Editor-Snapshot nicht re-armed (dispatch-
+  Merge), und entschärfte Fallen federn auf `triggered`.
+
+- **Entscheidung Phase 7 (vertikale Geometrie, 10 ft je Stockwerk):** Eine
+  einzige kanonische vertikale Skala in `app/vertical.py`: EINE Höhen-Einheit der
+  `elev`-Ebene UND EINE deklarierte Ebenen-Stufe entsprechen JEDEM exakt 10 ft
+  (`ELEV_FT=10`, `FLOOR_FT=10`; `elev_to_ft`/`floor_to_ft`/`absolute_ft`).
+  Bewusst NUR die Skala/Buchführung — KEIN Höhenkampf: Sturzschaden,
+  Höhen-Deckung und Flug/Schwimm/Kletter-Kosten bleiben die bewusst
+  ausgelagerte Engine-Kante aus D70/D83. Pfadfindung gateert Schritte weiterhin
+  an |Δz| ≤ 1 in EINHEITEN (unverändert); die Fuß-Angabe ist, was eine Einheit
+  bedeutet, keine zweite Geometrie. Die Ebenen (`floors.py`) sind eine
+  unsortierte, voneinander unabhängige Namensliste (Kollision/Sicht getrennt,
+  D86/D88) — der deklarierten Reihenfolge wird eine Höhen-Ordnung gegeben
+  (`floors.level`: Primär=0, jede weitere Ebene +1 Stufe = +10 ft;
+  `absolute_height_ft` = Ebenen-Offset + Boden-Elevation×10 ft), rein
+  geometrisch/reporting, ohne die Ebenen zu einem Kollisions-Stack zu machen.
+  Die `elev`-Klammer bleibt bei -6..6 EINHEITEN. `55_diorama.js` bleibt tabu.
+
+- **Konsequenzen Phase 7:** `app/vertical.py` (Skala, importfrei), additive
+  Ebenen-Helfer in `app/floors.py` (kein Schema/Migration), Doku-Hinweis an der
+  `elev`-Klammer. `tests/test_d113_vertical.py` (4) pins die Skala, den Ebenen-
+  Stack (inkl. Reihenfolge nach `rename`) und dass die Einheiten-Klammer
+  unverändert ist. Kanonische Suite: **921 passed, 1 skipped, 0 failed**
+  (917 + 4). Sprint 42 (D113) ist damit in allen Phasen 2–7 erledigt; offen
+   bleibt nur der menschliche Browser-Durchlauf der Phase-6-Oberflächen.
+
+## D114 — Vertikale Token-Geometrie wird über Körper-Ebenen und Öffnungen entschieden; Sicht und physische Reichweite bleiben bewusst verschieden (Sprint 43)
+
+- **Problem und Abgrenzung:** D86/D88/D102 behandelten Ebenen korrekt als
+  voneinander unabhängige Besetzungs-/Sichtebenen. D113 führte nur eine
+  Höhen-Skala ein. D114 macht Token zu echten vertikalen Volumina und Ebenen zu
+  gestapelten Räumen, ohne eine zweite LOS-, Footprint-, Würfel- oder
+  Bewegungsmaschine zu erzeugen. Die Entscheidung gilt für die Backend-Phasen
+  0–5; Flug/echte vertikale Bewegung und UI bleiben ausdrücklich offen.
+
+- **Token-Volumen:** `tokens.height_ft` ist die physische vertikale Ausdehnung,
+  `tokens.elevation_ft` die Unterkante über der STANDFLÄCHE. Beide sind
+  additiv-migriert; alte Tokens bleiben mit `NULL`/`0` gültig. Größenkategorien
+  liefern nur dokumentierte Hausregel-Defaults (Tiny/Small/Medium 5 ft, Large
+  10 ft, Huge 15 ft, Gargantuan 20 ft) und sind ausdrücklich keine Obergrenze.
+  Technisches Validationsband: Höhe/Elevation jeweils 0..200 ft, negative
+  Elevation wird auf 0 gekürzt. `app/vertical.py` bleibt die einzige Skala;
+  `floors.py` berechnet daraus absolute Fuß- und gespannte Ebenen.
+
+- **Öffnungen:** Neue pro-Ebene/pro-Zelle-Karte `openv` in `mapmodel`.
+  `openv=1` bedeutet eine Deckenöffnung über dieser Zelle zur einen Level
+  höher deklarierten Ebene. Fehlend, ungültig, falsche Länge oder `0` bedeutet
+  durchgehend feste Decke — Fail-closed. `void`/Treppen werden nicht zweckentfremdet.
+  Die Spieleransicht maskiert unerforschte `openv`-Zellen auf `0`; ein Opening
+  darf nie durch Fog als Weltwahrheit durchsickern.
+
+- **Einheitliche Schlussstelle:** `app/room/vertical3d.py` ist die einzige
+  Etage-übergreifende Geometrie-Entscheidung. `body_planes()` liefert nur die
+  Ebenen, in denen der Tokenkörper physisch ist; eine höhere Ebene wird nur
+  aufgenommen, wenn die Höhe sie erreicht, das GESAMTE Footprint durch jede
+  zwischenliegende Öffnung geht und die Zielzellen nutzbarer Boden sind.
+  Ein einzelnes Loch lässt ein breites Geschöpf nicht durch.
+  `observable_cells()` trennt bewusst zwei Phänomene: Körperpräsenz oder
+  gleiche Ebene zeigen das volle Footprint; sonst nur ein senkrechter Shaft.
+  Nicht verbundene Ebenen liefern leer. Damit bleibt das D86/D88 „elsewhere“
+  ohne Öffnungen byte-identisch.
+
+- **Sicht ist nicht Reichweite:** Für Nebel und Token-Delivery zählen
+  `body_planes` als echtes Stehen (`_viewer_planes`, `viewer_source_cells`);
+  ein aufragender Körper ist Licht-/Sichtquelle auf der oberen Ebene. Für
+  Angriffe/Anvisieren nutzt `room.dice` `observable_cells`, weil ein Schacht
+  Sicht gewähren kann. Melee-/Grapple-Nachbarschaft und Interaktionen nutzen
+  hingegen nur `body_cells`: ein offener Schacht allein erlaubt kein Greifen,
+  Drängen oder physisches Hantieren. Gleiche Ebene bleibt rein 2D; die
+  vertikale Reichweiten-Zugabe entsteht erst bei einem Schacht.
+
+- **Live-Sicherheit:** Token-Delivery, Präsenz-/Condition-Ereignisse,
+  `/state`-Snapshot, `plane_viewers` und Interaktionen verwenden dieselbe
+  Körperpräsenz-Entscheidung. `token_height` und `map_edit` lösen
+  `reevaluate_visibility` aus, damit eine wachsende Höhe oder neu gesetztes
+  `openv` Tokens sofort korrekt verteilt/entfernt statt erst beim nächsten Zug.
+  Unregistrierte/unbekannte Floor-Namen verbinden nichts (fail-closed). Ein
+  Push/Shove über Ebenen wird abgelehnt; nur Angriffe und Grapple können eine
+  Körperpräsenz im gemeinsamen Ebenenanteil nutzen.
+
+- **Bewusste Lücken:** Echtes Fliegen, vertikale Bewegungs-/Flugbudgets und die
+  Client-Darstellung mehrerer Ebenenanteile sind Phase 6/7 und NICHT
+  Feature-complete. Die D113-Werkzeuglücke bleibt bestehen: Entschärfen ist ein
+  echter DEX-Check, aber Thieves'-Tools-Proficiency ist weiterhin nicht
+  modelliert. UI-Beschriftungen sagen daher „Dexterity check“, nicht „Thieves'
+  tools“.
+
+- **Konsequenzen:** `authz.TOKEN_COLS` trägt `height_ft`/`elevation_ft`;
+  `net.plane_viewers`, `room.visibility`, `room.rooms`, `room.dice`,
+  `room.grapple` und `room.interact` fragen die zentrale
+  `vertical3d`-Schlussstelle statt Home-Floor-Pauschalen. Neue Integrationstests:
+  `tests/test_d114_vertical.py` (5), `tests/test_d114_openings.py` (4) und
+  `tests/test_d114_phase5_integration.py` (5). Kanonischer Stand nach Phase 5:
+  **937 passed, 1 skipped, 0 failed**.
+
+### D114-Ergänzung — vertikaler Flug, Volumen-Kollision und UI sind umgesetzt
+
+- **Vertikale Bewegung:** `app/path.py::find_path_3d` sucht über
+  `(floor, origin)`-Zuständen. Horizontale Schritte bleiben ausschließlich in
+  der bestehenden `path`/`step_legal`-Maschine; ein senkrechter Schritt prüft
+  genau eine Levelstufe, eine vollständige Footprint-Öffnung und offenes
+  Zielvolumen in `vertical3d`. `movecost.vertical_cost()` rechnet einen vollen
+  Ebenenwechsel als `10 ft = 2` kanonische Bewegungsfelder — keine zweite
+  Wirtschaft.
+
+- **Flug und `void`:** `void` ist freies Flugvolumen, aber kein begehbarer
+  Boden. `mode="fly"` darf `void` betreten und ebeneübergreifend fliegen;
+  `mode="walk"` bleibt auf Standflächen und darf eine offene Vertikalachse nicht
+  benutzen. Die Ganzzervolumen-Kollision nutzt `volume_final_valid()` mit den
+  bestehenden Owner-/Reiter-Ausnahmen, ohne eine zweite Kollisionsregel.
+
+- **Explizite Absicht:** Ein `move` wechselt die Ebene nur, wenn das Wire-Feld
+  `floor` vorhanden und anders als die aktuelle Ebene ist — oder wenn ein
+  Pfadpunkt ausdrücklich ein anderes `floor` trägt. Ein fehlendes Feld ist
+  weiterhin die aktuelle Ebene und darf nicht als 3D-Wunsch missverstanden
+  werden. `walk3d()` validiert jeden Schritt erneut, sendet `token_floor`,
+  trägt Budget ab und führt Reiter mit.
+
+- **UI/Canvas:** Token-Sheets setzen `height_ft`/`elevation_ft`; ein
+  vertikaler Flugknopf sendet eine explizite Etagenabsicht, ohne die Route im
+  Client zu erraten. Der DM-Editor besitzt einen `openv`-Pinsel, `openv` wird
+  bei Resize mitgeführt und erscheint als `↕`-Hinweis. Tokens zeigen Elevation
+  mit `↑<ft>` und eine gesetzte Körperhöhe mit `↕<ft>`.
+
+- **Keine zweite Sichtautorität:** Für Spieler und DM-Charaktervorschau rendert
+  der Canvas genau die servergefilterten Rows. Das DM-Browsing bleibt auf
+  `state.viewFloor` beschränkt. `viewerPlane()` stellt die Browsing-Ebene bereit;
+  `onPlane()` wendet sie nur für DM-Browsing an. Ein Client entscheidet nicht
+  eigenständig, wer durch einen Schacht sichtbar sein könnte.
+
+- **Bewusst offen:** Diagonale + vertikale Kombination, Springen/Fallen,
+  vertikales Klettern/Schwimmen, interaktive 3D-Pfadvorschau, automatische
+  Terrain-Erkennung und echte Browser-/Playwright-Akzeptanz sind nicht Teil von
+  D114. Thieves'-Tools-Proficiency bleibt weiterhin die bekannte D113-Lücke.
+
+- **Konsequenzen Phase 6–8:** Neue Phase-6-Tests in
+  `tests/test_d114_phase6_vertical_movement.py` (7) und Phase-8-Integrationstests
+  in `tests/test_d114_phase8_integration.py` (4). Kanonischer Stand nach
+  Sprint-43-Abschluss: **948 passed, 1 skipped, 0 failed**.

@@ -238,26 +238,48 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
     if not ok:
         return False, payload
 
-    # -- persist through the ONE mutation site + the columns the engines read --
-    if not progression.set_class_levels(ch["id"], [{"class_id": class_id, "level": to}]):
-        return False, {"error": "invalid class levels"}
+    # -- persist through the ONE mutation site + the columns the engines read.
+    #    D109: every statement shares ONE db.tx() — a concurrent reader or
+    #    writer can never observe or interleave with a half-applied build.
     stats, skills, saves = payload["stats"], payload["skills"], payload["saves"]
     spell_state = payload["spell_state"]
     led.update({"class_id": class_id, "applied_through": to,
                 "subclass": payload["subclass"], "base_stats": payload["base_stats"],
                 "decisions": dec, "history": payload["history"]})
-    db.x("UPDATE characters SET char_class=?, hit_die=?, max_hp=?, hp=?, stats=?, "
-         "skills=?, saves=?, build=? WHERE id=?",
-         (class_id, payload["hit_die"], payload["max_hp"], payload["max_hp"],
-          db.json_dumps(stats), db.json_dumps(skills),
-          db.json_dumps({k: v for k, v in saves.items() if v}),
-          db.json_dumps(led), ch["id"]))
+    # D109: masteries accrued by the levels applied NOW (forward-only —
+    # levels applied earlier never produce grants retroactively).
+    gains = _mastery_gains(class_id, applied, to, room_id)
+    if gains:
+        led["masteries"] = {"grants": _mastery_grants(led) + gains}
+    # D111: an EFFECTS-bearing feat grants its registered ability feat_<id> as
+    # an entitlement — the same characters.abilities axis _rollable_by reads.
+    frows = _feat_rows(room_id)
+    feat_abilities = sorted({f"feat_{str(f.get('id'))[:22]}" for f in payload["feats_applied"]
+                             if str((frows.get(f.get("id")) or {}).get("effects") or "").strip()})
     if spell_state:
-        db.x("UPDATE characters SET abilities=?, spells=?, spell_slots=?, resources=? "
-             "WHERE id=?",
-             (db.json_dumps(spell_state["abilities"]), db.json_dumps(spell_state["spells"]),
-              db.json_dumps(spell_state["spell_slots"]), db.json_dumps(spell_state["resources"]),
-              ch["id"]))
+        spell_state["abilities"] = sorted(set(spell_state["abilities"]) | set(feat_abilities))
+    with db.tx() as c:
+        if not progression.set_class_levels(ch["id"],
+                                            [{"class_id": class_id, "level": to}], c=c):
+            return False, {"error": "invalid class levels"}
+        c.execute("UPDATE characters SET char_class=?, hit_die=?, max_hp=?, hp=?, "
+                  "stats=?, skills=?, saves=?, build=? WHERE id=?",
+                  (class_id, payload["hit_die"], payload["max_hp"], payload["max_hp"],
+                   db.json_dumps(stats), db.json_dumps(skills),
+                   db.json_dumps({k: v for k, v in saves.items() if v}),
+                   db.json_dumps(led), ch["id"]))
+        if spell_state:
+            c.execute("UPDATE characters SET abilities=?, spells=?, spell_slots=?, "
+                      "resources=? WHERE id=?",
+                      (db.json_dumps(spell_state["abilities"]),
+                       db.json_dumps(spell_state["spells"]),
+                       db.json_dumps(spell_state["spell_slots"]),
+                       db.json_dumps(spell_state["resources"]), ch["id"]))
+        elif feat_abilities:
+            cur = db.j(c.execute("SELECT abilities FROM characters WHERE id=?",
+                                 (ch["id"],)).fetchone()[0], []) or []
+            c.execute("UPDATE characters SET abilities=? WHERE id=?",
+                      (db.json_dumps(sorted(set(cur) | set(feat_abilities))), ch["id"]))
     res = {"level": to, "max_hp": payload["max_hp"], "subclass": payload["subclass"],
            "skills": sorted(k for k, v in skills.items() if v),
            "saves": sorted(k for k, v in saves.items() if v),
@@ -352,8 +374,18 @@ def apply_origin(char_id, background, asi, room_id=0):
     of origin, no heuristic back-computation) and replayed inside the SAME full
     recompute the class chronology uses, so it can never be applied twice and
     survives any later build step. hp/max_hp/slots/resources are never touched;
-    existing sheets are never auto-migrated."""
-    ch = db.q1("SELECT * FROM characters WHERE id=?", (int(char_id),))
+    existing sheets are never auto-migrated.
+    D109: the idempotency read AND the write run inside ONE db.tx()
+    (BEGIN IMMEDIATE) — check-then-write races against another writer are
+    closed by SQLite's single-writer lock, so EXACTLY-ONCE holds even under
+    concurrent requests, not just sequential ones."""
+    with db.tx() as c:
+        return _apply_origin_locked(c, char_id, background, asi, room_id)
+
+
+def _apply_origin_locked(c, char_id, background, asi, room_id):
+    row = c.execute("SELECT * FROM characters WHERE id=?", (int(char_id),)).fetchone()
+    ch = dict(row) if row else None
     if ch is None:
         return False, {"error": "unknown character"}
     led = ledger(ch)
@@ -396,8 +428,8 @@ def apply_origin(char_id, background, asi, room_id=0):
         ok, note = _replay_origin(led["origin"], room_id, stats, skills, feats_applied)
         if not ok:
             return False, {"error": note}
-    db.x("UPDATE characters SET stats=?, skills=?, build=? WHERE id=?",
-         (db.json_dumps(stats), db.json_dumps(skills), db.json_dumps(led), ch["id"]))
+    c.execute("UPDATE characters SET stats=?, skills=?, build=? WHERE id=?",
+              (db.json_dumps(stats), db.json_dumps(skills), db.json_dumps(led), ch["id"]))
     feat_row = _feat_rows(room_id).get(led["origin"]["feat"], {})
     return True, {"origin": led["origin"], "background": row["id"],
                   "background_name": row.get("name", row["id"]),
@@ -709,3 +741,144 @@ def _class_resources(rows, to, ch):
     merged.append({"id": rid, "name": rid.replace("_", " ").title()[:40],
                    "max": mx, "current": mx, "reset": reset or "long"})
     return gear.clean_resources(merged)
+
+
+# --------------------------------------------------------------------------
+# D109 — weapon masteries (2024): grants, picks, entitlements. The weapon
+# carries the PROPERTY (item content); the CHARACTER unlocks it here — the
+# ledger is the only proof. Masteries accrue strictly at level application
+# time (forward-only, exactly like the level chronology itself: a level that
+# was applied before a grant existed never produces one retroactively) or by
+# an explicit DM grant. Picks never touch stats/hp/slots — masteries are
+# combat options, validated again at attack time (room/attack).
+# --------------------------------------------------------------------------
+def _mastery_class_rows(class_id, room_id):
+    """Raw (unindexed) class rows of one class in this room's content."""
+    return [r for r in content.load("class", room_id)
+            if str(r.get("id") or "").lower() == str(class_id or "").lower()]
+
+
+def _mastery_pool(row):
+    """The class row's mastery pool: 'nick|vex' — unknown names are ignored,
+    empty means all eight (SRD default: the full list)."""
+    out = []
+    for p in str(row.get("mastery_options") or "").replace(",", "|").split("|"):
+        name = p.strip().lower()
+        if name in content.MASTERIES and name not in out:
+            out.append(name)
+    return out or list(content.MASTERIES)
+
+
+def _mastery_grants(led):
+    m = led.get("masteries")
+    grants = m.get("grants") if isinstance(m, dict) else None
+    return [g for g in (grants or []) if isinstance(g, dict)]
+
+
+def allowed_masteries(ch):
+    """The ids a character may actually use in combat (resolved grants only)."""
+    led = _as_dict(ch.get("build")) if isinstance(ch, dict) else {}
+    return sorted({str(g.get("id") or "").strip().lower()
+                   for g in _mastery_grants(led)
+                   if str(g.get("id") or "").strip().lower() in content.MASTERIES})
+
+
+def mastery_options(ch, room_id):
+    """Report for the build wizard: every grant with its source, the pending
+    picks and the pool they must come from, and the resolved entitlements."""
+    led = ledger(ch)
+    built = str(led.get("class_id") or "")
+    rows = {int(r.get("level") or 0): r for r in _mastery_class_rows(built, room_id)
+            if str(r.get("id") or "").lower() == built.lower()}
+    out = []
+    for g in _mastery_grants(led):
+        mid = str(g.get("id") or "").strip().lower() or None
+        pool = (_mastery_pool(rows[int(g["level"])])
+                if g.get("via") == "level" and int(g.get("level") or 0) in rows
+                else list(content.MASTERIES))
+        out.append({"via": str(g.get("via") or "?"), "level": g.get("level"),
+                    "actor": g.get("actor") or "", "id": mid, "pool": pool})
+    return {"class": built, "grants": out,
+            "pending": sum(1 for g in out if not g["id"]),
+            "allowed": sorted({g["id"] for g in out if g["id"]})}
+
+
+def apply_mastery(char_id, pick, room_id=0):
+    """Resolve ONE pending level-grant to the picked mastery. Exactly one per
+    pending grant; the pick must be in THAT grant level's pool; the pick is
+    final (changing it needs a fresh DM grant). Transactional like origin."""
+    with db.tx() as c:
+        return _apply_mastery_locked(c, char_id, pick, room_id)
+
+
+def _apply_mastery_locked(c, char_id, pick, room_id):
+    row = c.execute("SELECT * FROM characters WHERE id=?", (int(char_id),)).fetchone()
+    ch = dict(row) if row else None
+    if ch is None:
+        return False, {"error": "unknown character"}
+    led = ledger(ch)
+    pick = str(pick or "").strip().lower()
+    if pick not in content.MASTERIES:
+        return False, {"error": f"'{pick}' is not a weapon mastery"}
+    built = str(led.get("class_id") or "")
+    if not built:
+        return False, {"error": "no class build — nothing to choose from"}
+    rows = {int(r.get("level") or 0): r for r in _mastery_class_rows(built, room_id)}
+    grants = _mastery_grants(led)
+    for g in grants:
+        if g.get("id"):
+            continue
+        if pick not in _mastery_pool(rows.get(int(g.get("level") or 0), {})):
+            return False, {"error": f"'{pick}' is not in this level's mastery pool"}
+        g["id"] = pick
+        led["masteries"] = {"grants": grants}
+        c.execute("UPDATE characters SET build=? WHERE id=?",
+                  (db.json_dumps(led), ch["id"]))
+        return True, {"masteries": led["masteries"], "picked": pick}
+    return False, {"error": "no pending mastery choice"}
+
+
+def grant_mastery(char_id, mastery, actor, room_id=0):
+    """DM-granted mastery (the only path to a LATER or extra mastery — never a
+    retroactive auto-grant). Idempotent: an already-resolved mastery answers
+    'already' and adds nothing."""
+    with db.tx() as c:
+        return _grant_mastery_locked(c, char_id, mastery, actor, room_id)
+
+
+def _grant_mastery_locked(c, char_id, mastery, actor, room_id):
+    row = c.execute("SELECT * FROM characters WHERE id=?", (int(char_id),)).fetchone()
+    ch = dict(row) if row else None
+    if ch is None:
+        return False, {"error": "unknown character"}
+    led = ledger(ch)
+    mastery = str(mastery or "").strip().lower()
+    if mastery not in content.MASTERIES:
+        return False, {"error": f"'{mastery}' is not a weapon mastery"}
+    grants = _mastery_grants(led)
+    if any(str(g.get("id") or "").lower() == mastery for g in grants):
+        return True, {"already": True, "masteries": {"grants": grants}}
+    grants.append({"via": "dm", "actor": str(actor or "DM")[:24], "id": mastery})
+    led["masteries"] = {"grants": grants}
+    c.execute("UPDATE characters SET build=? WHERE id=?",
+              (db.json_dumps(led), ch["id"]))
+    return True, {"masteries": led["masteries"], "granted": mastery}
+
+
+def _mastery_gains(class_id, frm, to, room_id):
+    """Grant events for levels (frm, to] whose class row carries a gain>0.
+    One pending grant per gained mastery — snapshot semantics, so a later
+    content edit of the class row cannot mint or void past grants."""
+    rows = {int(r.get("level") or 0): r for r in _mastery_class_rows(class_id, room_id)}
+    gains = []
+    for lv in range(max(0, int(frm)) + 1, int(to) + 1):
+        row = rows.get(lv)
+        if not row:
+            continue
+        try:
+            n = int(row.get("mastery_gain") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        for _ in range(max(0, min(8, n))):
+            gains.append({"via": "level", "level": lv, "id": None})
+    return gains

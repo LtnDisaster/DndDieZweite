@@ -290,6 +290,13 @@ def init_db():
     # in DARK rooms (grid.dark); the DM branch never restricts.
     migrate("tokens", "light", "light INTEGER DEFAULT 0")
     migrate("tokens", "darkvision", "darkvision INTEGER DEFAULT 0")   # D89
+    # D114: vertical token geometry. height_ft = the creature's physical vertical
+    # extent (NULL = the size-category DEFAULT, a house-rule default NOT a
+    # ceiling — a Gargantuan dragon may be authored 30 ft+). elevation_ft = the
+    # token's UNDER-edge above its standing surface (0 = grounded; e.g. hovering).
+    # Both purely additive; every legacy token (NULL/0) behaves exactly as before.
+    migrate("tokens", "height_ft", "height_ft INTEGER")
+    migrate("tokens", "elevation_ft", "elevation_ft INTEGER DEFAULT 0")
     # D86: the room's floor list — JSON [{name}], '' = primary (legacy) floor.
     migrate("rooms", "floors", "floors TEXT DEFAULT '[]'")
     migrate("messages", "visibility", "visibility TEXT NOT NULL DEFAULT 'public'")

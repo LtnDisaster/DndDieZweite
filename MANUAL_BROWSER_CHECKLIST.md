@@ -711,3 +711,190 @@ ACCEPT or REJECT:
       a second gear request answers "already granted — nothing duplicated".
 - [ ] A room WITHOUT an imported rule pack: the origin card explains
       "not in this room's rule pack" — no silent success.
+
+## D109 — Weapon masteries (🎖 attack lines + mastery card)
+
+- [ ] Import the demo pack, hand a player the Surged Dagger (Nick) and any
+      Light off-hand dagger, and grant Nick:
+      `POST /api/build/{code}/{cid}/mastery/grant` (DM) — the 🎖 card lists it.
+- [ ] Start initiative, take the Attack action, then tick "Nick" on the
+      off-hand line and roll: the extra attack resolves WITHOUT spending the
+      bonus slot (initiative panel: Bonus still "available"); a second Nick
+      the same turn answers "once per turn" before any dice appear.
+- [ ] Tick "Cleave" with the Great Cleaver against two adjacent dummies: one
+      attack roll plus one separate "Cleave vs …" line; the cleave damage
+      line has no ability bonus; a third target attempt the same turn is
+      refused "already used this turn" — pre-roll.
+- [ ] Vex with the Longbow: after a hit the target token shows the 🎯 vexed
+      marker; your next attack against it rolls with advantage and the
+      marker is gone. Outside initiative the same request refuses with
+      "needs active initiative".
+- [ ] Push with a Push weapon: the dummy slides up to 10 ft on the board and
+      the chronicle/roll line narrates it; with a body directly behind the
+      target the answer is "cannot be pushed — the way is blocked" and the
+      dummy does not move.
+- [ ] Topple (Versatile Sword): failed CON save → PRONE on the token and it
+      costs movement as usual; a High Constitution dummy "resists".
+- [ ] Graze on a miss adds exactly the ability modifier to the damage line;
+      on a hit the line is unchanged. Sap: victim's next attack rolls at
+      disadvantage and the 🩸 marker disappears with it.
+- [ ] A character WITHOUT the entitlement ticking any mastery: refused
+      "This character has no such mastery" — no dice in the log at all.
+- [ ] Manual "damage only" roll with a mastery field: refused; plain attacks
+      without the checkbox behave exactly like before D109.
+
+## D110 — End-to-End integration chain (see docs/SATURDAY_ACCEPTANCE.md for the full script)
+
+- [ ] A refused attack does NOT spend the turn's action: with initiative
+      open, attack a hidden/far target (refused "No target token"/"out of
+      reach"), then attack a legal adjacent target in the SAME turn — the
+      second attack rolls normally (before the D110 fix it answered "No
+      action left this turn").
+- [ ] Curse whisper keeps disclosure: reveal a curse (owner sees name on
+      the sheet, gets the ☠️ whisper), then DM sends "whisper" — owner
+      receives the stored text AND the sheet entry keeps its revealed name
+      (before the D110 fix the whisper silently un-disclosed it).
+- [ ] The full A→F chain from the acceptance guide runs without blockers.
+
+## D111 — Effect grammar & condition catalogue (conditions.csv, effect cells)
+
+- [ ] Import the demo pack: the status legend gains the catalogue entries
+      (🔥 Smouldering, 😰 Shaken, 💧 Slicked come from `conditions.csv`,
+      not from code) — a brand-new homebrew condition now needs only a CSV
+      row.
+- [ ] Cast Thunder Lure on a dummy near another one: damage line appears, a
+      STR save line follows; on a FAILED save the dummy slides 2 cells on the
+      board (obstacle-truncated), on a success it does not move. Re-clicking
+      the cast (same op) never pays the slot twice and never re-fires.
+- [ ] Use the Oil Vial (inventory "use"): the target token shows 💧 Slicked,
+      its effective speed drops by 10 ft, and the condition expires on its
+      own clock after 3 rounds.
+- [ ] Hit a dummy with Blade Quake (on_hit): the DUMMY shows 😰 Shaken until
+      end of turn; equip the Ring of Embers and take damage (on_damaged): a
+      temp-HP line appears; unequip/re-equip fires once per fresh op, a
+      replayed op whispers "already applied" and changes nothing.
+- [ ] The Martyr feat appears as a castable card (`feat_martyr`): casting it
+      grants temp HP once; double-cast (replay) never doubles it.
+- [ ] DM adds GRAPPLED: every move request now answers with the grappled
+      refusal outright (SRD "speed 0" — behaviour note D111); with grappled
+      removed but slicked still up, walking costs the slower speed.
+- [ ] A token that dies/gets deleted while SMOULDERING: the round tick ends
+      quietly — no traceback, room stays responsive (the D111 recursion fix).
+- [ ] Upload a test pack whose `effects` cell contains an unknown op (e.g.
+       "meteor"): the import report REFUSES the row by name; nothing half
+       loaded.
+
+## D112 — Contested primitive, 2024 special melee & pickpocket (🤼 Special & Stealth)
+
+Prep: one PC on its own token, an adjacent NPC (or a second PC) as the target.
+Both on the same plane, the target in reach (touching footprints) and visible.
+
+- [ ] Open the sheet of the acting token → the **🤼 Special & Stealth** card is
+      present (owner or DM). Pick a target in its dropdown. Everything below is
+      resolved SERVER-side; the sheet only names actor + target + a fresh op id.
+- [ ] **Grapple:** click Grapple. An attacker check line appears (private/self)
+      and a target STR/DEX **save** line (DM-visible) follows. On
+      a failed save the target token gains the **grappled** marker; the grapple
+      stores the DC on it. Re-clicking the SAME action (replay) neither spends a
+      second turn slot nor re-rolls.
+- [ ] **Grapple gates:** a target more than one size larger refuses with a size
+      message; a target you cannot touch (out of reach) refuses with "out of
+      reach"; an invisible / far-plane target refuses — and in every refusal
+      case NOTHING was spent (no roll, no slot).
+- [ ] **Action economy (in initiative):** with initiative running and your
+      action already used, Grapple/Shove/Pickpocket refuse ("spend the action");
+      outside initiative they are free. This matches the engine's action model.
+- [ ] **Escape:** with the target grappled, its sheet now shows an **Escape**
+      button (no target needed). Clicking it rolls Athletics OR Acrobatics vs
+      the stored DC and clears grappled on success. If you first REMOVE the
+      grappler token, Escape then auto-succeeds.
+- [ ] **Grapple ends on distance:** while grappled, force-move the grappled
+      token out of reach (DM push) OR walk the grappler away OR DM-teleport —
+      the grappled marker clears automatically (the `end_grapples_out_of_reach`
+      hook), on all three movement kinds.
+- [ ] **Shove:** Shove→Prone puts the target prone via the normal prone path;
+      Shove→Push moves it 5 ft through the forced-move path (obstacles truncate
+      it), and a push that leaves reach also drops the grapple.
+- [ ] **Pickpocket (Model A, DM-mediated):** click Pick on a victim. The THIEF
+      only ever sees a "made covertly" whisper — never the result. The DM sees
+      the hidden Sleight-of-Hand line plus the notice result (a fixed `notice_dc`
+      you can set, else a real Perception check; 2024 has no passive perception).
+      Discovery is reported to the DM SEPARATELY from whether the theft succeeds.
+- [ ] **DM authorises stealable items (Model B subset):** as DM, open an NPC
+      chest (or a character sheet) and toggle **🤝 steal** on one item. The
+      button flips to "🤝 steal ✓". (Char path refreshes the sheet; NPC path
+      re-inspects the chest.)
+- [ ] **Pickpocket (Model B, auto-take):** the thief takes the DM-authorised
+      `pick` item: on a clean success the item moves ATOMICALLY to the thief and
+      any curse on it is preserved + its `revealed` state reset. An item that is
+      NOT `pick`-flagged (or an unknown id) answers EXACTLY like a failed check —
+      the endpoint never reveals whether an item exists (no inventory oracle).
+- [ ] **Replay / concurrency:** re-sending the same pickpocket op id is a silent
+      no-op (nothing moved twice); two thieves racing are guarded by the same
+      claim, and a fresh `VTT_DATA_DIR` behaves identically.
+- [ ] Cross-room / cross-plane: a target in another room or on another plane is
+      refused with no leak, exactly like the other reach/visibility gates.
+
+---
+
+## D113 (Sprint 42) — Konzentration, automatische Flüche, `opposed`-Op
+
+**Konzentration (DM + Spieler):**
+- [ ] Ein Wirker castet einen Concentration-Zauber → das `concentrating`-Flag
+      erscheint; an verlinkten Conditions (z. B. `paralyzed`, `invisible`) steht
+      das `conc`-Token.
+- [ ] Ein Treffer auf den Wirker löst einen CON-Save mit `DC = max(10, halber
+      tatsächlicher Schaden)` aus (Temp-HP zählen NICHT in den DC). Cap: keiner.
+      Bestehen = Konzentration bleibt; Misslingen = Konzentration UND alle
+      `conc`-verlinkten Conditions enden raumweit.
+- [ ] Wirker fällt auf 0 HP ODER bekommt einen Inkapazitätszustand → Konzentration
+      bricht SOFORT, ohne Wurf.
+- [ ] Eine neue Concentration-Zauberei beendet die alte zuerst (alte Effekte weg).
+
+**Automatische Flüche (nur DM-Autoren, UI Englisch):**
+- [ ] Als DM auf einem Item `☠ edit` → Fluch anlegen; dann `⚙ arm` → Trigger
+      (`equip`/`use`/`on_transfer`/…) + Wirk-Cell (Grammatik-JSON) setzen. Ein
+      ungültiger Cell wird abgelehnt (Fehler-Whisper), nichts wird aktiv.
+- [ ] Der Schalter `💤 dormant` ↔ `🔮 active` schaltet die Aktivierung. Sie ist
+      UNABHÄNGIG von Enthüllung: `☠ reveal`/`conceal`/`whisper` lassen `active`
+      unverändert, und `activate`/`deactivate` ändern die Enthüllung nie.
+- [ ] Solange `dormant`, passiert beim Auslösen nichts. Erst `active` + passender
+      Trigger feuert.
+- [ ] Ein `on_transfer`-Fluch feuert exakt einmal pro echtem Besitzerwechsel
+      (Transfer/Loot/Taschendiebstahl), auch bei Doppelsendung derselben op-id.
+- [ ] **Kein Leak:** Ein verborgener Fluch verrät sich dem Besitzer weder in der
+      Inventaransicht (nur `revealed` Name/Beschreibung, nie `active`/`trigger`/
+      `effects`) noch im Chat — curse-origin-Texte sehen NUR der DM.
+- [ ] **Rückwärtskompatibilität:** Ein Fluch ohne `trigger`/`effects`/`active`
+      (alter Stand) round-tript unverändert und bleibt inaktiv.
+
+**Datengetriebene Fallen (DM-Autoren + Spieler-🔍/🔧):**
+- [ ] **Fallen-Autoren-Felder:** DM wählt den Fallen-Pinsel; neben Label/Save-DC/
+      Schaden gibt es jetzt `find DC`, `disarm DC`, `repeat` und ein JSON-Feld
+      `effects`. Ein leeres `effects`-Feld ⇒ die Falle nutzt weiterhin
+      Save-DC + Schaden (Alt-Verhalten, unverändert).
+- [ ] **Sprichwort-Falle (effects-Zelle):** DM setzt z. B. `{"v":2,"ops":[
+      {"op":"save","ability":"dex","dc":15,"success":[],"failure":[
+      {"op":"condition","key":"prone","target":"target"}]}]}`. Eine Kreatur, die
+      auf das Feld tritt, würfelt den DEX-Save über den EINEN Würfelkanal; bei
+      Misserfolg bekommt sie `prone`. Kein `random.randint`.
+- [ ] **Entdecken:** Spieler steht neben/ auf dem Feld und nutzt 🔍 Search. Bei
+      Erfolg erscheint die Falle für alle (Karte aktualisiert); bei Misserfolg
+      ODER wenn gar keine Falle da ist, kommt derselbe neutrale Text ("find
+      nothing") — die Suche ist keine Falle-Oracle. Eine Falle ohne `find DC` ist
+      nicht auffindbar.
+- [ ] **Entschärfen:** Auf einer ENTDECKTEN Falle mit `disarm DC` nutzt der
+      Spieler 🔧 Disarm (DEX-Wurf). Erfolg ⇒ `disarmed` + federt nicht mehr.
+      Auf einer noch versteckten Falle gibt es nur "nothing here to disarm".
+- [ ] **DM-Trigger:** DM kann eine Falle per `trigger` auf einer Ziel-Kreatur
+      zwingend auslösen.
+- [ ] **repeat:** `repeat`-Falle bleibt nach dem Auslösen scharf (für die nächste
+      Kreatur); eine normale Falle federt einmal.
+
+**Vertikale 10-ft-Skala (D113 Phase 7, Buchführung):**
+- [ ] Höhen-Bürsten (⛰️+/⛰️−) ändern weiter EINE EINHET pro Klick; die Engine
+      interpretiert 1 Einheit = exakt 10 ft und 1 Stockwerk-Ebene = 10 ft. Kein
+      Sturzschaden/kein Höhenkampf (bewusst aus).
+- [ ] Ein Token auf Ebene „Upper" (2. deklarierte Ebene) mit Boden-Höhe +3 liegt
+      geometrisch bei 2·10 + 3·10 = 50 ft (nur Anzeige/Buchführung; Ebenen
+      bleiben unabhängig, keine Kollision über die Höhe).
