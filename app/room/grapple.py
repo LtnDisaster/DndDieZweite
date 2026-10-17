@@ -128,6 +128,10 @@ async def _take_action(ws, room_id, user, is_dm, tok, slot="action"):
             if turn.get("token_id") != tok["id"]:
                 await send_to(ws, "error", {"msg": "It is not your turn"})
                 return False
+            if CND.hook_bool(CND.load(tok), room_id, "no_actions"):
+                # D134: Attack/Escape cost an action; incapacitated forbids it.
+                await send_to(ws, "error", {"msg": "You can't take actions right now"})
+                return False
             if turn.get(slot) == "used":
                 await send_to(ws, "error", {"msg": f"No {slot} left this turn"})
                 return False
@@ -257,7 +261,9 @@ async def handle_escape(ws, room_id, user, is_dm, msg):
         grappler = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
                          (entry["src"], room_id))
     # 2024: the grapple also ends if the grappler is incapacitated or gone.
-    free = grappler is None or CND.hook_bool(CND.load(grappler), room_id, "blocks_movement")
+    # D134: the SRD release condition is the GRAPPLER being incapacitated —
+    # the faithful proxy is no_actions (parent + family), not a movement block.
+    free = grappler is None or CND.hook_bool(CND.load(grappler), room_id, "no_actions")
     skill = "acrobatics" if str(msg.get("use", "")).lower() == "acrobatics" else "athletics"
     res = {"kept": 20, "mod": 0, "total": 99} if free else \
         opposed.check_roll(p, skill, kind="skill", adv=msg.get("adv"))

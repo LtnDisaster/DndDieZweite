@@ -3106,3 +3106,497 @@ lines name conditions by design (public table record, D90).
   trifft, CSV-Projektion und `clean_npc`-Rundreise behalten `reach`,
   Editor-Pin). `docs/CSV_ONLY_READINESS.md` wurde von „advisory“ auf das
   durchgesetzte Gate korrigiert.
+
+## D129 — Exhaustion wird ein echter, kumulativer Modifikator aus derselben SSOT (2026-10-17, AP-015)
+
+- **Status:** umgesetzt.
+- **Kontext:** Der Exhaustion-Zaehler (0-6) existierte seit D35 als DM-Feld
+  und Bogen-Anzeige, aber ohne jede mechanische Wirkung. RULES_AUDIT
+  F3/F4/K8 dokumentierte die Abweichung von SRD 5.2.1: -2 auf
+  Angriffs-/Schadens-/Probe-/Rettungswuerfe, -5 ft Tempo je Stufe, Tod bei
+  Stufe 6, Long Rest -1.
+- **Entscheidung:** Zwei Helfer in `gear.py` sind die einzige
+  Ableitungsquelle: `exhaustion_roll_mod()` (-2 x Stufe) und
+  `exhaustion_speed_penalty_ft()` (-5 x Stufe). Bestehende Konsumenten
+  werden angebunden: `movement._speeds` (nur PC-Tokens, nur walk -
+  fly/swim/climb bleiben bewusst unberuehrt, weil die
+  Footprint-Engine nur walk ableitet), die
+  Waffen-Angriffs-/Schadenszeilen, Check/Save/Skill und die
+  Spruch-Angriffs-/Spruch-Schadens-Texte in `dice.py`,
+  `opposed.check_roll/save_roll/bonus_roll/melee_attack_number` und
+  `combat.token_dex_mod` (Initiative). Der Tod bei Stufe 6 entschieden
+  durch `status.py` ueber den bestehenden Death-State
+  (`death.new()/apply_thresholds`, hp=0) - keine zweite
+  Tod-Mechanik, kein erfundener Death Save. Long Rest senkt eine Stufe im
+  bestehenden `handle_long_rest`-UPDATE
+  (`exhaustion=MAX(0, COALESCE(exhaustion,0)-1)`).
+- **Grund:** Eine Regelzahl, die nur als Datenfeld im Bogen lebt, ist eine
+  Bogen-Luege. Statt einer zweiten "Exhaustion-Engine" wird an den Stellen
+  erweitert, die laengst das Sheet fragen.
+- **Konsequenzen:** Kanon: **994 passed, 0 skipped** (9 neue Tests in
+  `tests/test_d129_exhaustion.py`: Temp ableitung inkl. NPC-No-op,
+  Angriffs-/Schadenszeile mit "-N exhaustion"-Suffix und abgeleiteten
+  Erwartungswerten statt Magischer Zahlen, Check/Save/Skill,
+  Opposed-Paritaet per Delta-Vergleich, Initiativ-Modifikator, Tod bei 6,
+  Long-Rest-Kaskade 3-2-1-0, Clampung). Das 16-h-Gate des Long Rest
+  bleibt bewusst offene, dokumentierte Hausregel-Grenze (F3 bleibt
+  teilweise offen).
+
+## D130 - Save Ends: Bedingungen mit sa+dc wuerfen am Ende des eigenen Zuges durch die bestehende Rettungs-Ableitung (2026-10-17, AP-016)
+
+- **Status:** umgesetzt.
+- **Kontext:** SRD 5.2.1 laesst viele Effekte enden, wenn das betroffene
+  Wesen am Ende seines eigenen Zug eine Rettungswiederholung besteht
+  ("Save Ends"). D117 hatte die Dauer-mit-Rettungs-Ende-Wirkung bewusst
+  offen gelassen (FEATURE_COMPLETE_GAPS Zeile "Effektgrammatik: Dauer mit
+  Rettungs-Ende"). Der Escape-DC (D112) und die Opposed-Rettungs-Ableitung
+  (`opposed.save_roll`/`beats_dc`) existierten bereits als Konsumenten-Pfade;
+  ein Escape ist jedoch eine ACTION und kein End-of-Turn-Ereignis - die
+  Luecke war das Wiederholungs-Ereignis selbst.
+- **Entscheidung:** Condition-Instanzen bekommen ein additives Feld `sa`
+  (Rettungs-At ability, SSOT-Whitelist `gear.ABILITIES`, geputzt in
+  `conditions._clean_sa`). `combat._save_ends(room_id, token_id)` feuert am
+  Ende des Zuges des betroffenen Tokens - an beiden bestehenden
+  Turn-Uebergabepunkten (`_end_turn_common` und `handle_init_next`), VOR
+  `advance_turn`, damit die Uhrzeit "Ende seines Zuges" bleibt. Wuerfel,
+  Modifikator und Sichtbarkeit sind dieselbe Ableitung wie bei
+  Spielerrettungen (`opposed.participant` loest PC wie NPC ueber
+  `npc.to_char`); die Ankundigung folgt der Concentration-Konvention
+  (PC oeffentlich, NPC DM-only via `_announce_roll`). Erfolg entfernt genau
+  den einen Eintrag - Geschwister-Eintraege mit gleichem Key (D109
+  src/ref-Coexistenz) bleiben. Eintrag OHNE `sa` - jeder Prae-D130-Eintrag
+  und jede Grapple-Instanz - wuerfelt nicht. `cond_add` transportiert jetzt
+  auch `dc` (DM-Autoren Weg zum DC, D112-Muster).
+- **Grund:** Ein zweiter Rettungswuerfel-Weg oder eine zweite Uhr haette
+  genau die D80-Ein-Uhr-Invariante gebrochen. Die Regelzahl "Save Ends"
+  bekommt einen Konsumenten auf der bestehenden Uhr und der bestehenden
+  Rettungs-Mathematik - nicht mehr.
+- **Konsequenzen:** Kanon: **1000 passed, 0 skipped** (6 neue Tests in
+  `tests/test_d130_saveends.py`: sa-Feld-Rundreise/Validierung inkl.
+  Prae-D130-Bytekompatibilitaet, Erfolg entfernt (dc 1 dex - kann nie
+  fehlschlagen), Misserfolg erhaelt Instanz mit dc+sa (dc 30 wis - kann nie
+  gelingen), fremde Zuende loesen NICHT deine Rettung aus, dc-only-Eintraege
+  bleiben unangetastet, NPC-Pfad ueber denselben Participant).
+  Effekt-Operateure (effectops) koennen `sa`/`dc` spaeter als Daten
+  durchreichen; der Mechanik-Konsument ist jetzt fertig.
+
+## D131 - Casting Time verbraucht den Turn-Slot, den es benennt (2026-10-17, AP-017)
+
+- **Status:** umgesetzt.
+- **Kontext:** `spells.csv` fuehrt `casting_time` als Spalte (content-Schema),
+  aber kein Konsument las sie - jedes Wirken war action-oekonomisch
+  gleichgueltig, und `handle_cast` konsumierte ueberhaupt keinen
+  Turn-Slot. Die Turn-Slot-Oekonomie (action/bonus/reaction, D74) und ihr
+  Verbraucher-Muster existierten bereits im Angriffspfad (`_item_attack`:
+  Token-Pflicht im Kampf, turn-Pruefung, `spend_slot`), die
+  Replay-Guard-Mechanik (D93/D94: `inv_ops`) ebenso.
+- **Entscheidung:** `gear.casting_slot()` mappt den Freitext auf den
+  benannten Slot ("bonus"/"reaction" schlagen "action";
+  minute/hour/ritual = ausserhalb des Turn-Tempos -> None = kein Slot).
+  `handle_cast` validiert zunaechst (Spell-Lookup -> nicht-destruktiver
+  Replay-Probe `inventory.claimed` -> Token-Pflicht im Kampf -> turn ->
+  Slot verfuegbar) und verbraucht via `spend_slot` erst nach erfolgreichem
+  Spell-Slot-Claim (D110: abgelehnte Zauber verausgaben nichts).
+  `clean_spells` und die Katalog-Projektion (`charbuild`) tragen
+  `casting_time` jetzt durch - die CSV-Spalte hat damit ihren Konsumenten.
+  Der NPC-Wurfpfad (`_npc_cast`) verändert sich nicht (NPC-Blocks fuehren
+  kein casting_time; das waere ein Daten-Feature, keine Mechanik-Luecke).
+- **Grund:** Action-Oekonomie ist eine einzelne Uhr mit drei Zeigern. Eine
+  Spruchfeld-Angabe ohne Konsument ist eine Bogen-Luege; ein zweiter
+  Slot-Zaehler haette genau die D74-Invariante gebrochen.
+- **Konsequenzen:** Kanon: **1007 passed, 0 skipped** (7 neue Tests in
+  `tests/test_d131_casting_time.py`: Text-Mapping inkl. SRD-Default '' =
+  action, action-Verbrauch + Zweitsperre, bonus verbraucht nicht die action,
+  minute-Sprueche lassen beide Slots heil (Spell-Slot trotzdem belegt),
+  Token-Pflicht verausgabet vorher nichts, Replay bleibt still trotz
+  verbrauchsaction, Spell-not-found antwortet vor dem Token-Gate).
+  Die uebrigen bestehenden Cast-Tests wirken out of combat - die
+  Kanontreue des Gates bleibt ohne kuenstliche Testspruenge belegt.
+
+## D132 - value_gp und cr bekommen Konsumenten auf den bestehenden Datenlinien (2026-10-17, AP-018)
+
+- **Status:** umgesetzt.
+- **Kontext:** `items.csv` fuehrt `value_gp` seit je als Spalte, doch die
+  Projektionskette CSV -> `item_defs` -> Inventar-Eintrag liess das Feld
+  fallen; `creatures.csv`-`cr` wurde nie in den NPC-Block projektiert
+  (CSV_ONLY_READINESS listete "CR->Challenge-Projektion" als offen). Beide
+  Felder waren Bogen-Daten ohne Konsumenten.
+- **Entscheidung:** Keine neue Oekonomie, keine XP-Mechanik (2024 arbeitet
+  Meilensteine). Die bestehenden Linien tragen die Felder: additive
+  Migration `item_defs.value` (REAL DEFAULT 0); `inventory.clean_def`
+  normalisiert 0..999999 (2 Dezimalstellen); `content._project_item`
+  uebergibt `value_gp`; `entry_from_def`/`gear.clean_items` fuihren `value`
+  bis auf den Charakter-Eintrag (Prae-D132-Entries = 0, byte-stabil).
+  `npc._clean_cr` laesst nur das SRD-Band zu (0, 1/8, 1/4, 1/2, 3/4, 1..30;
+  Rest = '' = unbekannt, nie ein gefaelschter Wert); `project_creature` und
+  der `add_token`-Whitelist-Pfad transportieren `cr` in den Block, der ins
+  Monster-Sheet-Payload wandert (D124-Praezedenzfall: read-only-Sichtbarkeit
+  ist ein akzeptierter Konsument).
+- **Grund:** Der Zustand "Spalte ohne Konsument" ist eine Datenlinie, die
+  Luegen erzaehlt. Ein Konsument auf der bestehenden Projektion ist redlich;
+  eine erfundene Shop- oder XP-Mechanik waer eine zweite Engine.
+- **Konsequenzen:** Kanon: **1013 passed, 0 skipped** (6 neue Tests in
+  `tests/test_d132_value_cr.py`: CR-Band inkl. Ausreisser-Verwerfung,
+  Projektion ueber die eine Blockform, value-Clamps + Eintrag-Rundreise,
+  `_project_item` mit frischem id (item_defs.id ist GLOBAL, D100),
+  DM-def -> Grant -> Character-Item, NPC-Token traegt cr). Der
+  Projektions-Warnkanal (stored-but-not-projected) hat den Placeholder-Fehler
+  des Patches selbst gefangen - fail-loud wirkt.
+
+## D133 - Loot-Objekte mit container-Flag sind echte D92-Container (2026-10-17, AP-019)
+
+- **Status:** umgesetzt.
+- **Kontext:** Der Karten-Editor konnte seit je Loot-Glyphen ablegen; der
+  Weglaufweg schrieb beim Betreten nur "[loot] Label" in die Notizen des
+  Charakters und markierte taken_by - Inhalt als Daten gab es nicht.
+  FEATURE_COMPLETE_GAPS fuehrte das als Luecke mit dem Hinweis, das
+  Container-System (D92) und der loot-Kanal (D105, Schluessel tok:<id>)
+  seien eins zu eins uebertragbar.
+- **Entscheidung:** Loot-Eintraege bekommen das Flag `container`.
+  `mapmodel._entity` laesst `container`/`hinted`/`dm_only` durch die
+  Sanitisierung (die Beute-Liste war ein Whitelist-Schluessel ohne diese
+  Felder); `handle_map_edit` bewahrt `hinted` als Runtime-Markierung wie
+  `taken_by`. `handle_inv_container` loest zusaetzlich den Schluessel
+  `loot:<eintrag-id>` auf (Praezedenz: D105 `tok:<token_id>`) und nutzt
+  denselben Anker (Zelle, dm_only, Reichweite, Ebene) wie Welttruhen.
+  `take_loot` verweigert bei gesetztem Flag das Notiz-Picken endgueltig und
+  fluestert einmalig den Oeffnen-Hinweis. Client: Editor-Checkbox
+  "Container", Klick auf die Geaefen-Offnung per `openLootObject` auf dem
+  existierenden `inv_container`-Kanal, Inhalt laeuft ausschliesslich ueber
+  die autorisierten Antworten - nie ueber map JSON oder /state (D92-Invariante).
+- **Grund:** Loot auf der Karte ohne Inhalt ist eine Dekoration, die
+  Beute vorgaukelt. Die Uebertragung auf die bestehende
+  Container-Tabelle (Raum, Schluessel) - nicht eine zweite Truhen-Mechanik
+  - haelt die D92-Regeln (Replay, Serialisierung, Fog-Gates) fuer Loot
+  gratis mit.
+- **Konsequenzen:** Kanon: **1018 passed, 0 skipped** (5 neue Tests in
+  `tests/test_d133_loot_container.py`: kein Notiz-Pickup trotz Ueberlaufen,
+  Muenz-Rundfuellen/Entnehmen ueber den loot:-Schluessel mit Wallet-Wahrheit,
+  Reichweiten-Antwort von ferne, Legacy-Notiz ohne Flag unveraendert,
+  unbekannter/nicht markierter Schluessel bleibt still).
+  Editor-Eintraege ohne Flag verhalten sich byte-identisch wie vorher.
+
+## D134 - Das eine 2024-Incapacitated regelt Aktionen, nicht Bewegung (2026-10-17, AP-020)
+
+- **Status:** umgesetzt.
+- **Kontext:** F5 hatte die Condition-Liste 2024-konform gemacht (key da),
+  die Wirkung war aber falsch geerbt: `incapacitated` trug
+  `blocks_movement + auto_fail_saves` - beides sagt SRD 5.2.1 der EINFACHEN
+  Incapacitated gerade NICHT zu (Bewegung bleibt frei, Retten normal); die
+  Auto-Fails gehoeren zu paralyzed/petrified/stunned/unconscious. Ausserdem
+  gab es kein Wort in der Hook-Grammatik fuer "keine Aktionen/reactions",
+  und die Grapple-Loesung pruefte einen Bewegungs-Block statt des vom SRD
+  genannten Incapacitated-Zustands des Greifenden.
+- **Entscheidung:** Neuer Hook `no_actions` in HOOKS-Grammatik und
+  BUILTIN_HOOKS: parent = {no_actions} pur; die vier Familienmitglieder
+  behalten ihre Bloecke und bekommen no_actions. Konsumenten - alle vor
+  jeder Konsumtion validiert: Angriffspfad (`_item_attack`), Wirk-Gate
+  (D131), der Attack/Escape-Choke `_take_action` (grapple-Flucht und
+  Grapple-Offensive laufen ueber ihn), Dash (`handle_dash`). Reaktionen sind
+  im Engine-v1-Scope nicht modelliert - dokumentierte Grenze (EFFECT_GRAMMAR
+  S6), no_actions benennt sie, der Angriffspfad kann nichts verbieten, was
+  der Wuerfel nie verbraucht. Grapple-Loesung auf `no_actions` umgestellt:
+  der SRD-Satz "the grappler is incapacitated" trifft jetzt genau die
+  Condition, nicht eine Naherungs-Flag.
+- **Grund:** Eine Zustandstabelle, die einem Eltern-Zustand Kind-Effects
+  anhaengt, erzeugt stille Regel-Falschaendungen an jedem Konsumenten. Ein
+  Wort pro Satz der Regelquelle haelt die Zuordnung pruefbar.
+- **Konsequenzen:** Kanon: **1022 passed, 0 skipped** (4 neue Tests in
+  `tests/test_d134_incapacitated.py`: Hook-Tabelle als executable Norm,
+  Angriff+Dash blockiert, Bewegung frei, nach cond_remove wieder frei,
+  Wirken blockiert OHNE Slot-Verbrauch, Flucht braucht eine Aktion).
+  Bestehende Familien-Erwartungen (D110/D113) unveraendert gruen.
+
+## D135 - Heroic Inspiration ist ein verbrauchbares Marker (2026-10-17, AP-021)
+
+- **Status:** umgesetzt.
+- **Kontext:** F6: Inspiration war ein An/Aus-Schalter ohne jeden Konsumenten.
+  SRD 5.2.1: man hat HÖCHSTENS EINE Held-Inspiration; sie wird beim Wurf
+  (Angriffs-, Attributs-, Rettungswurf) VERBRAUCHT; wer bei voller Zahl
+  weitere bekäme, gibt sie weiter oder verliert sie kampflos.
+- **Entscheidung:** `adv:"insp"` auf den Charakter-d20-Pfaden (Angriff,
+  Check, Save, Skill) — `_spend_insp` verbraucht das Marker VOR dem Wurf und
+  faltet in die vorhandene Advantage-Ableitung (SRD "wähle einen Würfel" =
+  keep-higher als dokumentierte Vereinfachung, Klasse wie der frightened-
+  Pauschalhook). Blind-Ausdrücke und NPC-Würfe tragen das Marker nicht
+  (frühe Ablehnung, kein Marker-Diebstahl). Die `gain`-Aktion: Pool bei
+  voll -> `pass_to_char` (Charakter mit Token in DIESEM Raum) schiebt das
+  Marker; ohne Weitergabe: nichts gewonnen, nichts verloren.
+- **Grund:** Ein Statusfeld ohne Konsumenten ist ein UI-Ornament. Der
+  Verbrauch wird zum Engine-Ereignis, weil nur dort die Regel (max 1,
+  Verbrauch beim Wurf, Weitergabe bei voll) erzwingbar ist.
+- **Konsequenzen:** Kanon: **1029 passed, 0 skipped** (7 Tests: Verbrauch am
+  Check inkl. sys-Beleg, Verbrauch am Angriff ohne Flag-Fehler, Blind/NPC-
+  Ablehnung, Voll-Verlust ohne Weitergabe, Weitergabe, Fremd-Raum-Ablehnung).
+  Marker bleibt Boolean (Pool >1 = Klassengrenze, dokumentiert).
+
+## D136 - Help-to-Stabilize ist ein Check, kein Automatismus (2026-10-17, AP-022)
+
+- **Status:** umgesetzt.
+- **Kontext:** F8: Sterbende zu stabilisieren war engine-seitig gar nicht
+  modelliert; 2024 verlangt dafür die Help-Aktion mit einem DC-10-
+  Wisdom-(Medicine)-Check (2014 schaffte das automatisch). Tod-Rettet sind
+  schon D101-Spezialität (death.py) — nur der Helfer-Pfad fehlte.
+- **Entscheidung:** Neue WS-Nachricht `stabilize` (token_id = Helfer,
+  target_token_id = Patient): Patient muss sterbend (nicht stable/tot) sein;
+  Selbst-Stabilize abgelehnt; Adjazenz über das vorhandene
+  `grapple._adjacent` (5 ft, Footprint/Ebenen-korrekt); im Kampf dreht der
+  Helfer die Initiative-Liste -> eigener Turn + Action verbrauchen
+  (`set_init` persistiert, D8-Muster), D134 no_actions-Gate; Würfel durch die
+  vorhandene Skills-Ableitung (`skill_bonus medicine`, wis); natural 20
+  heilt auf 1 HP (death-Block weg, wie nat-20 der Tod-Rette), total ≥ 10
+  setzt stable, Fehler bewegen KEINEN Tod-Rette-Zähler. Außerhalb des
+  Kampfes: erlaubt, ohne Action-Verbrauch (dokumentierte v1-Grenze).
+- **Grund:** Der Sterbepfad war der einzige Kampf-Kernmechanismus ohne
+  Helfer-Interaktion. Alles Neue läuft über bestehende kanonische
+  Ableitungen (Adjazenz, Skills, Action-Ökonomie, Condition-Hooks).
+- **Konsequenzen:** Kanon: **1033 passed, 0 skipped** (4 Tests: Würfel-Text
+  ⇔ stable-Zustand über zufälligen Wurf robust, Selbst-/Patient-Guards,
+  Distanz/Turn/Action-Verbrauch, stunned blockiert). get_init ist ein
+  FRISCHER DB-Read — Mutationen brauchen set_init (Fallstrick geheftet).
+
+## D137 - Deckung reitet jeden Angriffs­wurf, auch den der Zauber (2026-10-17, AP-023)
+
+- **Status:** umgesetzt.
+- **Kontext:** A5 prüfte die Cover-Werte (half +2, 3/4 +5, total = nicht
+  anvisierbar) — die waren inkl. 3/4-Auswahl in Backend und Client längst
+  da; die Lücke war eine andere: die Deckung fehlte auf den ZAUBER-
+  Angriffs­würfen (PC-Manual-Roll, PC-Cast, NPC-Roll, NPC-Cast), während
+  Waffenwürfe sie trugen. SRD-seitig ist Deckung eine Eigenschaft des
+  Ziels, nicht des Angriffs­werkzeugs.
+- **Entscheidung:** `_spell_cover(msg)` + `_total_cover_note` als gemeinsamer
+  Pfad; `_spell_attack_text` bekommt den cover-Parameter (Text `vs 3/4
+  cover`, `-5 cover`, totaler Abzug auf die Summe). Total Cover LEHNT das
+  Ziel ab, BEVOR in handle_cast/_npc_cast ein Slot, Marker oder eine Action
+  angefasst wird (order same as D131: validate first, spend after).
+- **Grund:** Ein Regelwert, der nur auf einer von zwei Angriffs­pfaden
+  wirkt, ist eine stille Hausregel. Eine gemeinsame Deckungs­funktion pro
+  Würfel­gattung hält die Pfade deckungsgleich.
+- **Konsequenzen:** Kanon: **1037 passed, 0 skipped** (4 Tests: 3/4 und half
+  auf Spell-Attack-Rolls, Total-Verweigerung OHNE Slot-Verbrauch, Cast mit
+  3/4, Plain-Text unverändert). Audit A5 damit vollständig abgearbeitet.
+
+## D138 - Vorbereitung ist Daten, kein Klassencode (2026-10-17, AP-024/025)
+
+- **Status:** umgesetzt (+ Audit-Verifikation F2/E2).
+- **Kontext:** C3 wollte den Prepare-Ablauf "je Klasse". Klassennamen im
+  Engine-Kern wären der zweite Motor im Haus. Beim Prüfen der R-P2-Liste
+  erwiesen sich zwei Posten als bereits erledigt: F2 (HD-Pool = Level,
+  `hit_dice_max` 1-20, KEIN Halb-Level-Cap — SRD 5.2.1 ohne Obergrenze ✓)
+  und E2 (2024 kennt keinen Nebenhand-Bonusangriff; die Light-Regel lebt als
+  Nick-Mastery, D109, vollständig gating-getestet ✓).
+- **Entscheidung:** Prepare-Gate datengetrieben wie casting_time (D131):
+  `clean_spells` trägt `prep`/`prepared`; enthält die Liste EINEN Eintrag
+  mit prep=true, ist die Liste gated; Zauber ab Grad 1 brauchen prepared,
+  Kantrips sind ausgenommen; die Ablehnung geschieht vor jedem Slot-/
+  Action-/Marker-Verbrauch. CSV projiziert beide Felder (charbuild).
+  Long-Rest und Prepare-Wechsel bleiben Spieler-/DM-Flow über den
+  bestehenden Spell-Listen-Kanal — die Engine erzwingt nur die Konsequenz.
+- **Grund:** "Regel je Klasse" ist Inhalt; "wer vorbereitet sein muss, kann
+  Unvorbereitetes nicht wirken" ist Mechanik. Nur die Mechanik gehört in die
+  Engine — dieselbe Trennung, die schon D131 trug.
+- **Konsequenzen:** Kanon: **1040 passed, 0 skipped** (3 Tests: Gated-Liste
+  verweigert ohne Verbrauch, Prepared wirkt, Kantrip-Ausnahme + ungated
+  frei). Audit: C3 ✓, F2 ✓ verifiziert, E2 ✓ (Nick), R-P1/R-P2-Listen
+  bereinigt.
+
+## D139 - Species-Origin-Feat erreicht die Auswahl-Logik (2026-10-17, AP-026)
+
+- **Status:** umgesetzt (+ B6-Verifikation).
+- **Kontext:** B5 forderte den Origin-Feat-Ablauf (D108, erledigt) und
+  Species-Bonus-Feats; SRD 5.2.1 kennt artenbezogene Origin-Feats, aber
+  species.csv hatte weder Feld noch Konsumenten. B6 („Requires-Freitext")
+  war bei Prüfung bereits erledigt: `_parse_feat_requires` parst
+  Attributs-/Skill-/Feat-Bedingungen maschinell fail-closed, das Pack trägt
+  kein „ranks" mehr.
+- **Entscheidung:** Schema-Feld `origin_feat` (id) für species; Projektion
+  gibt es weiter; die Feat-Auswahl konsumentiert es doppelt: (a)
+  Prerequisite-Ketten zählen es als angewandt, (b) die gleiche Feat kann
+  nicht noch einmal gewählt werden — `taken`-Set + „already chosen". (b)
+  schließt gleich die generische SRD-Regel „no feat twice" für den ganzen
+  Level-Up-Flow, nicht nur für Species.
+- **Grund:** Ein Datenfeld ohne Konsumenten ist Dekoration (D135-Lektion).
+  Der Konsument wurde an die bestehende options-Ableitung gehängt statt
+  einen zweiten Wahl-Kanal zu bauen.
+- **Konsequenzen:** Kanon: **1043 passed, 0 skipped** (3 Tests: Projektion
+  liefert/leert origin_feat, Species-Feat zählt als genommen + stillt
+  Prerequisite-Kette, Ledger-Duplikat blockiert). Nebenbefund geheftet:
+  SCHEMAS ist auch Generator-Input — Schema-Zeilen ändern schreibt den
+  content_pack-CSV neu (D109-Idempotenztest fängt das korrekt); der
+  mit-generierte species.csv ist jetzt Stand des Schutzes.
+
+## D140 - Schwimmen/Klettern ohne Speed: der SRD preist es an, er verbietet es nicht (2026-10-17, AP-027)
+
+- **Status:** umgesetzt.
+- **Kontext:** D83 erlaubte Bewegungsmodi strikt nur MIT zugehörigem Speed
+  („no silent substitution") — für Schwimmen/Klettern ist das strenger als
+  SRD 5.2.1: Ohne Schwimm-/Kletterspeed ist beides möglich, jeder Fuß
+  kostet 1 Extra-Fuß (2 in schwierigem Gelände). Nur Fliegen ohne Speed
+  ist tatsächlich unmöglich.
+- **Entscheidung:** `_mode_or_error` verlangt einen Speed nur noch für
+  fly; swim/climb durchnach immer, mit dem Aufschlag als EINER Regel in
+  `movecost.route_cost`: `unit + (2 if difficult else 1)` — wörtliche SRD-
+  Addition, keine Multiplikation (schwierig+schwimmen = 3, nicht 4).
+  Diagonal-Alternierung bleibt Basis; der Aufschlag kommt pro Schritt
+  obendrauf. Client: Modus-Picker zeigt swim/climb immer, fly nur mit
+  Speed. Budget bleibt walk_budget (D83-Konversion unverändert).
+- **Grund:** Die D83-Weigerung war ein Platzhalter („no fake terrain rules
+  yet"). Die Regelquelle liefert eine Zahl, keinen Verbotsatz — also Zahl.
+- **Konsequenzen:** Kanon: **1045 passed, 0 skipped** (2 Tests:
+  Kosten-Tabelle als ausführbare Norm inkl. Diagonal-Mix, WS: fly verweigert
+  / swim bewegt). terrain.py/movement_modes-Suiten unverändert grün.
+  Wasser-/Kletterwände als Terrainklassen bleiben Content (AP-031-Kandidat).
+
+## D142 - Nebel-Gedächtnis überlebt den Prozess (2026-10-17, AP-028)
+
+- **Status:** umgesetzt.
+- **Kontext:** TODO P2 „Ghost persistence": D9's _last_seen war reiner
+  Speicher — ein Server-Neustart fraß alle Nebel-Ghosts (und Multi-Worker
+  wäre ohnehin falsch). Gezielt wurde NIE pro Step geschrieben.
+- **Entscheidung:** additiv room_state.ghosts_json (ein Blob pro Raum:
+  {user_id: {token_id: snapshot}}). Schreibzeitpunkt = disconnect des
+  letzten Sockets des Viewers (prune_viewer_last_seen schreibt VOR dem
+  Pop; leere Geister schreiben nichts). Lesezeitpunkt = erster gesehener
+  Frame des Viewers im Raum (visibility-Hydrate) und Raum-Beitritt
+  (rooms-Snapshotpfad). JSON-Keys werden beim Hydratieren wieder zu int —
+  die token_id-Nachschlage bleibt int. Kein Write pro Step, ein Write pro
+  Abmeldung.
+- **Grund:** Persistenzkosten gehören an die Lebensereignisse des Gedächt-
+  nisses (anmelden/abmelden), nicht an den Heißpfad.
+- **Konsequenzen:** Kanon: **1047 passed, 0 skipped** (2 Tests: Schritt ->
+  Ghost im Speicher -> Disconnect schreibt DB -> Speicher leer -> Hydrat
+  liefert int-keys zurück; Geisterleere schreibt nichts). Alle Nebel-Suiten
+  unverändert grün. Multi-Worker bleibt bewusste Grenze (ein Prozess, wie
+  zuvor; die Grundlage ist jetzt gelegt).
+
+## D143 - Ein Einstiegspunkt für die Checks: Makefile, Live-Smoke, Lockfile (2026-10-17, AP-029)
+
+- **Status:** umgesetzt.
+- **Kontext:** TODO P1 wollte drei Dinge, die bisher nur in Köpfen und
+  Logs lebten: einen reproduzierbaren Python-Stand, einen lebenden
+  Server-Smoke vor „macht Sinn"-Deploys und einen einzigen Einstiegspunkt
+  für die Checks, die der Marathon sowas jedes Mal manuell ausführt.
+- **Entscheidung:** requirements.lock = komplettes transitive Freeze des
+  kanonischen Docker-Test-Images (nur `==`-Zeilen, sortiert; Regeneration
+  per `make lock`). scripts/smoke.sh startet uvicorn auf Loopback mit
+  eigenem VTT_DATA_DIR und Port per SMOKE_PORT, beweist health -> register
+  -> Raum per HTTP und stoppt per pidfile-trap; kein Docker, kein
+  geteilter Zustand. Makefile kapselt test/compile/check/smoke/lock.
+- **Grund:** Check-Routinen, die nur als lange bash-Zeilen existieren,
+  altern still. Ein Skript mit Exit-Code ist ein Test; ein Freeze mit
+  Regenerations-Kommando ist wartbar.
+- **Konsequenzen:** App-Code unverändert (Kanon bleibt 1047). Die
+  .mjs-Smoke-Suite aus dem TODO-Original existiert nicht und wurde nicht
+  erfunden — der HTTP-Smoke ist die ehrliche Form davon.
+
+## D144 — Swim/Climb-Aufschlag nur OHNE Speed (AP-030)
+- **Status:** umgesetzt.
+- **Kontext:** D140 machte swim/climb für alle Creaturen bewegungs-erlaubt
+  und belegte jedes Feld mit dem SRD-Aufschlag (+1/ Feld, +2 schwierig).
+  Das war zu scharf: Wer eine swim-/climb-Geschwindigkeit besitzt, schwimmt
+  und klettert nach SRD ohne Kostenzuschlag. D83 durfte nicht bedeuten,
+  bestatte Wesen mit Fischgeschwindigkeit zu bestrafen.
+- **Entscheidung:** Der Aufschlag folgt dem Speed, nie der terrain-Zelle.
+  movecost.route_cost und path.path_footprint_cost erhalten ein durchgängiges
+  strained-Flag (unit + Aufschlag statt unit * Multiplikator), das die
+  creature-kundige Schicht setzt: movement._strained(tok, mode) prüft die
+  Speed-Tabelle, walk()/walk3d()/Preview tragen es durch. combat.move_remaining
+  führt fehlende swim/climb-Pool-Einträge auf den walk-Pool zurück, damit das
+  Ledger dieselbe Einheit wie movecost spricht. fly bleibt Speed-Pflicht
+  (D140), swim/climb bleiben immer erlaubt.
+- **Grund:** Die Grid-Module bleiben creature-blind (eine Lookup-Stelle),
+  die Mechanik folgt exakt der SRD-Regel „speed vorhanden = kein Aufschlag",
+  und die Wirtschaft (Budget) bleibt in einer Währung.
+- **Konsequenzen:** Kanon 1050 (5 Tests in test_d140_swim_climb.py: Unit-
+  strained, zwei Ledger-Unit-Tests, Surcharge-Erwartungen auf strained=True
+  umgestellt). Der alte WS-Kampf-Budgettest wurde durch deterministische
+  Unit-Tests ersetzt — er hing bei entferntem End-Event in receive_json.
+  Lernkurve dokumentiert: compose-Aufrufe IMMER mit --build (ein vergessenes
+  --build ließ zweimal alten Image-Code laufen und produzierte Scheinhänger).
+
+## D145 — Species-Ability-Boni mechanisch (AP-031)
+- **Status:** umgesetzt.
+- **Kontext:** Die species.csv führt seit jeher die Spalte ability_bonuses
+  (z. B. dex+2), aber kein Konsument hat sie je angelegt — die D101-Follow-up-Zeile
+  „not mechanically applied" war die letzte offene Mechanik-Lücke im geführten
+  Charakterfluss.
+- **Entscheidung:** Grant nach D108-Muster: Report-Endpoint (Vorschau der
+  Zielwerte) und Apply-Endpoint je Charakter, EXACTLY-ONCE innerhalb eines
+  db.tx(), Zahlen ausschließlich aus dem Raum-Content. Der Bonus ist ein
+  Ledger-Eintrag (build.species_bonus), den _replay_species am ANFANG der
+  Chronologie einspielt (2024: Species vor Origin, Klasse, ASI) — in
+  _recompute ebenso wie im unbuilt-Zweig von apply_origin, damit kein
+  späterer Bauschritt ihn je still verlieren kann. Bestehende Blätter werden
+  nie automatisch migriert; hp/AC/Slots/Ressources bleiben unberührt.
+- **Grund:** Ein Direktschreib-Knopf wäre beim nächsten Full-Recompute vom
+  base_stats-Snapshot verschluckt worden. Die Ledger-Replik ist dieselbe
+  Idempotenz-Maschine, die D108 für Origin bewiesen hat — zwei Grants in
+  beliebiger Reihenfolge kommutieren nachweislich.
+- **Konsequenzen:** Kanon 1055 (5 neue Tests inkl. Kompositionstest Origin
+  +Species in beiden Reihenfolgen). _species_projection zeigt die Boni jetzt
+  read-only. Die UI-Knöpfe im geführten Fluss sind Folgearbeit (API ist
+  vollständig); TODO-D101-Followup entsprechend nachgezogen.
+
+## D146 — Trank/Rollage wird verbraucht (AP-032)
+- **Status:** umgesetzt.
+- **Kontext:** Consumables hinterließen als „leere Hülle" im Inventar (nur der
+  charges-Zähler ging auf 0). SRD: ein Trank ist nach dem Trinken WEG. Die
+  TODO-Zeile „potions aren't deleted" war der letzte echte Regel-Overpass der
+  Inventar-Mechanik.
+- **Entscheidung:** _consume(it, items) in handle_use_item, innerhalb derselben
+  Schreibtransaktion wie die Heilung (nie Heilung ohne Verbrauch, nie
+  Verbrauch ohne Heilung; der op_id-Replay-Guard D93 bleibt der Türsteher).
+  Regel: kind potion/scroll UND charges==0 -> wenn qty>1: eine Dosis weniger
+  und die aktuelle ist frisch (charges zurück auf chargesMax); sonst fällt der
+  Eintrag aus der Liste. Ein Fluch-Eintrag bleibt IMMER (D106/D113: eine
+  Flurspur darf nicht verschwinden). Alles andere (Wandern, Ringe, …) behält
+  die bekannte depleted-Schale — aufladbare Items werden nicht weggeworfen.
+- **Grund:** Eine Regel, vier Hüllen-Workarounds (Client-Greyout, DM-Mülleimer,
+  Test-Erwartungen) sind vier Erklärungen. Die Inventarliste ist ab jetzt
+  wieder die Wahrheit: was drin steht, existiert.
+- **Konsequenzen:** Zwei alte Tests beweisen die neue Semantik und wurden auf
+  die stärkere Assertion gezogen (test_integration: items == []; sprint23: der
+  Replay eines verbrauchten Tranks antwortet ehrlich 'Item not found' statt
+  stumm). Kanon 1060 (5 neue Tests in test_d146_potion_consumed.py inkl.
+  qty-Stack, curse-Guard und Replay-Nachweis per Marker-Chat).
+
+## D147 — Attunement identifiziert (statt zu gate-en) (AP-033)
+- **Status:** umgesetzt.
+- **Kontext:** Die TODO-Zeile wollte „warn/gate attuning to an unidentified
+  magic item". Die Regel-Faktenlage (DMG wie SRD): das Attunement IST eine
+  kurze Rast mit dem Objekt, und die Regel sagt ausdrücklich, dass die
+  Creature beim Attunement die Eigenschaften des Objekts ERFÄHRT. Ein Gate
+  wäre eine Hausregel gegen die Regel.
+- **Entscheidung:** handle_attune flippt beim ATTUNE-ON für magische,
+  unidentifizierte Objekte zusätzlich identified und flüstert den Fund dem
+  Besitzer (desc-Zelle oder Hinweis ohne Text). refuse (Cap 3) und Toggle-off
+  verraten nichts; der DM-identify-Pfad bleibt unberührt. Die Vereinfachung
+  (Erkundung am Ende des Attune-Handlers, nicht an einer eigenen Short-Rest-
+  Uhr) ist explizit dokumentiert, weil die Engine Attunement ohnehin
+  augenblicklich modelliert.
+- **Grund:** Ein Warn-Gate hätte eine echte SRD-Erfahrung bestraft, die der
+  Spieler gerade durchführt. Die Identifikation ist die Belohnung des
+  Attunements selbst — jetzt ist sie auch die Implementierung.
+- **Konsequenzen:** Kanon 1063 (3 Tests in test_d147_attune_identify.py).
+  TODO-Zeile auf „resolved by rule, not by gate" gezogen. Für den Spieler
+  unbekannte Objekte bleiben unbekannte Objekte, bis er sie benutzt, einer
+  Rast widmet oder ein Attunement eingeht.
+
+## D148 — Multi-Socket-Geisterbeweis (AP-034)
+- **Status:** umgesetzt (Test-Evidence, kein App-Code).
+- **Kontext:** TODO P2 wollte „seed ghosts more robustly; multi-socket-per-user
+  testing". Die Prune-/Persist-/Hydrate-Maschinerie war bereits socket-richtig
+  gebaut (prune nur bei `if not socks`) — es fehlte der Beweis, und ein
+  Reconnect-Test fand ihn ohne neuen Code.
+- **Entscheidung:** Zwei Tests in test_d148_multisocket_ghosts.py: (1) schließt
+  einen von zwei Tabs eines Users — Geister bleiben in RAM, nichts wird
+  persistiert, keine offline-Presence; (2) nach dem echten letzten Socket
+  schreibt die DB, und der nächste State-View des Users zeigt die verblichenen
+  Tokens wieder (hydrate über denselben Weg wie nach einem echten Neustart).
+- **Grund:** „bereits richtig" ohne Test ist ein Gerücht. Die D142-Schichten
+  (RAM, ghosts_json, State-Hydrate) werden hier genau an der Naht geprüft,
+  die ein Browser-Tab-Wechsel schlägt.
+- **Konsequenzen:** Kanon 1065. Erkenntnis fürs Testen: Nebel-Geister brauchen
+  ein Token, das UNSICHTBAR endet — ein Pfad durch die Wand existiert nicht,
+  der DM muss teleportieren; und /state hydratisiert, prune aber auch wieder,
+  wenn der Beweis-Socket vorher schließt. TODO-P2-Zeile damit belegt.

@@ -492,6 +492,7 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
         "saves": base.get("saves") or {}, "defenses": base.get("defenses") or {},
         "abilities": base.get("abilities") or [], "resources": base.get("resources") or [],
         "companion": base.get("companion"), "notes": base.get("notes") or "",
+        "cr": base.get("cr"),
     })
     size = _clean_size(msg.get("size") or base.get("size"))
     fw, fh = _clean_span(msg, size)

@@ -30,10 +30,15 @@ Klassifikation je Lücke:
 | Automatische Fluchwirkungen (Auslöser beim Anlegen/Benutzen/Identifizieren) | Flüche = Metadaten + DM-Enthüllung (D106) | Fluch-Infra komplett; `_item_attack`/use/equip-Hooks vorhanden | M–L | K+G |
 | Konzentraitions-BRUCH bei Schaden | Concentration-FLAG + Con-Mod auf Rettungen | Rettungspfad `handle_save`, FLAG existiert (`conditions.py:229`) | S–M | K |
 | Grapple / Shove als Offensive (Atletik vs. Athletik/AC, Größe, Bewegung fest) | **D112 umgesetzt** — `app/room/grapple.py`, 2024-Baseline (check→save `better_save`, kein 2014-Wettkampf), `dc` additiv, Ende über `end_grapples_out_of_reach` | Condition-Uhren, Bewegungs­verbot-Set, Opposed braucht nur 2 Würfe | M | K+G |
-| `incapacitated`-Familie (blind/deaf/paralyzed/unconscious/stun) | Keys da, keine Wirkung | Adv/Dis-Hook (`dice.py:316-337`), Bewegungs-Hook | M | K |
-| Exhaustion-Stufen (0–6 mit kumulativen Effekten) | Key existiert nicht als Mechanik | Condition-Uhr + Bogen-Anzeige | M | K |
+| Inspiration (F6) | ✅ D135: Verbrauch am Wurf, Weitergabe bei voll | — | S | K |
+| Stabilize-Help (F8) | ✅ D136: DC-10-Medicine-Check, Action+Adjazenz, nat 20 heilt | — | S | K |
+| Deckung auf Spell-Attacks (A5) | ✅ D137: half/3/4/total auf allen Angriffspfaden, Total vor Ressourcenverbrauch | — | S | K |
+| Prepare-Ablauf (C3) | ✅ D138: prep/prepared-Datenfeld, Gate vor Verbrauch, Kantrips frei | — | S | K |
+| Swim/Climb ohne Speed (D83-Platzhalter) | ✅ D140+D144: Aufschlag +1/+2 nur OHNE passenden Speed (strained-Flag creature-kundig gesetzt), fly bleibt Speed-Pflicht | — | S | K |
+| `incapacitated`-Familie (blind/deaf/paralyzed/unconscious/stun) | ✅ D134: Hook `no_actions` — Angriff, Wirken, Flucht/Grapple-Choke, Dash validieren vor Konsumtion; Eltern-Condition lässt Bewegung frei, Auto-Fail nur bei der Familie; Reaktionen bleiben dokumentierte v1-Grenze | Adv/Dis-Hook (`dice.py:316-337`), Bewegungs-Hook | S | K |
+| Exhaustion-Stufen (0–6 mit kumulativen Effekten) | ✅ D129: `gear.exhaustion_roll_mod`/`exhaustion_speed_penalty_ft` als einzige Quelle; Angriffe, Schaden, Checks, Saves, Skills, Sprüche, Initiative, walk-Tempo, Tod bei 6, Long Rest −1 — 16-h-Gate bewusst offen | Condition-Uhr + Bogen-Anzeige | S | K |
 | Tod/Incap-Flows: Tod-save-Flow existiert ✓ | (kein Gap) | — | — | — |
-| Echte Loot-/Kistenobjekte mit Inhalt auf der Karte | „Loot“-Objekt schreibt nur Notiz-Text (`room/traps.py:86-91`) | Container-System D92 + loot-Handler D105 (eins zu eins übertragbar) | M | K |
+| Echte Loot-/Kistenobjekte mit Inhalt auf der Karte | ✅ D133: Loot-Eintrag mit `container`-Flag ist ein echter D92-Container unter dem Schlüssel `loot:<id>` (Inhalt nur über autorisierte `inv_container`-Antworten; Editor-Checkbox + Klick-Öffnung; ohne Flag bleibt die Legacy-Notiz byte-identisch) | Container-System D92 + loot-Handler D105 | S | K |
 | Monster-Sonderaktionen aus Daten (Blick, Konzent-Blick, Re-Aktion) | NPC nur struktur. Angriffe + Spruch-ID-Liste | Executor + `npc._clean_abilities` | L | K+G |
 
 ## B. Fehlende generische Regelunterstützung (die CSV-only-Blocker)
@@ -46,7 +51,7 @@ CSV-Arbeit. Reihenfolge ist die einzige sinnvolle (Unterbau zuerst).
 | Effektgrammatik: Bewegungs-/Positionseffekte | Schub, Teleport, erzwungener Schritt — `moveforced`-Engine existiert schon, nur nicht als Effekttyp ansprechbar | M | G |
 | Effektgrammatik: Probe/Wurf als Effekt | Rettung/Angriff innerhalb einer Effekt-Kette (nicht nur als Auflösung eines Zaubers) | M | G |
 | Effektgrammatik: Ressourcen ändern (gewähren, nicht nur kosten) | ✅ D125: `resource.mode=restore` gibt eine vorhandene Charakter-Ressource um 1 Nutzung zurück; `cost` bleibt Standard alter Zellen und der atomare Preflight bezahlt nur Kosten. Eine völlig neue Ressource erzeugen bleibt bewusst nicht Aufgabe eines Effekts | S | G |
-| Effektgrammatik: Dauer mit Rettungs-Ende | ⚠ D117: `duration` is now the initial-round source for a condition op via `"rounds":"duration"` (or omitted rounds); an explicit save that ENDS the condition on success remains open | M | G |
+| Effektgrammatik: Dauer mit Rettungs-Ende | ✅ D130: `sa`+`dc` auf der Instanz; `combat._save_ends` würfelt am Ende des eigenen Zugs durch `opposed.save_roll`/`beats_dc` (PC und NPC über denselben Participant), Erfolg entfernt genau den Eintrag; `duration`-Quelle bleibt D117 | S | G |
 | Zustandskatalog als CSV (`conditions.csv`) | 18 Keys hartcodiert; Wirkung-Hooks bleiben Code pro KEY-TYP, Katalog+Anker+Hooks-Flags werden Daten | M | G |
 | Item-Effektgrammatik | heute `heal`+charges; Ziel: dieselbe Effektgrammatik wie der Executor, ausgelöst bei use/equip/attack | L (baut auf G oben auf) | G |
 | creatures.csv → NPC-Block-Projektion | ✅ D122: projection to the one existing `npc.clean_npc()` shape, DM preview/import into the personal bestiary, and real-Chromium click-through; unsupported free-form text stays visible instead of being silently faked | M | G |
@@ -66,7 +71,7 @@ CSV-Arbeit. Reihenfolge ist die einzige sinnvolle (Unterbau zuerst).
 * Monster-Bestiario als `creatures.csv` + Projektion,
 * Abenteuermodule: Karten (PNG-Assets + Editor), Fallen/Türen/Truhen,
   Quests, Audio, Begegnungen — alles bereits engine-seitig fertig,
-* Kurzwährungs-/Werttabellen (`value_gp`-Spalte mit Konsument ergänzen — s. B).
+* Kurzwährungs-/Werttabellen: `value_gp` hat seit D132 seinen Konsumenten (`item_defs.value` → Inventar-Eintrag, Clamps 0–999999); inhaltsseitige Werttabellen bleiben Pflegeaufgabe des SRD-Packs.
 
 ## D. Server-Betrieb / Integration (O)
 

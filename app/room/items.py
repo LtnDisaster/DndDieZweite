@@ -7,6 +7,29 @@ from .dice import do_roll
 from .net import broadcast, dm_whisper, send_to, send_user, sys_msg
 
 
+def _consume(it, items):
+    """D146 (SRD): a potion or scroll is GONE when its last dose is drunk —
+    the empty vial does not squat in the pack forever. qty>1 spends one dose
+    and the entry re-arms with a fresh one; the last entry is removed from
+    the very list the caller persists. An entry that carries a curse always
+    stays (a curse's trace may never evaporate silently, D106/D113).
+    Returns the whisper suffix."""
+    if it["charges"] != 0 or it["kind"] not in ("potion", "scroll"):
+        return ""
+    if isinstance(it.get("curse"), dict):
+        return ""
+    qty = int(it.get("qty", 1) or 1)
+    if qty > 1:
+        it["qty"] = qty - 1
+        it["charges"] = it["chargesMax"]
+        return f" ({it['qty']} left)"
+    try:
+        items.remove(it)
+    except ValueError:
+        return ""
+    return " (consumed)"
+
+
 async def handle_use_item(ws, room_id, user, is_dm, msg):
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None or tok["character_id"] is None:
@@ -38,6 +61,7 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
     op_id = str(msg.get("op_id", ""))[:40]
     if it["charges"] > 0:
         it["charges"] -= 1
+        consumed = _consume(it, items)              # D146: last dose is gone
         # Single UPDATE so HP and charge decrement are atomic (never one without the other).
         with db.tx() as c:
             if op_id and not INV._claim(c, op_id, room_id, "use_item", ch["id"]):
@@ -47,6 +71,7 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
             if hp > 0 and death is not None:
                 c.execute("UPDATE tokens SET death=NULL WHERE id=?", (tok["id"],))
     else:
+        consumed = ""
         with db.tx() as c:
             if op_id and not INV._claim(c, op_id, room_id, "use_item", ch["id"]):
                 return
@@ -55,7 +80,8 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
             if hp > 0 and death is not None:
                 c.execute("UPDATE tokens SET death=NULL WHERE id=?", (tok["id"],))
     sys_msg(room_id, f"{ch['name']} uses {it['name']}.")
-    extra = " (depleted)" if it["charges"] == 0 and it["chargesMax"] >= 0 else ""
+    extra = ((" (depleted)" if it["charges"] == 0 and it["chargesMax"] >= 0
+              and it in items else "") + consumed)
     if it["heal"]:
         await send_user(room_id, ch["user_id"], "whisper",
                         {"text": f"🧪 {it['name']}: {it['heal']} = +{healed} → {hp}/{ch['max_hp']} HP{extra}"})
@@ -101,6 +127,7 @@ async def handle_attune(ws, room_id, user, is_dm, msg):
     it = next((i for i in items if i["id"] == msg.get("item_id")), None)
     if it is None or not it["attunable"]:
         return
+    learned = False
     if it["attuned"]:
         it["attuned"] = False
     elif gear.attuned_count(items) >= gear.ATUNE_MAX:
@@ -109,7 +136,17 @@ async def handle_attune(ws, room_id, user, is_dm, msg):
         return
     else:
         it["attuned"] = True
+        # D147 (DMG/SRD): an attunement is a short rest with the item — the
+        # attuning creature LEARNS its properties as the bond settles. No
+        # gate is needed for unidentified items; the rule answers the why.
+        learned = bool(it["magic"]) and not it["identified"]
+        if learned:
+            it["identified"] = True
     db.x("UPDATE characters SET items=? WHERE id=?", (json.dumps(items), ch["id"]))
+    if learned:
+        await send_user(room_id, ch["user_id"], "whisper",
+                        {"text": f"✨ As the attunement settles, you learn what "
+                                 f"{it['name']} is: {it['desc'] or 'no written properties'}"})
     await broadcast(room_id, "snapshot", None)
 
 

@@ -129,6 +129,16 @@ async def take_loot(room_id, tok, loot) -> bool:
               if tok["character_id"] else None)
     if not owner or ch is None:
         return False
+    if loot.get("container"):
+        # D133 (AP-019): flagged loot is a real container (inv_container on
+        # the "loot:<id>" key) — stepping onto it never writes a note. The
+        # hint is a one-liner; the True return only persists the marker.
+        if not loot.get("hinted"):
+            loot["hinted"] = True
+            await send_user(room_id, owner, "whisper",
+                            {"text": f"🎁 {loot['label']} is a container — "
+                                     f"search it up close."})
+        return True
     loot["taken_by"] = owner
     note = ("[loot] " + loot["label"])
     db.x("UPDATE characters SET notes=? WHERE id=?",

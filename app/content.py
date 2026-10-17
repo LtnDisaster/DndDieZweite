@@ -80,6 +80,9 @@ SCHEMAS = {
         ("darkvision_ft", False, "int:0-999", 0),
         ("ability_bonuses", False, "ability_bonuses", ""),
         ("languages", False, "str", ""), ("traits", False, "text", ""),
+        # D139 (audit B5): species may name one extra Origin Feat (id); the
+        # feat-choice flow consumes the projection (taken + prereq chains).
+        ("origin_feat", False, "id", ""),
         ("image", False, "asset", ""), ("manual", False, "text", ""),
     ],
     "class": [  # one row per level 1..20
@@ -563,6 +566,7 @@ def _project_item(room_id, row):
     kind = row.get("kind") or "other"
     defn = INV.clean_def({"id": did, "name": row["name"], "desc": row.get("desc", ""),
                           "kind": kind, "weight": row.get("weight", 0),
+                          "value": row.get("value_gp", 0),
                           "stackable": False, "props": props})
     if defn is None:
         return "invalid"
@@ -575,12 +579,12 @@ def _project_item(room_id, row):
     owner = db.q1("SELECT room_id FROM item_defs WHERE id=?", (defn_id,))
     if owner is not None and owner["room_id"] != room_id:
         raise ValueError("shared item id owned by another room")
-    db.x("INSERT INTO item_defs(id,room_id,name,desc,kind,weight,stackable,props,created_by) "
-         "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
+    db.x("INSERT INTO item_defs(id,room_id,name,desc,kind,weight,stackable,props,created_by,value) "
+         "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
          "desc=excluded.desc,kind=excluded.kind,weight=excluded.weight,"
-         "stackable=excluded.stackable,props=excluded.props",
+         "stackable=excluded.stackable,props=excluded.props,value=excluded.value",
          (defn_id, room_id, defn["name"], defn["desc"], defn["kind"], defn["weight"],
-          defn["stackable"], db.json_dumps(defn["props"]), None))
+          defn["stackable"], db.json_dumps(defn["props"]), None, defn["value"]))
     return "ok"
 
 

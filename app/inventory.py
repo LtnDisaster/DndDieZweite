@@ -25,6 +25,20 @@ class InvError(Exception):
     """Rejected mutation — the transaction rolls back, nothing is written."""
 
 
+def claimed(op_id, room_id, kind, ns=None):
+    """D131: NON-destructive replay probe — True when this op_id (same
+    namespace) was already claimed. Lets the casting-time gate answer a
+    double-fired cast silently BEFORE the turn/action checks, so a replay
+    never surfaces as 'No action left this turn'. Checks the namespaced key
+    and the legacy raw row exactly like _claim does."""
+    if not op_id:
+        return False
+    keys = [f"{ns}|{op_id}", op_id] if ns is not None else [op_id]
+    return db.q1("SELECT 1 AS ok FROM inv_ops WHERE room_id=? AND kind=? "
+                 "AND op_id IN (%s)" % ",".join("?" * len(keys)),
+                 (room_id, kind, *keys)) is not None
+
+
 def _claim(c, op_id, room_id, kind, ns=None):
     """Claim an op_id inside the caller's transaction. False = already claimed.
     D94: client-chosen op_ids are claimed under a server-side namespace
@@ -58,6 +72,7 @@ def entry_from_def(d, qty):
     return gear.clean_items([{
         "name": d["name"], "kind": d.get("kind", "other"),
         "desc": d.get("desc", ""), "weight": d.get("weight", 0),
+        "value": d.get("value", 0),
         "stackable": bool(d.get("stackable")), "def_id": d["id"],
         "props": db.j(d.get("props"), {}) or {}, "qty": qty,
     }])[0]
@@ -76,11 +91,16 @@ def clean_def(d):
         weight = max(0.0, min(9999.0, round(float(d.get("weight", 0)), 1)))
     except (TypeError, ValueError):
         weight = 0.0
+    try:
+        value = max(0.0, min(999999.0, round(float(d.get("value", 0)), 2)))
+    except (TypeError, ValueError):
+        value = 0.0
     did = str(d.get("id", "")).strip()[:24]
     if did and not did.replace("_", "").isalnum():
         return None
     return {"id": did, "name": name, "desc": str(d.get("desc", ""))[:200],
-            "kind": kind, "weight": weight, "stackable": 1 if d.get("stackable") else 0,
+            "kind": kind, "weight": weight, "value": value,
+            "stackable": 1 if d.get("stackable") else 0,
             "props": gear.clean_props(d.get("props"))}
 
 

@@ -94,6 +94,13 @@ def _speeds(tok):
     delta = CND.speed_delta(CND.load(tok), tok.get("room_id"))
     if delta:
         speeds = dict(speeds, walk=max(0, speeds["walk"] + delta))
+    # AP-015 (audit F4): 2024 exhaustion reduces your Speed by 5 ft per level.
+    # "Your Speed" is the walk speed of the sheet; fly/swim/climb are separate
+    # modes and deliberately stay untouched.
+    if tok["character_id"]:
+        exh = gear.exhaustion_speed_penalty_ft(sheet)
+        if exh:
+            speeds = dict(speeds, walk=max(0, speeds["walk"] + exh))
     return speeds
 
 
@@ -107,14 +114,21 @@ MODES = ("walk", "fly", "swim", "climb")
 
 def _mode_or_error(tok, msg):
     """(D83) One active mode per movement operation. Unknown mode words fall
-    back to walk; a mode the creature does not have is refused — no silent
-    substitution, no fake terrain rules for swim/climb yet."""
+    back to walk. Flying genuinely needs a fly speed (D140); swim and climb
+    are always allowed — WITHOUT the matching speed they pay the SRD
+    surcharge, which _strained hands to movecost (D144)."""
     mode = str(msg.get("mode") or "walk").lower()
     if mode not in MODES:
         mode = "walk"
-    if mode != "walk" and _speeds(tok).get(mode, 0) <= 0:
-        return None, f"This creature has no {mode} speed"
+    if mode == "fly" and _speeds(tok).get("fly", 0) <= 0:
+        return None, "This creature has no fly speed"
     return mode, None
+
+
+def _strained(tok, mode):
+    """D144: the SRD surcharge belongs to creatures WITHOUT the speed —
+    the grid modules stay creature-blind, this is the one lookup."""
+    return mode in ("swim", "climb") and _speeds(tok).get(mode, 0) <= 0
 
 
 MOVE_BLOCKED_CONDS = {"incapacitated", "unconscious", "paralyzed", "stunned",
@@ -202,6 +216,7 @@ async def handle_move(ws, room_id, user, is_dm, msg):
     if why:
         await send_to(ws, "error", {"msg": why})
         return
+    strained = _strained(tok, mode)                      # D144: SRD surcharge
     # Action economy gate (D74, strict 5e): a token that is in the initiative
     # order may only be moved by its owner on its OWN turn. The DM is exempt
     # (the DM moves everyone, ever); tokens that are not listed (mid-combat
@@ -327,7 +342,8 @@ async def handle_move(ws, room_id, user, is_dm, msg):
 
     await _cancel_walk(tok["id"])
     _walks[tok["id"]] = asyncio.create_task(walk(room_id, tok["id"], path, mover_ws=ws,
-                                                 budget=budget, mode=mode))
+                                                 budget=budget, mode=mode,
+                                                 strained=strained))
     await _announce_move(room_id, tok["id"], True)
 
 
@@ -475,13 +491,16 @@ async def _move3d(ws, tok, msg, mode, budget):
             await send_to(ws, "error", {"msg": "No vertical flight path there"})
             return
 
+    strained = _strained(tok, mode)                      # D144: SRD surcharge
     await _cancel_walk(tok["id"])
     _walks[tok["id"]] = asyncio.create_task(walk3d(room_id, tok["id"], path, mover_ws=ws,
-                                                   budget=budget, mode=mode))
+                                                   budget=budget, mode=mode,
+                                                   strained=strained))
     await _announce_move(room_id, tok["id"], True)
 
 
-async def walk3d(room_id, token_id, path, mover_ws=None, budget=None, mode="fly"):
+async def walk3d(room_id, token_id, path, mover_ws=None, budget=None, mode="fly",
+                 strained=False):
     from . import vertical3d
     stop_reason = None
     spent = 0
@@ -525,7 +544,7 @@ async def walk3d(room_id, token_id, path, mover_ws=None, budget=None, mode="fly"
                         legal = vertical3d.volume_final_valid(room_id, cand, all_tokens, maps, lm)
                     if legal:
                         step_c = (movecost.vertical_cost() if pf != fl
-                                  else movecost.route_cost(maps[pf], [pcell, cell], side, mode=mode))
+                                  else movecost.route_cost(maps[pf], [pcell, cell], side, mode=mode, strained=strained))
                         if budget is not None and spent + step_c > budget:
                             stop_reason = "budget"
                             legal = False
@@ -597,7 +616,8 @@ async def walk3d(room_id, token_id, path, mover_ws=None, budget=None, mode="fly"
         raise
 
 
-async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk"):
+async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk",
+               strained=False):
     stop_reason = None
     spent = 0
     has_riders = _carries_riders(token_id)          # D83: carry check, once per walk
@@ -627,7 +647,7 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk")
                                    blocked_edges=mapmodel.blocked_edges(mp), footprint=side,
                                    mode=mode)
                 if legal and budget is not None:
-                    step_c = movecost.route_cost(mp, [from_origin, (cx, cy)], side, mode=mode)
+                    step_c = movecost.route_cost(mp, [from_origin, (cx, cy)], side, mode=mode, strained=strained)
                     if spent + step_c > budget:
                         stop_reason = "budget"        # the turn's movement is spent
                         legal = False
@@ -761,6 +781,7 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
     if why:
         await send_to(ws, "error", {"msg": why})
         return
+    strained = _strained(tok, mode)                      # D144: SRD surcharge
     mp = get_map(room_id, tok.get("floor") or "")     # D88: the token's own plane
     origin, side = footprint.occupied_origin(mp, tok)
     # D84: clicked cell = desired CENTER; convert to the canonical anchor
@@ -786,7 +807,7 @@ async def handle_path_preview(ws, room_id, user, is_dm, msg):
         request_id = None
     speed = _speeds(tok).get(mode, 0) or _walk_speed(tok)
     budget = movecost.walk_budget(speed)                 # THE SSOT feet->squares
-    cost = path_footprint_cost(mp, origin, path, side, mode=mode)
+    cost = path_footprint_cost(mp, origin, path, side, mode=mode, strained=strained)
     # During combat a listed token spends its TURN's remaining movement, not
     # the raw speed (D74). None = economy does not apply (no combat/unlisted/DM).
     init = CB.get_init(room_id)

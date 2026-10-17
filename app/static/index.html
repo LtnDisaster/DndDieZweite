@@ -685,6 +685,8 @@ window.addEventListener("unhandledrejection", function(ev){
           </div>
           <div class="row lootfields hidden" id="loot-fields">
             <input id="loot-label" placeholder="Loot (e.g. 25 gp and a silver ring)" maxlength="80">
+            <label class="tiny" style="display:flex;align-items:center;gap:3px" title="Real container: contents live on the server, opened by a click — never a note pickup">
+              <input id="loot-container" type="checkbox">Container</label>
           </div>
           <div class="row">
             <input id="ed-w" type="number" min="8" max="80" title="Width (cells)">

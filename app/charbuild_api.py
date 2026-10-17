@@ -93,6 +93,37 @@ async def build_origin_apply(request: Request, code: str, cid: int,
     return {"ok": False, **result}
 
 
+# --------------------------------------------------------- D145: species
+@router.get("/{code}/{cid}/species")
+def build_species(request: Request, code: str, cid: int, user=Depends(require_user)):
+    """D145 species ability-bonus report (report-then-grant): the row's
+    bonuses, the resulting preview and every refusal apply would answer."""
+    room = _authorize(request, code, cid)
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (int(cid),))
+    if ch is None:
+        raise HTTPException(404, "Unknown character")
+    return charbuild.species_bonus_options(ch, room["id"])
+
+
+@router.post("/{code}/{cid}/species")
+async def build_species_apply(request: Request, code: str, cid: int,
+                              user=Depends(require_user)):
+    """Grant the species ability bonuses EXACTLY ONCE (D145). The body is
+    empty by design — species, bonuses and amounts come from the ROOM'S
+    content, never from this request. Replays answer ``already``."""
+    room = _authorize(request, code, cid)
+    ratelimit.limit("charbuild-species", request, max_n=10, window=60)
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (int(cid),))
+    if ch is None:
+        raise HTTPException(404, "Unknown character")
+    ok, result = charbuild.apply_species_bonus(cid, room["id"])
+    if ok:
+        if not result.get("already"):
+            await room_net.broadcast(room["id"], "snapshot", None)
+        return {"ok": True, "result": result}
+    return {"ok": False, **result}
+
+
 # -------------------------------------------------------- D109: masteries
 @router.get("/{code}/{cid}/mastery")
 def build_mastery(request: Request, code: str, cid: int, user=Depends(require_user)):

@@ -338,16 +338,16 @@ def test_use_item_replay_and_unlimited_heal(client):
         ws.send_json({"type": "use_item", "token_id": tok, "item_id": "p1", "op_id": "u1"})
         recv_until(ws, "snapshot")
         ws.send_json({"type": "use_item", "token_id": tok, "item_id": "p1", "op_id": "u1"})  # replay
+        # D146: the last dose was CONSUMED — the replay can no longer even
+        # find the item. That refusal is the second proof it can never heal
+        # twice (and it is still not a snapshot: no state was ever written).
+        err = recv_until(ws, "error")
+        assert "not found" in err["payload"]["msg"]
         ws.send_json({"type": "use_item", "token_id": tok, "item_id": "nope"})   # fence
-        kinds = []
-        while True:
-            k = ws.receive_json().get("kind")
-            if k == "error":
-                break
-            kinds.append(k)
-        assert "snapshot" not in kinds
+        recv_until(ws, "error")
         row = db.q1("SELECT hp, items FROM characters WHERE id=?", (ch["id"],))
-        assert 10 < row["hp"] <= 17 and next(i for i in db.j(row["items"], []) if i["id"] == "p1")["charges"] == 0
+        assert 10 < row["hp"] <= 17 and all(i["id"] != "p1" for i in db.j(row["items"], []))
+        # D146: the single dose is consumed (healed exactly once, entry gone)
         hp_mid = row["hp"]
         ws.send_json({"type": "use_item", "token_id": tok, "item_id": "p2"})   # unlimited item heals again (charges=-1)
         recv_until(ws, "snapshot")

@@ -637,7 +637,8 @@ def test_use_item_atomic(client):
     after = state_of(client, player, code)
     me_char = next(m["char"] for m in after["members"] if m["user_id"] == after["me"] and m["char"])
     assert me_char["hp"] > 10
-    assert me_char["items"][0]["charges"] == 0
+    # D146: a potion's LAST dose is consumed — the entry is gone, no shell.
+    assert me_char["items"] == []
 
 
 def test_attunement_cap(client):

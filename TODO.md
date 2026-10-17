@@ -414,16 +414,20 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       compose overrides), `scripts/make_release.sh` with post-archive forbidden-path check.
 
 ## P1 — Repo hygiene
-- [ ] Add a `Makefile`/`scripts/smoke.sh`: start (pidfile) -> live `vtt_smoke*.mjs` -> stop
+- [x] **Makefile + scripts/smoke.sh (D143, 2026-10-17):** live smoke starts uvicorn on an
+      ephemeral loopback port with its own VTT_DATA_DIR, proves health/register/room over
+      HTTP, stops via pidfile trap. `make test|compile|check|smoke|lock` wraps the checks.
       (the `.mjs` suites stay a **dev-only** live-server harness; `pytest` is the durable suite).
-- [ ] Pin exact Python/FastAPI/uvicorn/starlette versions (`requirements.lock`) for reproducible CI.
+- [x] **requirements.lock (D143, 2026-10-17):** full transitive freeze of the canonical
+      Docker test image (incl. starlette); `make lock` regenerates it deliberately.
 - [ ] Optional CI job: `pytest` + `compileall` + `node --check` on push.
 
 ## P2 — Known soft spots (call out before touching)
 - [ ] **Path preview latency:** `findPathJS` was removed and movement is now server-authoritative.
       Remaining drift risk is UI formatting only; add a browser e2e test for async preview requests.
-- [ ] **Ghost persistence:** `_last_seen` is in-memory (D9) — lost on restart, wrong under
-      multi-worker. Persist to `room_state`/DB before scaling beyond one process.
+- [x] **Ghost persistence (D142, 2026-10-17):** viewer fog memory is persisted to
+      room_state.ghosts_json at disconnect and hydrated on first sight/room join —
+      restart-safe in one process; multi-worker remains the known boundary.
 - [ ] **Multi-token per user:** ownership is one-token-per-user by construction (assign reuses),
       but nothing enforces it in the schema; door adjacency now handles legacy multi-token rows
       (D49 era). Decide explicitly before adding a feature that creates second tokens.
@@ -464,10 +468,14 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       SSRF/private-network/hostname policy would tighten this without removing local files.
 - [ ] YouTube/Spotify playback depends on third-party autoplay policy; direct audio is the most
       reliable channel for selective/private effects.
-- [ ] Consumable potions (remove on last use) — currently charges-only, potions aren't deleted.
-- [ ] Attunement UX: warn/gate attuning to an *unidentified* magic item.
+- [x] Consumable potions (remove on last use) — D146: potion/scroll entries are
+      consumed in the same transaction as the heal (qty>1 loses one dose,
+      cursed entries stay, rechargeables keep the depleted shell).
+- [x] Attunement UX (D147: resolved by rule, not by gate — attuning to an
+      unidentified magic item IDENTIFIES it, exactly as DMG/SRD prescribe).
 - [ ] Per-party (vs per-item) knowledge of identified items; party shared notes.
-- [ ] Cross-tab / reconnect: seed ghosts more robustly; multi-socket-per-user testing.
+- [x] Cross-tab / reconnect (D148): multi-socket tests prove prune/persist/hydrate
+      are per-user not per-socket; reconnect re-seeds ghosts from the DB.
 - [ ] Browser e2e (Playwright) for canvas: route preview + ghost rendering — the JS split is
       verified by parity + `node --check` + the WS/REST suites, **not** by a real DOM/canvas test.
 - [ ] NPC blocks now cover abilities + HP/AC + spells (D24) **and natural attacks + a bestiary**
@@ -646,8 +654,10 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       apply re-render, legacy flows untouched. Canonical close:
       `docker compose run --rm test` → **694 passed, 1 skipped, 0 failed**.
       Docs: D101, AGENT_GUIDE (frontend list, prep section, test map), MANUAL checklist D101.
-- [ ] **Follow-ups (honest limits):** species ability bonuses from `species.csv` are still
-      not mechanically applied (engine decision, out of D101 scope); starting gear is bound
+- [x] **Follow-up (D145): species ability bonuses from `species.csv` are mechanical
+      now** — report/apply endpoints grant them EXACTLY-ONCE via the build ledger
+      and the recompute replays them at the chronology front (UI button optional).
+      Remaining honest limits: starting gear is bound
       by D100's GLOBAL `item_defs` id (second room importing the same pack gets refused
       projections → those items list as skipped until the per-room key rebuild happens);
       lobby editor stays legacy free-text (guided flow is room-scoped because content is);

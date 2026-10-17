@@ -93,6 +93,7 @@ def check_roll(p, key, kind="skill", adv=None, prof=False):
         if key not in ABILITIES:
             return None
         mod = gear.stat_mod(sheet, key) + (gear.prof_bonus(sheet) if prof else 0)
+    mod += gear.exhaustion_roll_mod(sheet)           # AP-015 (audit F4)
     res = do_roll("1d20", adv)
     return {"kept": res["kept"], "mod": mod, "total": res["kept"] + mod,
             "adv": res["adv"], "auto_fail": False, "prof": bool(prof)}
@@ -111,6 +112,7 @@ def save_roll(p, ability, adv=None):
                 "ability": ability}
     adv = _combine_adv(adv, "dis") if CND.hook_bool(conds, room_id, "my_saves_dis") else adv
     mod = gear.save_bonus(sheet, p["saves"], ability)
+    mod += gear.exhaustion_roll_mod(sheet)           # AP-015 (audit F4)
     res = do_roll("1d20", adv)
     return {"kept": res["kept"], "mod": mod, "total": res["kept"] + mod,
             "adv": res["adv"], "auto_fail": False, "ability": ability}
@@ -121,8 +123,9 @@ def bonus_roll(p, bonus, adv=None):
     attacker number, which is the HIGHER of the unarmed-strike attack bonus and
     the Athletics check — the caller computes the bonus with ``gear``)."""
     adv = _combine_adv(adv, "dis") if CND.hook_bool(p["conds"], p["room_id"], "my_checks_dis") else adv
+    penalty = gear.exhaustion_roll_mod(p["sheet"])   # AP-015 (audit F4)
     res = do_roll("1d20", adv)
-    return {"kept": res["kept"], "mod": int(bonus), "total": res["kept"] + int(bonus),
+    return {"kept": res["kept"], "mod": int(bonus) + penalty, "total": res["kept"] + int(bonus) + penalty,
             "adv": res["adv"], "auto_fail": False}
 
 
@@ -135,9 +138,10 @@ def melee_attack_number(p):
     sheet = p["sheet"]
     attack = gear.ability_attack_bonus(sheet, "str")
     athl, prof = gear.skill_bonus(sheet, p["skills"], "athletics")
+    penalty = gear.exhaustion_roll_mod(sheet)        # AP-015 (audit F4)
     if athl >= attack:
-        return athl, ("athletics" if prof or athl == attack else "athletics")
-    return attack, "unarmed"
+        return athl + penalty, ("athletics" if prof or athl == attack else "athletics")
+    return attack + penalty, "unarmed"
 
 
 def better_save(p, opts=("str", "dex")):

@@ -95,6 +95,7 @@ def project_creature(row, spell_rows=()):
         "darkvision_ft": row.get("darkvision_ft"),
         "attacks": attacks, "spells": spells, "saves": saves,
         "skills": skills, "notes": notes, "size": row.get("size"),
+        "cr": row.get("cr"),
         "disposition": "hostile" if str(row.get("type") or "").lower() != "beast" else "",
         "companion": str(row.get("companion") or "").lower() in ("1", "true", "yes")
     })
@@ -152,6 +153,20 @@ def clean_disposition(disposition):
     return disposition if disposition in DISPOSITIONS else ""
 
 
+def _clean_cr(v):
+    """D132: challenge rating as the SRD fraction/int string ('0', '1/8'..'30',
+    '' = unknown). Monster-sheet data for the DM's eye — the engine derives no
+    XP from it (2024 milestones), which is exactly why it must survive intact."""
+    s = str(v or "").strip()
+    if s in ("0", "1/8", "1/4", "1/2", "3/4"):
+        return s
+    try:
+        n = int(float(s))
+    except ValueError:
+        return ""
+    return str(n) if 0 <= n <= 30 else ""
+
+
 def clean_npc(d):
     """Normalise an arbitrary DM-supplied blob into a full, bounded NPC block."""
     d = d if isinstance(d, dict) else {}
@@ -172,6 +187,7 @@ def clean_npc(d):
         "climb": speeds["climb"],
         "speeds": speeds,
         "darkvision_ft": _clamp(d.get("darkvision_ft", 0), 0, 999, 0),
+        "cr": _clean_cr(d.get("cr")),
         "attacks": clean_attacks(d.get("attacks", [])),
         "spells": gear.clean_spells(d.get("spells", [])),
         "spell_slots": gear.clean_slots(d.get("spell_slots", {})),

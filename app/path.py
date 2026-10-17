@@ -181,11 +181,12 @@ def find_path(mp, start, goal, max_steps=400, blocked_edges=None,
     return path if len(path) <= max_steps else None
 
 
-def path_footprint_cost(mp, start, path, footprint=1, mode="walk"):
+def path_footprint_cost(mp, start, path, footprint=1, mode="walk", strained=False):
     """Movement-cost units over an executed route — canonical 5e rule, see
     app/movecost.py (SSOT): orthogonal 1, difficult 2, diagonals 1, 2, 1, 2...
     D83 mode="fly" costs no terrain (see movecost.route_cost)."""
-    return movecost.route_cost(mp, [start] + list(path), footprint, mode=mode)
+    return movecost.route_cost(mp, [start] + list(path), footprint, mode=mode,
+                               strained=strained)
 
 
 def find_path_3d(start, goal, maps, levels, side, mode="fly",

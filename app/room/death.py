@@ -9,9 +9,11 @@ lives on the **token** (``tokens.death``), because it is a play-time combat cond
 not part of the character library.
 NPC/monster tokens never enter it: they just sit at 0 HP.
 """
+from .. import conditions as CND
 from .. import gear, db
-from . import authz
+from . import authz, combat as CMB
 from .dice import dice_post, do_roll
+from .grapple import _adjacent
 from .net import broadcast, send_to, sys_msg
 
 
@@ -98,6 +100,82 @@ async def handle_death_save(ws, room_id, user, is_dm, msg):
     elif death["stable"]:
         sys_msg(room_id, f"{ch['name']} is stable.")
     await broadcast(room_id, "death", {"token_id": tok["id"], "death": death})
+
+
+async def handle_stabilize(ws, room_id, user, is_dm, msg):
+    """D136 (AP-022, audit F8): 2024 Help-to-Stabilize is a DC 10 Wisdom
+    (Medicine) CHECK, not an automatic pass. It costs the actor's Action in
+    combat (incapacitation gates apply, D134), needs adjacency and touches
+    no death-save counters on failure. Natural 20 on the check: the patient
+    regains 1 HP."""
+    tok = _pc(room_id, user, is_dm, msg)
+    if tok is False:
+        await send_to(ws, "error", {"msg": "Not your character"})
+        return
+    tgt = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("target_token_id", -1), room_id))
+    if tgt is None or tgt["character_id"] is None:
+        await send_to(ws, "error", {"msg": "No patient token in this room"})
+        return
+    if tok is not None and tgt["id"] == tok["id"]:
+        await send_to(ws, "error", {"msg": "You can't stabilize yourself"})
+        return
+    death = load(tgt)
+    if death is None or death["stable"] or death["dead"]:
+        await send_to(ws, "error", {"msg": "That creature does not need stabilizing"})
+        return
+    if tok is not None and CND.hook_bool(CND.load(tok), room_id, "no_actions"):
+        await send_to(ws, "error", {"msg": "You can't take actions right now"})
+        return
+    if not is_dm:
+        if tok is None:
+            await send_to(ws, "error", {"msg": "Pick your token (token_id)"})
+            return
+        if not _adjacent(room_id, tok, tgt):
+            await send_to(ws, "error", {"msg": "Stabilizing needs you next to the patient"})
+            return
+        init = CMB.get_init(room_id)
+        if init.get("combat"):
+            listed = any(o.get("token_id") == tok["id"] for o in init.get("order", []))
+            if listed:
+                turn = init.get("turn") or {}
+                if turn.get("token_id") != tok["id"]:
+                    await send_to(ws, "error", {"msg": "It is not your turn"})
+                    return
+                if turn.get("action") == "used":
+                    await send_to(ws, "error", {"msg": "No action left this turn"})
+                    return
+                turn["action"] = "used"
+                CMB.set_init(room_id, init)
+    ch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?",
+                             (tok["character_id"] if tok else tgt["character_id"],)))
+    bonus, _ = gear.skill_bonus(ch, db.j(ch["skills"], {}) or {}, "medicine")
+    res = do_roll("1d20", msg.get("adv"))
+    nat, total = res["kept"], res["kept"] + bonus
+    pch = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?",
+                              (tgt["character_id"],)))
+    if nat == 20:
+        with db.tx() as c:
+            c.execute("UPDATE characters SET hp=1 WHERE id=?", (tgt["character_id"],))
+            c.execute("UPDATE tokens SET death=NULL WHERE id=?", (tgt["id"],))
+        await dice_post(room_id, user, f"🩺 {ch['name']} → {pch['name']}: "
+                        f"d20({nat}) {bonus:+d} = {total} — natural 20, regains 1 HP",
+                        total, visibility=msg.get("visibility"), is_dm=is_dm)
+        await broadcast(room_id, "death", {"token_id": tgt["id"], "death": None})
+    elif total >= 10:
+        death["stable"] = True
+        db.x("UPDATE tokens SET death=? WHERE id=?", (db.json_dumps(death), tgt["id"]))
+        await dice_post(room_id, user, f"🩺 {ch['name']} → {pch['name']}: "
+                        f"d20({nat}) {bonus:+d} = {total} (DC 10) — stable",
+                        total, visibility=msg.get("visibility"), is_dm=is_dm)
+        sys_msg(room_id, f"{pch['name']} is stable.")
+        await broadcast(room_id, "death", {"token_id": tgt["id"], "death": death})
+    else:
+        await dice_post(room_id, user, f"🩺 {ch['name']} → {pch['name']}: "
+                        f"d20({nat}) {bonus:+d} = {total} (DC 10) — the patient "
+                        "stays dying", total, visibility=msg.get("visibility"),
+                        is_dm=is_dm)
+    await broadcast(room_id, "snapshot", None)
 
 
 async def handle_death_clear(ws, room_id, user, is_dm, msg):

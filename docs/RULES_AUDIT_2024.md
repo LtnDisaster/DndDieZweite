@@ -45,7 +45,7 @@ Prioritäten: **R-P0** Regel-Identität, **R-P1** spürbare Lücke, **R-P2** Kom
 | A2 | Expertise additiv — `gear.py:591–616` | „your Proficiency Bonus is **doubled**" | `[2024]` ✓ (Fixwert ×2) | — |
 | A3 | Finesse-Wahl — `gear.py:357` | identische Regel | `[2024]` ✓ | — |
 | A4 | Krit = Würfel verdoppeln — `room/dice.py:127` | „Roll all of the attack's damage dice twice" | `[2024]` ✓ | — |
-| A5 | Cover manuell +2/+5/total — `room/dice.py:408` | Half +2, Three-Quarter +5, Total (nicht anvisierbar) | `[2024]` ✓ (3/4-Deckung fehlt als Auswahl) | R-P2 |
+| A5 | Cover half +2 / 3/4 +5 / total = Zielverweigerung — auf ALLEN Angriffspfaden inkl. Spell-Attack (D137), Total vor Slot-/Action-Verbrauch | Half +2, Three-Quarter +5, Total (nicht anvisierbar) | ✓ | — |
 | A6 | Advantage/Disadvantage nur manuell; Conditions sind Meta | Bedingungen 2024 erzwingen Modi automatisch | `[HR]` (DM-Hoheit, bewusst) | R-P2 |
 | A7 | Passive Perception nirgends | **in 2024 entfallen** — Nichtvorhandensein ist konform; Taschendiebstahl-„bemerkt" (D112) löst ohne passive Wahrnehmung: feste `notice_dc` ODER echter Wahrnehmungs-Wurf | `[2024]` ✓ | — |
 | A8 | AC ungerüstet = manueller Sheet-Wert `ac` — `gear.py:472` | Basis-AC-Berechnung „10 plus your Dexterity modifier" | `[HR]` (nichts wird abgeleitet; Sheet bleibt Autorität) | R-P2 |
@@ -60,8 +60,8 @@ Prioritäten: **R-P0** Regel-Identität, **R-P1** spürbare Lücke, **R-P2** Kom
 | B2 | **Background-ASI + Origin Feat: serverseitig implementiert** — `charbuild.apply_origin`, Spalten `backgrounds.asi_abilities/origin_feat`, `feats.category` | „Increase one by 2 and another one by 1, or increase all three by 1. None of these increases can raise a score above 20." + „A background gives your character a specified Origin feat." | **`[2024]` ✓ (D108)** | — |
 | B3 | ASI-Kadenz je Klassenlevel-Zeile datengetrieben (`classes.csv`, `charbuild`) | ASI ist Level-4+-Feat (General, repeatable) — Kadenz je Klasse | Schema `[2024]` ✓ | — |
 | B4 | `feats.category` registriert (origin/general/fighting_style/epic_boon); `ability_boost` bleibt erlaubt | Kategorien ✓; General-Feats dürfen Werte bis max 20 erhöhen | Schema `[2024]` ✓ | — |
-| B5 | Origin-Feat-Wahl-Ablauf (eigenes Feat statt Background-Feat) fehlt; Human-Bonus-Feat (`Versatile`) nicht abbildbar | Species-Traits können zusätzliche Origin Feats gewähren | `[lück]` | R-P1 |
-| B6 | Requires-Freitext („5 ranks") | Prerequisites sind Attributs-Mindestwerte | `[HR]`/`[Anz.]` | R-P2 |
+| B5 | Origin-Ablauf D108 server-autorisiert; species.csv-Feld `origin_feat` (Schema+Projektion) mit Konsument in der Feat-Auswahl: zählt als genommen, stillt Prereq-Ketten; „no feat twice" gilt jetzt überall (D139) | Species-Traits können zusätzliche Origin Feats gewähren | ✓ | — |
+| B6 | `feats.csv:requires` ist maschinell geparst (Attributs-Mindestwert/Skill/Feat, fail-closed, `_parse_feat_requires`); Content enthält kein „ranks" mehr | Prerequisites sind Attributs-Mindestwerte | ✓ | — |
 
 ### C · Klassen & Zauberlisten
 
@@ -69,7 +69,7 @@ Prioritäten: **R-P0** Regel-Identität, **R-P1** spürbare Lücke, **R-P2** Kom
 |---|---|---|---|
 | C1 | Cantrip-Skalung 5/11/17 nach Charakterstufe (`abilities.py`, `scale_tiers`) | „Cantrip Upgrade … levels 5/11/17" | `[2024]` ✓ |
 | C2 | Slot-/Known-/Resource-Zahlen reine Klassendaten | gleiche Tabellenform | `[2024]`-tauglich |
-| C3 | Prepare nur Flag, kein Ablauf | Prepare-Regeln je Klasse | `[Anz.]` | R-P2 |
+| C3 | `prep`/`prepared`-Feldpaar; gated Liste verweigert Unvorbereitetes (ab Grad 1) vor jedem Verbrauch; Kantrips frei (D138) | Prepare-Regeln je Klasse | ✓ (datengetrieben) | — |
 | C4 | Mehrklasse über kumulierte Caster-Level (Ledger D96) | Multiclass-Tabellen | `[2024]`-tauglich |
 
 ### D · Zaubermechanik
@@ -83,8 +83,8 @@ Prioritäten: **R-P0** Regel-Identität, **R-P1** spürbare Lücke, **R-P2** Kom
 
 | # | Befund (Beleg) | SRD 5.2.1 | Einstufung | Prio |
 |---|---|---|---|---|
-| E1 | Property-Untermenge (`finesse/two_handed/versatile/reach/…`) — `gear.py:44,331–378` | Properties: Ammunition, Finesse, Heavy, Light, Loading, Range, Reach, Thrown, Two-Handed, Versatile; **davon getrennt** Masteries (nur mit Weapon-Mastery-Feature): Cleave, Graze, Nick, Push, Sap, Slow, Topple, Vex | Properties teilweise `[2024]`; **Masteries komplett `[lück]`** (Daten + Engine) | **R-P0** |
-| E2 | Nebenhand-Angriff (Light-Bonusaktion) kein Serverablauf | Light-Property erlaubt Bonusangriff (s. Property-Text) | `[lück]` | R-P1 |
+| E1 | Properties in `gear.py` (2024-Satz); Masteries Cleave/Graze/Nick/Push/Sap/Slow/Topple/Vex vollständig in Daten + Engine (D109/D110, nur mit Mastery-Feature) | Properties + Masteries wie gelistet | `[2024]` ✓ | — |
+| E2 | 2024 kennt keinen Nebenhand-Bonusangriff mehr — die Light-Regel lebt als **Nick-Mastery** (beide Hände Light, eigener Turn, Bonus-Slot; D109, `dice.py:544-559`) | Light-Property erlaubt Bonusangriff (s. Property-Text) | ✓ (Nick ist die 2024-Form) | — |
 | E3 | Bonus-/Extra-Schadenwürfel Items | Items tragen Boni | `[2024]` ✓ | — |
 | E4 | Attunement/charges/recharge (`items.csv`) | gleiches Grundmodell; Gate D105 | `[HR]` Gate bewusst | — |
 
@@ -93,13 +93,13 @@ Prioritäten: **R-P0** Regel-Identität, **R-P1** spürbare Lücke, **R-P2** Kom
 | # | Befund (Beleg) | SRD 5.2.1 | Einstufung | Prio |
 |---|---|---|---|---|
 | F1 | Death-Save-Pipeline: 10+, 3✓ Stable/3✗ tot, Nat1 zwei ✗, Nat20 1 HP, Schaden bei 0 = ✗ (Crit zwei ✗, Max-Schaden tot) — `room/death.py` | **wortgleich** (Death Saving Throws) | `[2024]` ✓ — war in D107 fälschlich Hausregel | — |
-| F2 | Short Rest: HD freiwillig, cap halbes Level? — `room/dice.py:767` (D35) | „spend one or more … additional Hit Point Die after each roll" **ohne Obergrenze** | `[2014]` falls Cap greift, sonst ✓ | R-P2 |
-| F3 | Long Rest: HP/Slots/HD-Reset; optional Conditions-Reset | „regain all lost HP and all spent HD"; Exhaustion −1; 16-h-Gate; Interruptions | ✓ Kern; Exhaustion-Kopplung + 16-h-Gate fehlen | R-P2 |
-| F4 | Exhaustion 0–6 Counter, keine Stufeneffekte — `status.py:71` | Stufeneffekte: −2/−5ft je Level, Tod bei 6 | `[Anz.]` | R-P2 |
-| F5 | 15 Zustände + `concentrating`; **`incapacitated` fehlt** — `conditions.py:20` | 15 Conditions inkl. eigenem **Incapacitated** | `[2014]`-Liste | R-P2 |
-| F6 | Inspiration Boolean — `status.py:45` | Heroic Inspiration: verbraubarer Reroll; Doppelgewinn → weitergeben | `[Anz.]` | R-P2 |
+| F2 | Short Rest: HD-Pool = Level (1–20), **kein** Halb-Level-Cap pro Rast — `gear.hit_dice_max` (verifiziert D138) | „spend one or more … additional Hit Point Die after each roll" **ohne Obergrenze** | ✓ | — |
+| F3 | Long Rest: HP/Slots/HD-Reset; optional Conditions-Reset | „regain all lost HP and all spent HD"; Exhaustion −1; 16-h-Gate; Interruptions | ✓ Kern; Exhaustion −1 je Long Rest (D129); 16-h-Gate weiterhin offen | R-P2 |
+| F4 | Exhaustion 0–6 Counter mit Stufeneffekten: −2 auf alle W20-Würfe, −5 ft walk, Tod bei 6, Long Rest −1 — `gear.exhaustion_roll_mod` (D129) | Stufeneffekte umgesetzt; 16-h-Gate siehe F3 | ✓ | — |
+| F5 | 15 Zustände + `concentrating` inkl. eigenem **Incapacitated** (D110); Wirkung D134: Hook `no_actions` auf Angriffs-/Wirk-/Escape-/Dash-Pfaden validiert, Bewegung bleibt frei, Auto-Fail nur bei der Familie; Grapple-Ende prüft `no_actions` des Greifers | 15 Conditions inkl. eigenem **Incapacitated** | ✓ | — |
+| F6 | Inspiration: `adv:"insp"` verbraucht das Marker auf Angriff/Check/Save/Skill (Faltung auf Advantage, dokumentiert); `gain` bei voll = Weitergabe oder nichts | Heroic Inspiration: verbraubarer Reroll; Doppelgewinn → weitergeben | ✓ | — |
 | F7 | Grapple/Shove/Escape umgesetzt (D112, `app/room/grapple.py`) — 2024-Weg: Angriffs-Wert (max unbewaffnet/Athletik) als DC, Ziel **rettet** Str/Geschick (höhere, DM-override), kein 2014-Athletik-Wettkampf; Ende bei Reichweitenverlust/Grappler-weg | Grappling/Shoving (SRD 5.2.1: check→save) | `[2024]` ✓ | — |
-| F8 | Help zum Stabilisieren (DC 10 Medicine) nicht automatisiert | existiert als Standard-Regel | `[lück]` | R-P2 |
+| F8 | `stabilize`: DC-10-Medicine-Check mit Action, Adjazenz, no_actions-Gate; nat 20 heilt, Fehler ohne Zähler | existiert als Standard-Regel | ✓ | — |
 
 ---
 
@@ -144,12 +144,12 @@ registriert via `content.SCHEMAS`.
 **R-P0:** Weapon Mastery als Datenfeld + Engine-Auswertung (E1); ASI-Feat-Inhalt
 der Level-Up-Ebene (ASI-Feat-Splits nach SRD) — Kadenz selbst ist bereits
 datengetrieben ✓.
-**R-P1:** Concentration-Save (DC max(10, halber Schaden), Cap 30) (D1); Light-
-Bonusangriff (E2); Origin-Feat-Wahlablauf + Species-Bonus-Feats (B5).
-**R-P2:** `incapacitated`-Condition (F5); Exhaustion-Effekte (F4); Short-Rest-
-HD-Cap prüfen (F2); Long-Rest 16-h-Gate/Exhaustion (F3); 3/4-Cover (A5);
-Stabilize-Help (F8); Inspiration-Punkte-Semantik (F6); Prepare-
-Ablauf (C3); Requires-Terminologie (B6); Auto-Modi-Diskussion (A6, bewusst HR).
+**R-P1:** Concentration-Save ist D113 erledigt; Light-Bonusangriff ist D109
+(Nick) erledigt; B5: Origin-Feat-Ablauf ist D108 server-autorisiert; in
+SRD 5.2.1 gibt es KEINE Species-Bonus-Feats (artenlose Korrektur, D139).
+**R-P2:** Long-Rest 16-h-Gate (F3; bewusst offen, Doku;
+Exhaustion → D129);
+Auto-Modi-Diskussion (A6, bewusst HR). B6 ✓ verifiziert (D139). F2 verifiziert ✓ (D138).
 *(Grapple/Shove/Escape und Taschendiebstahl F7 wurden in D112 erledigt, 2024-
 korrekt — siehe §9.)*
 

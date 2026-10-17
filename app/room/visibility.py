@@ -337,6 +337,8 @@ async def send_token_event(room_id, token, kind="token_add", extra=None):
                            and i in seen_cache[key] for (x, y) in obs):
                         visible = True
                         break
+        if uid not in _last_seen.get(room_id, {}):
+            hydrate_ghosts(room_id, uid)      # D141: refill after a restart
         vls = _last_seen.setdefault(room_id, {}).setdefault(uid, {})
         first_time = token["id"] not in vls
         if visible:
@@ -418,11 +420,37 @@ async def forget_token(room_id, token_id, token=None):
     await broadcast(room_id, "token_gone", {"token_id": token_id})
 
 
+def hydrate_ghosts(room_id, user_id):
+    """D141 (TODO P2): a viewer's fog memory survives a server restart —
+    it was written to room_state.ghosts_json when their last socket closed
+    and comes back with their first sighted frame in this room."""
+    room = _last_seen.setdefault(room_id, {})
+    if user_id in room:
+        return
+    row = db.q1("SELECT ghosts_json FROM room_state WHERE room_id=?", (room_id,))
+    blob = db.j((row or {}).get("ghosts_json"), {}) or {}
+    room[user_id] = {int(k): v for k, v in (blob.get(str(user_id)) or {}).items()}
+
+
+def persist_ghosts(room_id, user_id, snaps):
+    row = db.q1("SELECT ghosts_json FROM room_state WHERE room_id=?", (room_id,))
+    blob = db.j((row or {}).get("ghosts_json"), {}) or {}
+    if snaps:
+        blob[str(user_id)] = snaps
+    else:
+        blob.pop(str(user_id), None)
+    db.x("UPDATE room_state SET ghosts_json=? WHERE room_id=?",
+         (db.json_dumps(blob), room_id))
+
+
 def prune_viewer_last_seen(room_id, user_id):
     """Drop a viewer's ghost memory when their last socket closes, so _last_seen
-    doesn't grow without bound across a long-lived server."""
+    doesn't grow without bound across a long-lived server. D141: what is
+    dropped goes to the DB first, not into the void."""
     room = _last_seen.get(room_id)
     if room is not None:
-        room.pop(user_id, None)
+        mine = room.pop(user_id, None)
         if not room:
             _last_seen.pop(room_id, None)
+        if mine:
+            persist_ghosts(room_id, user_id, mine)

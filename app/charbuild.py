@@ -79,6 +79,13 @@ def _species_projection(char, room_id):
         "climb_ft": _int(row.get("climb_ft")), "darkvision_ft": _int(row.get("darkvision_ft")),
         "languages": _split_raw(row.get("languages")),
         "traits": _split_raw(row.get("traits")),
+        # D139 (audit B5): species that grant an extra Origin Feat name it
+        # here; the feat-choice flow treats it as ALREADY TAKEN (SRD: no
+        # feat twice) and prerequisite chains count it as applied.
+        "origin_feat": str(row.get("origin_feat") or "").strip().lower(),
+        # D145: the row's ability increases (e.g. 'dex+2'); apply_species_
+        # bonus is the ONLY writer that moves them onto the sheet.
+        "ability_bonuses": str(row.get("ability_bonuses") or "").strip().lower(),
     }
 
 
@@ -171,9 +178,13 @@ def _feat_prereq_errors(row, stats, skills, feats_applied):
 def _feat_choice_options(room_id, stats, skills, feats_applied):
     rows = _feat_rows(room_id)
     out = []
+    taken = {str(f.get("id") or "").strip().lower() for f in feats_applied}
+    taken |= {str(f.get("name") or "").strip().lower() for f in feats_applied}
     for feat_id in sorted(rows):
         row = rows[feat_id]
         missing = _feat_prereq_errors(row, stats, skills, feats_applied)
+        if feat_id in taken or str(row.get("name") or "").strip().lower() in taken:
+            missing = missing + ["already chosen"]      # D139: no feat twice
         out.append({"id": feat_id, "name": row.get("name") or feat_id,
                     "category": str(row.get("category") or "general"),
                     "requires": str(row.get("requires") or ""),
@@ -388,6 +399,9 @@ def plan_for_character(char_id, class_id, to, room_id=0):
     stats = {str(k).lower(): (_int(raw_stats.get(k, 10)) or 10) for k in raw_stats}
     skills = gear.clean_skills(_as_dict(ch.get("skills")))
     feats_applied = [{"id": fid} for fid in _ledger_feat_ids(ledger(ch))]
+    sp = _species_projection(ch, room_id)
+    if sp and sp.get("origin_feat"):
+        feats_applied = [{"id": sp["origin_feat"]}] + feats_applied   # D139
     for lvl, spec in (p.get("needs") or {}).get("levels", {}).items():
         if spec.get("feat_choice") or spec.get("ability_boost_or_feat"):
             spec["feat_options"] = _feat_choice_options(room_id, stats, skills, feats_applied)
@@ -640,6 +654,7 @@ def _apply_origin_locked(c, char_id, background, asi, room_id):
         led["class_proficiencies"] = payload["class_proficiencies"]
     else:
         stats = dict(led["base_stats"])
+        _replay_species(led, stats)
         skills = dict(gear.clean_skills(_as_dict(ch.get("skills"))))
         ok, note = _replay_origin(led["origin"], room_id, stats, skills, feats_applied)
         if not ok:
@@ -657,6 +672,96 @@ def _apply_origin_locked(c, char_id, background, asi, room_id):
                   "stats": stats,
                   "skills": sorted(k for k, v in skills.items() if v)}
 
+
+
+def species_bonus_options(char, room_id=0):
+    """D145: the species ability-bonus REPORT (report-then-grant pattern).
+    Read-only — the numbers come from the room's species row, never from a
+    client. `result` previews the post-grant scores the way _bump will apply
+    them (1..30 clamped); `errors` lists everything apply_species_bonus would
+    refuse on."""
+    led = ledger(char)
+    applied = led.get("species_bonus") if isinstance(led.get("species_bonus"), dict) else None
+    sp = _species_projection(char, room_id)
+    out = {"applied": applied, "ready": False, "species": None,
+           "species_name": None, "bonuses": [], "current": {}, "result": {},
+           "errors": []}
+    if sp is None:
+        out["errors"].append("This character's species is not in this room's rule pack")
+        return out
+    out["species"] = sp["id"]
+    out["species_name"] = sp.get("name") or sp["id"]
+    bonuses = _parse_bonuses(sp.get("ability_bonuses"))
+    if not bonuses:
+        out["errors"].append("This species grants no ability bonuses")
+        return out
+    stats = _as_dict(char.get("stats"))
+    for ab, delta in bonuses:
+        out["bonuses"].append({"ability": ab, "delta": delta})
+        cur = _int(stats.get(ab, 10)) or 10
+        out["current"][ab] = cur
+        out["result"][ab] = max(1, min(30, cur + delta))
+    out["errors"] = [] if applied else out["errors"]
+    out["ready"] = applied is None and not out["errors"]
+    return out
+
+
+def apply_species_bonus(char_id, room_id=0):
+    """Grant the species ability bonuses EXACTLY ONCE (D145, 2024: Species
+    increases belong to character creation). The bonus is a RECORDED LEDGER
+    entry (``characters.build.species_bonus``) that the full recompute replays
+    at the front of the chronology — the same idempotency machinery D108
+    established for origins — so a later level-up or origin apply can never
+    silently drop it, and double clicks answer ``already``. The read AND the
+    write run inside ONE db.tx() (BEGIN IMMEDIATE). Existing sheets are never
+    auto-migrated; hp/AC/slots/resources are never touched."""
+    with db.tx() as c:
+        return _apply_species_bonus_locked(c, char_id, room_id)
+
+
+def _apply_species_bonus_locked(c, char_id, room_id):
+    row = c.execute("SELECT * FROM characters WHERE id=?", (int(char_id),)).fetchone()
+    ch = dict(row) if row else None
+    if ch is None:
+        return False, {"error": "unknown character"}
+    led = ledger(ch)
+    done = led.get("species_bonus")
+    if isinstance(done, dict) and done:
+        return True, {"already": True, "species_bonus": done}
+    sp = _species_projection(ch, room_id)
+    if sp is None:
+        return False, {"error": "This character's species is not in this room's rule pack"}
+    bonuses = _parse_bonuses(sp.get("ability_bonuses"))
+    if not bonuses:
+        return False, {"error": "This species grants no ability bonuses"}
+    if not isinstance(led.get("base_stats"), dict) or not led.get("base_stats"):
+        led["base_stats"] = dict(_as_dict(ch.get("stats")))
+    led["species_bonus"] = {"species": sp["id"], "bonuses": sp["ability_bonuses"],
+                            "as": [{"ability": ab, "delta": d} for ab, d in bonuses]}
+    built = str(led.get("class_id") or "")
+    applied_through = int(led.get("applied_through") or 0)
+    if built and applied_through > 0:
+        p = plan(built, applied_through, room_id)
+        if not p["ok"]:
+            return False, {"error": "; ".join(p["errors"]) or "cannot replay build"}
+        ok, payload = _recompute(ch, led, built, applied_through, p,
+                                 dict(_decisions(led)), room_id)
+        if not ok:
+            return False, payload
+        stats, skills = payload["stats"], payload["skills"]
+        led["class_proficiencies"] = payload["class_proficiencies"]
+    else:
+        stats = dict(led["base_stats"])
+        _replay_species(led, stats)
+        skills = dict(gear.clean_skills(_as_dict(ch.get("skills"))))
+        if isinstance(led.get("origin"), dict) and led.get("origin"):
+            ok, note = _replay_origin(led["origin"], room_id, stats, skills, [])
+            if not ok:
+                return False, {"error": note}
+    c.execute("UPDATE characters SET stats=?, skills=?, build=? WHERE id=?",
+              (db.json_dumps(stats), db.json_dumps(skills), db.json_dumps(led), ch["id"]))
+    return True, {"species_bonus": led["species_bonus"], "stats": stats,
+                  "species": sp["id"], "species_name": sp.get("name") or sp["id"]}
 
 
 # --------------------------------------------------------------------------
@@ -677,6 +782,7 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
     if not isinstance(base_stats, dict) or not base_stats:
         base_stats = _as_dict(ch.get("stats"))
     stats = dict(base_stats)
+    _replay_species(led, stats)
     skills = dict(gear.clean_skills(_as_dict(ch.get("skills"))))
     saves = dict(gear.clean_saves(_as_dict(ch.get("saves"))))
 
@@ -792,6 +898,20 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
                   "casting": casting,
                   "class_proficiencies": _class_proficiencies(rows, to),
                   "species": _species_projection(ch, room_id)}
+
+
+def _replay_species(led, stats):
+    """D145: a RECORDED species bonus replays at the very front of the
+    chronology (2024: species increases precede origin, class and ASI), from
+    the string the projection normalised at grant time. An edited pack whose
+    species row vanished simply keeps the recorded numbers — the grant was
+    validated against the room's content when it happened, and unlike origin
+    there is no skill/feat tail that could half-apply."""
+    sb = led.get("species_bonus") if isinstance(led.get("species_bonus"), dict) else None
+    if not sb:
+        return
+    for ab, delta in _parse_bonuses(sb.get("bonuses")):
+        _bump(stats, ab, delta)
 
 
 def _replay_origin(origin, room_id, stats, skills, feats_applied):
@@ -984,7 +1104,10 @@ def _spell_display(known, by_id):
                     "dmg": r.get("damage_dice") or r.get("heal_dice") or "",
                     "save": r.get("save") or "", "range": rng,
                     "targeting": r.get("targeting") or "single",
-                    "duration": r.get("duration") or ""})
+                    "duration": r.get("duration") or "",
+                    "casting_time": r.get("casting_time") or "",
+                    "prep": _int(r.get("prep")) > 0,
+                    "prepared": _int(r.get("prepared")) > 0})
     return out
 
 

@@ -10,7 +10,7 @@ from .combat import (handle_dash, handle_end_turn, handle_hp, handle_init_end,
                      handle_turn_mark)
 from .conditions import (handle_cond_add, handle_cond_remove,
                             handle_knock_prone, handle_stand)
-from .death import handle_death_clear, handle_death_save
+from .death import handle_death_clear, handle_death_save, handle_stabilize
 from .doors import handle_door
 from .encounters import handle_spawn_encounter
 from .grapple import handle_escape, handle_grapple, handle_shove
@@ -104,6 +104,7 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
             prev = old_loot.get(loot.get("id"))
             if prev is not None:
                 loot["taken_by"] = prev.get("taken_by")
+                loot["hinted"] = bool(prev.get("hinted"))   # D133 runtime marker
         # D82: object runtime state (the generic boolean carrier) is authoritative
         # world state — a stale editor snapshot must not reset it (trap precedent).
         old_objs = {e.get("id"): e for e in old.get("objects", [])}
@@ -168,6 +169,7 @@ HANDLERS = {
     "aoe": handle_aoe,
     "death_save": handle_death_save,
     "death_clear": handle_death_clear,
+    "stabilize": handle_stabilize,          # D136: Help-to-stabilize check
     "init_start": handle_init_start,
     "init_next": handle_init_next,
     "init_end_round": handle_init_end_round,

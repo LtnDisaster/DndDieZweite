@@ -231,6 +231,11 @@ def clean_items(items, keep_curse=False):
             weight = max(0.0, min(9999.0, round(float(weight), 1)))
         except (TypeError, ValueError):
             weight = 0.0
+        val = it.get("value", 0)
+        try:
+            val = max(0.0, min(999999.0, round(float(val), 2)))
+        except (TypeError, ValueError):
+            val = 0.0
         try:
             qty = max(1, min(9999, int(it.get("qty", 1))))
         except (TypeError, ValueError):
@@ -256,6 +261,7 @@ def clean_items(items, keep_curse=False):
             # IS a one-item stack; behaviour byte-identical for old rows.
             "qty": qty,
             "weight": weight,
+            "value": val,
             "stackable": bool(it.get("stackable")),
             "def_id": str(it.get("def_id", ""))[:24],
             "grip": "two" if str(it.get("grip", "")).lower() in ("two", "2h", "two-handed") else "one",
@@ -692,6 +698,37 @@ def _stat_mod(char, ability):
     return (score - 10) // 2
 
 
+def exhaustion_level(char):
+    lvl = int((char or {}).get("exhaustion") or 0)
+    return max(0, min(6, lvl))
+
+
+def exhaustion_roll_mod(char):
+    lvl = exhaustion_level(char)
+    return -2 * lvl
+
+
+def exhaustion_speed_penalty_ft(char):
+    lvl = exhaustion_level(char)
+    return -5 * lvl
+
+
+def casting_slot(casting_time):
+    """D131 (AP-017): map a spell's CASTING TIME text onto the turn slot the
+    cast spends in an active initiative. 'bonus' and 'reaction' win over the
+    plain word 'action'; minute/hour/ritual cast times are OUT of turn tempo
+    (None = no slot is spent, casting outside combat stays free anyway).
+    Anything else — including empty, the SRD default — is 'action'."""
+    t = str(casting_time or "").strip().lower()
+    if "bonus" in t:
+        return "bonus"
+    if "reaction" in t:
+        return "reaction"
+    if "minute" in t or "hour" in t or "ritual" in t:
+        return None
+    return "action"
+
+
 def stat_mod(char, ability):
     """THE canonical ability-score modifier: floor((score-10)/2) (D56).
     Anything that needs a modifier calls this — no re-derived copies."""
@@ -944,7 +981,12 @@ def clean_spells(spells):
             "school": str(s.get("school", ""))[:24], "cast": cast, "ability": ability,
             "dmg": dmg, "save": save,
             "range": str(s.get("range", ""))[:24], "duration": str(s.get("duration", ""))[:24],
+            "casting_time": str(s.get("casting_time", ""))[:24],
             "targeting": str(s.get("targeting", "single")).strip().lower()[:12] or "single",
+            # D138 (audit C3): data-driven preparation. A list containing any
+            # spell with prep=true is PREP-GATED; only prepared entries above
+            # level 0 may be cast. No class names, no hardcoding.
+            "prep": bool(s.get("prep")), "prepared": bool(s.get("prepared")),
         })
     seen = set()
     for it in out:

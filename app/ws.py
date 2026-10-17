@@ -15,7 +15,7 @@ from .room.movement import _walks
 from .room.net import (_clients, attach_ws, broadcast, clients, detach_ws,
                        fog_patch, get_map, notify, send_to,
                        send_to_plane_viewed, set_map, sys_msg)
-from .room.visibility import (_last_seen, prune_viewer_last_seen, token_cell,
+from .room.visibility import (_last_seen, hydrate_ghosts, prune_viewer_last_seen, token_cell,
                               viewer_source_cells, viewer_visible_cells)
 
 log = logging.getLogger("vtt.ws")

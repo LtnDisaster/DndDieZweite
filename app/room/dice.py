@@ -103,14 +103,34 @@ SKILL_KINDS = ("check", "save", "attack", "damage", "skill",
                "spell_attack", "spell_damage", "spell_dc")
 
 
-def _spell_attack_text(ch, sp, adv):
-    atk = gear.spell_attack(ch, sp["ability"])
+def _spell_cover(msg):
+    """D137 (audit A5): cover is a property of the TARGET and rides EVERY
+    attack roll — item attacks had it, spell attacks are closing up."""
+    cover = str(msg.get("cover") or "").lower()
+    if cover == "total":
+        return None                                   # caller refuses targeting
+    return cover
+
+
+async def _total_cover_note(room_id, user, is_dm, vis, ch):
+    await dice_post(room_id, user, f"🛡 {ch['name']} — target is behind total "
+                    "cover and can't be targeted.", None, visibility=vis, is_dm=is_dm,
+                    meta={"mode": "total-cover"})
+
+
+def _spell_attack_text(ch, sp, adv, cover=""):
+    # AP-015: exhaustion rides spell attack rolls too (Attack Rolls, audit F4).
+    atk = gear.spell_attack(ch, sp["ability"]) + gear.exhaustion_roll_mod(ch)
+    cover_mod = _cover_bonus(cover)
     res = do_roll("1d20", adv)
     nat = res["kept"]
     advtxt = {"adv": " adv", "dis": " dis"}.get(res["adv"] or "", "")
-    text = (f"✨ {ch['name']} — {sp['name']} attack{advtxt}: d20({nat}) {atk:+d} = {nat + atk}"
+    covtxt = {"half": " vs half cover", "three_quarters": " vs 3/4 cover"}.get(cover, "")
+    text = (f"✨ {ch['name']} — {sp['name']} attack{advtxt}{covtxt}: "
+            f"d20({nat}) {atk:+d}" + (f" {-cover_mod:+d} cover" if cover_mod else "")
+            + f" = {nat + atk - cover_mod}"
             + (" — CRITICAL!" if nat == 20 else ""))
-    return text, nat + atk
+    return text, nat + atk - cover_mod
 
 
 def _spell_dc_text(ch, sp):
@@ -125,6 +145,7 @@ def _spell_damage_text(ch, sp, crit):
         return None
     n, sides, mod = parsed
     n = min(200, n * 2) if crit else n
+    mod += gear.exhaustion_roll_mod(ch)              # AP-015 (audit F4: Damage Rolls)
     rolls = [random.randint(1, sides) for _ in range(n)]
     total = sum(rolls) + mod
     text = (f"💥 {ch['name']} — {sp['name']} damage{' (crit!)' if crit else ''}: "
@@ -184,8 +205,12 @@ async def _npc_roll(ws, room_id, user, tok, block, kind, msg):
             await send_to(ws, "error", {"msg": "Spell not found on this NPC"})
             return
         if kind == "spell_attack":
+            cover = _spell_cover(msg)
+            if cover is None:
+                await _total_cover_note(room_id, user, is_dm, msg.get("visibility"), nchar)
+                return
             adv = await _consume_markers(room_id, tok, adv, None)   # D109 markers
-            out = _spell_attack_text(nchar, sp, adv)
+            out = _spell_attack_text(nchar, sp, adv, cover)
         elif kind == "spell_dc":
             out = _spell_dc_text(nchar, sp)
         else:
@@ -204,6 +229,10 @@ async def _npc_cast(ws, room_id, user, tok, block, msg):
     if sp is None:
         await send_to(ws, "error", {"msg": "Spell not found on this NPC"})
         return
+    if sp["cast"] == "attack" and _spell_cover(msg) is None:
+        # D137: total cover refuses the target BEFORE any slot is touched.
+        await _total_cover_note(room_id, user, is_dm, msg.get("visibility"), nchar)
+        return
     lvl = int(sp.get("level", 0))
     if lvl > 0:
         slots = gear.clean_slots(block.get("spell_slots", {}))
@@ -218,7 +247,8 @@ async def _npc_cast(ws, room_id, user, tok, block, msg):
     crit = bool(msg.get("crit"))
     posts = []
     if sp["cast"] == "attack":
-        posts.append(_spell_attack_text(nchar, sp, msg.get("adv")))
+        posts.append(_spell_attack_text(nchar, sp, msg.get("adv"),
+                                            _spell_cover(msg) or ""))
     elif sp["cast"] == "save":
         posts.append(_spell_dc_text(nchar, sp))
     if sp["dmg"]:
@@ -599,6 +629,10 @@ async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
             if turn.get("token_id") != tok["id"]:
                 await send_to(ws, "error", {"msg": "It is not your turn"})
                 return
+            if CND.hook_bool(CND.load(tok), room_id, "no_actions"):
+                # D134 (audit F5): incapacitated — no actions, no reactions.
+                await send_to(ws, "error", {"msg": "You can't take actions right now"})
+                return
             if nick_mode:
                 # SRD Nick: the extra attack of the Light property becomes
                 # PART OF the Attack action — it spends no bonus slot, needs
@@ -636,7 +670,9 @@ async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
     dtxt = f" {prof['dmg_type']}" if prof["dmg_type"] else ""
 
     def _dmg_line(crit):
-        d = _roll_dmg(prof["dmg"], prof["dmg_bonus"], crit)
+        # AP-015: the same -2/level rides the damage roll (audit F4: Damage Rolls).
+        d = _roll_dmg(prof["dmg"], prof["dmg_bonus"]
+                      + gear.exhaustion_roll_mod(fresh or ch), crit)
         if d is None:
             return None
         rolls, mod, total = d
@@ -669,15 +705,17 @@ async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
                         None, visibility=vis, is_dm=is_dm, meta={"mode": "total-cover"})
         return
     cover_mod = _cover_bonus(cover)
+    exh_mod = gear.exhaustion_roll_mod(fresh or ch)       # AP-015 (audit F4)
     res = do_roll("1d20", adv)
     nat = res["kept"]
     crit = nat == 20
-    total = nat + prof["to_hit"] - cover_mod
+    total = nat + prof["to_hit"] - cover_mod + exh_mod
     advtxt = {"adv": " adv", "dis": " dis"}.get(res["adv"] or "", "")
     covtxt = {"half": " vs half cover", "three_quarters": " vs 3/4 cover"}.get(cover, "")
+    extxt = f" {exh_mod:+d} exhaustion" if exh_mod else ""
 
     if target is None:                           # no AC claim without a target
-        text = (f"⚔️ {ch['name']} — {prof['name']} attack{advtxt}{covtxt}: d20({nat}) "
+        text = (f"⚔️ {ch['name']} — {prof['name']} attack{advtxt}{covtxt}{extxt}: d20({nat}) "
                 f"{prof['to_hit']:+d} = {total}" + (" — CRITICAL!" if crit else ""))
         await dice_post(room_id, user, text, total, visibility=vis, is_dm=is_dm,
                         meta={"mode": res["adv"] or "normal", "item": item_id})
@@ -690,7 +728,7 @@ async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
     text = (f"⚔️ {ch['name']} — {prof['name']} attack{advtxt}{covtxt} vs {alabel} "
             f"(AC {ac}): d20({nat}) {prof['to_hit']:+d}"
             + (f" {-cover_mod:+d} cover" if cover_mod else "")
-            + f" = {total} {verdict}" + (" — CRITICAL!" if crit else ""))
+            + extxt + f" = {total} {verdict}" + (" — CRITICAL!" if crit else ""))
     await dice_post(room_id, user, text, total, visibility=vis, is_dm=is_dm,
                     meta={"mode": res["adv"] or "normal", "item": item_id,
                           "hit": bool(hit), "ac": ac})
@@ -941,13 +979,42 @@ async def handle_npc_attack(ws, room_id, user, is_dm, msg):
                         f"d20({nat}) {to_hit:+d} = {total}", total)
 
 
+async def _spend_insp(ws, room_id, ch, adv):
+    """D135 (AP-021, audit F6): Heroic Inspiration rides an EXISTING d20
+    path. 'insp' spends the marker and folds into the normal advantage
+    derivation — the SRD 'choose either die' keeps high (documented
+    simplification, same class as the frightened blanket in conditions.py).
+    Only attack rolls, ability checks and saving throws reach this: the
+    blind-roll branch refuses the word before any character is loaded."""
+    if adv != "insp":
+        return True, adv
+    if ch is None or not int(bool(ch.get("inspiration"))):
+        await send_to(ws, "error", {"msg": "You have no Heroic Inspiration to spend"})
+        return False, adv
+    db.x("UPDATE characters SET inspiration=0 WHERE id=?", (ch["id"],))
+    sys_msg(room_id, f"{ch['name']} spends Heroic Inspiration.")
+    await broadcast(room_id, "snapshot", None)
+    return True, "adv"
+
+
 async def handle_roll(ws, room_id, user, is_dm, msg):
     kind = msg.get("kind")
     adv = msg.get("adv")
     vis = msg.get("visibility")
+    # D135: the marker belongs to a seated character — blind expressions
+    # cannot carry it; NPC rolls are refused inside _npc_roll.
+    if adv == "insp" and kind not in SKILL_KINDS:
+        await send_to(ws, "error", {"msg": "Heroic Inspiration spends on your own "
+                                          "attack roll, ability check or saving throw"})
+        return
     if kind in SKILL_KINDS and msg.get("token_id") is not None:
         tok, block = _npc_target(room_id, user, is_dm, msg)
         if tok is not None:
+            if adv == "insp":
+                await send_to(ws, "error", {"msg": "Heroic Inspiration spends on "
+                                                  "your own attack roll, ability "
+                                                  "check or saving throw"})
+                return
             await _npc_roll(ws, room_id, user, tok, block, kind, msg)
             return
     if kind not in SKILL_KINDS:
@@ -979,6 +1046,9 @@ async def handle_roll(ws, room_id, user, is_dm, msg):
     if ch is None:
         await send_to(ws, "error", {"msg": "Bring a character to the table first"})
         return
+    ok, adv = await _spend_insp(ws, room_id, ch, msg.get("adv"))
+    if not ok:
+        return
     stats = char_stats(ch)
 
     if kind in ("check", "save"):
@@ -1006,6 +1076,7 @@ async def handle_roll(ws, room_id, user, is_dm, msg):
         else:
             mod = gear.stat_mod(ch, ab) + (gear.prof_bonus(ch) if bool(msg.get("prof")) else 0)
             prof = bool(msg.get("prof"))
+        mod += gear.exhaustion_roll_mod(ch)          # AP-015 (audit F4)
         res = do_roll("1d20", adv)
         total = res["kept"] + mod
         word = "save" if kind == "save" else "check"
@@ -1023,6 +1094,7 @@ async def handle_roll(ws, room_id, user, is_dm, msg):
             await send_to(ws, "error", {"msg": "Unknown skill"})
             return
         bonus, prof = gear.skill_bonus(ch, db.j(ch["skills"], {}) or {}, key)
+        bonus += gear.exhaustion_roll_mod(ch)        # AP-015 (audit F4)
         res = do_roll("1d20", adv)
         total = res["kept"] + bonus
         advtxt = {"adv": " adv", "dis": " dis"}.get(res["adv"] or "", "")
@@ -1042,13 +1114,17 @@ async def handle_roll(ws, room_id, user, is_dm, msg):
             await send_to(ws, "error", {"msg": "Spell not found on this character"})
             return
         if kind == "spell_attack":
+            cover = _spell_cover(msg)
+            if cover is None:
+                await _total_cover_note(room_id, user, is_dm, vis, ch)
+                return
             # D109: Sap/Vex ride the CASTER's token too (optional token_id).
             if msg.get("token_id") is not None:
                 tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
                             (msg["token_id"], room_id))
                 if tok is not None and authz.controls(tok, user["id"], is_dm):
                     adv = await _consume_markers(room_id, tok, adv, None)
-            res = _spell_attack_text(ch, sp, adv)
+            res = _spell_attack_text(ch, sp, adv, cover)
         elif kind == "spell_dc":
             res = _spell_dc_text(ch, sp)
         else:
@@ -1129,6 +1205,51 @@ async def handle_cast(ws, room_id, user, is_dm, msg):
     if sp is None:
         await send_to(ws, "error", {"msg": "Spell not found on this character"})
         return
+    if sp["level"] > 0 and any(x.get("prep") for x in spells) and not sp.get("prepared"):
+        # D138 (audit C3): a preparation-gated list only casts what is prepared.
+        await send_to(ws, "error", {"msg": f"{sp['name']} is not prepared"})
+        return
+    if sp["cast"] == "attack" and _spell_cover(msg) is None:
+        # D137: total cover refuses the target BEFORE any slot is touched.
+        await _total_cover_note(room_id, user, is_dm, vis, ch)
+        return
+    # D131 (AP-017): the spell's casting time decides WHICH slot of the
+    # active turn this cast spends — action, bonus action or reaction —
+    # through the ONE turn-slot economy attacks already use. Minute/hour/
+    # ritual cast times are out of turn tempo and spend nothing. Validation
+    # first, spending only once the slot claim below succeeds (D110).
+    from . import combat as CB                    # late: combat imports dice
+    cast_slot = gear.casting_slot(sp.get("casting_time"))
+    ctok = None
+    if msg.get("token_id") is not None:
+        ctok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                     (msg["token_id"], room_id))
+        if ctok is None or not authz.controls(ctok, user["id"], is_dm) \
+                or ctok["character_id"] != ch["id"]:
+            await send_to(ws, "error", {"msg": "That token is not yours to cast with"})
+            return
+    init = CB.get_init(room_id)
+    op_probe = str(msg.get("op_id", ""))[:40]
+    if op_probe and INV.claimed(op_probe, room_id, "cast", ch["id"]):
+        return                                                    # replay — silent
+    if init.get("combat") and not is_dm:
+        if ctok is None:
+            await send_to(ws, "error", {"msg": "Pick your token during combat (token_id)"})
+            return
+        turn = init.get("turn") or {}
+        listed = any(o["token_id"] == ctok["id"] for o in init.get("order", []))
+        if cast_slot and listed:
+            if turn.get("token_id") != ctok["id"]:
+                await send_to(ws, "error", {"msg": "It is not your turn"})
+                return
+            if CND.hook_bool(CND.load(ctok), room_id, "no_actions"):
+                # D134: casting is an action — incapacitated forbids it.
+                await send_to(ws, "error", {"msg": "You can't take actions right now"})
+                return
+            if turn.get(cast_slot) == "used":
+                await send_to(ws, "error", {"msg": f"No {cast_slot} left this turn"})
+                return
+
     lvl = int(sp.get("level", 0))
     if lvl > 0:
         # D93: replay guard and consumption share ONE transaction, and the
@@ -1156,10 +1277,15 @@ async def handle_cast(ws, room_id, user, is_dm, msg):
             await send_to(ws, "error", {"msg": err})
             return
         await broadcast(room_id, "snapshot", None)
+    if init.get("combat") and not is_dm and cast_slot and ctok is not None and \
+            any(o["token_id"] == ctok["id"] for o in init.get("order", [])):
+        spent = CB.spend_slot(room_id, ctok["id"], cast_slot)
+        if spent is not None:
+            await broadcast(room_id, "initiative", spent)
     crit = bool(msg.get("crit"))
     posts = []
     if sp["cast"] == "attack":
-        posts.append(_spell_attack_text(ch, sp, msg.get("adv")))
+        posts.append(_spell_attack_text(ch, sp, msg.get("adv"), _spell_cover(msg) or ""))
     elif sp["cast"] == "save":
         posts.append(_spell_dc_text(ch, sp))
     if sp["dmg"]:
@@ -1201,7 +1327,7 @@ async def handle_long_rest(ws, room_id, user, is_dm, msg):
         with db.tx() as c:
             c.execute(
                 "UPDATE characters SET hp=max_hp, temp_hp=0, spell_slots=?, items=?, resources=?, "
-                "hit_dice_spent=0 WHERE id=?",
+                "hit_dice_spent=0, exhaustion=MAX(0, COALESCE(exhaustion,0)-1) WHERE id=?",
                 (db.json_dumps(slots), db.json_dumps(items), db.json_dumps(resources),
                  m["character_id"]))
             if death is not None:

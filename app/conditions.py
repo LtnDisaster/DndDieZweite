@@ -14,6 +14,8 @@ effects can be layered on later.
 """
 import re
 
+from .gear import ABILITIES as _SAVES
+
 from . import db
 
 # key -> (label, glyph, color). Color is the canvas dot tint; glyph is a compact tag.
@@ -52,6 +54,12 @@ UNTIL = ("", "start", "end")
 def _clean_until(value):
     v = str(value or "").strip().lower()
     return v if v in ("start", "end") else ""
+
+
+def _clean_sa(value):
+    """D130: the save ability of a save-ends entry ('str'..'cha'), or '' = none."""
+    v = str(value or "").strip().lower()[:3]
+    return v if v in _SAVES else ""
 
 
 def label(key):
@@ -141,8 +149,9 @@ def clean_conds(raw):
             src, ref = _clean_tok_ref(e.get("src")), _clean_tok_ref(e.get("ref"))
             dc = _clean_dc(e.get("dc"))
             conc = _clean_conc(e.get("conc"))
+            sa = _clean_sa(e.get("sa"))
         else:
-            k, rounds, until, src, ref, dc, conc = e, 0, "", None, None, None, None
+            k, rounds, until, src, ref, dc, conc, sa = e, 0, "", None, None, None, None, ""
         k = str(k).strip()
         sig = (k.lower(), ref, src) if src is not None else k.lower()
         if not k or not _KEY_RE.match(k) or sig in seen:
@@ -161,6 +170,8 @@ def clean_conds(raw):
             entry["dc"] = dc
         if conc is not None:
             entry["conc"] = conc
+        if sa:
+            entry["sa"] = sa
         out.append(entry)
     return out
 
@@ -169,7 +180,7 @@ def load(tok):
     return clean_conds(db.j(tok.get("conds"), [])) if tok else []
 
 
-def add(conds, key, rounds=0, until="", src=None, ref=None, dc=None, conc=None):
+def add(conds, key, rounds=0, until="", src=None, ref=None, dc=None, conc=None, sa=""):
     """Add or refresh a condition; returns a new list. D109: ``src``/``ref``
     mark a mastery marker anchored to the SRC token's turn clock (a refresh
     matches key AND ref AND src, so e.g. two 'vexed' markers against two
@@ -177,12 +188,17 @@ def add(conds, key, rounds=0, until="", src=None, ref=None, dc=None, conc=None):
     optional escape DC on the instance (a grapple's escape DC); a refresh to the
     same key/src/ref updates it too. D113: ``conc`` links the instance to a
     concentrator's token id — a condition a concentration spell OWNS, ended when
-    that concentration breaks; it is pure metadata and never affects dedup."""
+    that concentration breaks; it is pure metadata and never affects dedup.
+    D130: ``sa`` marks a save-ends entry — the affected creature repeats this
+    save at the end of its own turn (room/combat.py ``_save_ends`` against the
+    instance ``dc``); success removes exactly this entry. Never affects
+    dedup."""
     key = str(key).strip()
     until = _clean_until(until)
     src, ref = _clean_tok_ref(src), _clean_tok_ref(ref)
     dc = _clean_dc(dc)
     conc = _clean_conc(conc)
+    sa = _clean_sa(sa)
     out = clean_conds(conds)
     if not key or not _KEY_RE.match(key):
         return out
@@ -197,13 +213,16 @@ def add(conds, key, rounds=0, until="", src=None, ref=None, dc=None, conc=None):
                 c["dc"] = dc
             if conc is not None:
                 c["conc"] = conc
+            if sa:
+                c["sa"] = sa
             return out
     if len(out) < MAX_CONDS:
         out.append({"k": key, "rounds": rounds, "until": until,
                     **({"src": src, **({"ref": ref} if ref is not None else {})}
                        if src is not None else {}),
                     **({"dc": dc} if dc is not None else {}),
-                    **({"conc": conc} if conc is not None else {})})
+                    **({"conc": conc} if conc is not None else {}),
+                    **({"sa": sa} if sa else {})})
     return out
 
 
@@ -312,7 +331,7 @@ def is_concentrating(conds):
 # ---------------------------------------------------------------------------
 HOOKS = ("blocks_movement", "speed_delta", "my_attacks_dis", "my_checks_dis",
          "my_saves_dis", "attacks_against_me_adv", "attacks_against_me_dis",
-         "auto_fail_saves")
+         "auto_fail_saves", "no_actions")
 # SRD 5.2.1 'Conditions', wired data-style (2024 simplifications documented in
 # docs/EFFECT_GRAMMAR.md: blanket disadvantage where the SRD keys on a source
 # (frightened), sight-check auto-fails folded into checks-dis (blinded),
@@ -322,20 +341,24 @@ BUILTIN_HOOKS = {
                 "my_checks_dis": True},
     "frightened": {"my_attacks_dis": True, "my_checks_dis": True},
     "grappled": {"blocks_movement": True},
-    "incapacitated": {"blocks_movement": True, "auto_fail_saves": "str,dex"},
+    # D134: 2024 THE ONE Incapacitated — no actions, no reactions (reactions
+    # are the documented v1 gap), but MOVEMENT stays free; the STR/DEX auto-
+    # fail belongs to the family members below, not to the parent condition.
+    "incapacitated": {"no_actions": True},
     "invisible": {"attacks_against_me_dis": True},
     "paralyzed": {"blocks_movement": True, "attacks_against_me_adv": True,
-                  "auto_fail_saves": "str,dex"},
-    "petrified": {"blocks_movement": True, "auto_fail_saves": "str,dex"},
+                  "auto_fail_saves": "str,dex", "no_actions": True},
+    "petrified": {"blocks_movement": True, "auto_fail_saves": "str,dex",
+                "no_actions": True},
     "poisoned": {"my_attacks_dis": True, "my_checks_dis": True},
     "restrained": {"blocks_movement": True, "attacks_against_me_adv": True,
                    "my_attacks_dis": True, "my_saves_dis": True},
     "slowed": {"speed_delta": -10},
     "stunned": {"blocks_movement": True, "attacks_against_me_adv": True,
-                "auto_fail_saves": "str,dex"},
+                "auto_fail_saves": "str,dex", "no_actions": True},
     "unconscious": {"blocks_movement": True, "attacks_against_me_adv": True,
                     "my_attacks_dis": True, "my_checks_dis": True,
-                    "auto_fail_saves": "str,dex"},
+                    "auto_fail_saves": "str,dex", "no_actions": True},
 }
 _cache = {}                                     # room_id -> {key: definition}
 

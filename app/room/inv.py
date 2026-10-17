@@ -69,12 +69,12 @@ async def handle_item_def(ws, room_id, user, is_dm, msg):
                                                "another room — choose a different id"})
             return
         db.x("INSERT INTO item_defs(id, room_id, name, desc, kind, weight, stackable,"
-             " props, created_by) VALUES(?,?,?,?,?,?,?,?,?)"
+             " props, created_by, value) VALUES(?,?,?,?,?,?,?,?,?,?)"
              " ON CONFLICT(id) DO UPDATE SET name=excluded.name, desc=excluded.desc,"
              " kind=excluded.kind, weight=excluded.weight, stackable=excluded.stackable,"
-             " props=excluded.props",
+             " props=excluded.props, value=excluded.value",
              (did, room_id, d["name"], d["desc"], d["kind"], d["weight"],
-              d["stackable"], db.json_dumps(d["props"]), user["id"]))
+              d["stackable"], db.json_dumps(d["props"]), user["id"], d["value"]))
         await send_to(ws, "whisper", {"text": f"📚 Item definition “{d['name']}” saved."})
     elif action == "delete":
         did = str(msg.get("def_id", ""))[:24]
@@ -392,11 +392,24 @@ async def handle_inv_container(ws, room_id, user, is_dm, msg):
     fl = str(msg.get("floor") or "")
     if not FLOOR.exists(room_id, fl):
         return
-    oid = str(msg.get("object_id", ""))[:16]
+    oid = str(msg.get("object_id", ""))[:24]
     action = str(msg.get("action", "inspect"))
     mp = get_map(room_id, fl)
     obj = next((o for o in mp.get("objects", []) if o.get("id") == oid), None)
-    if obj is None or ((obj.get("interact") or {}).get("op") or {}).get("kind") != "container":
+    if obj is not None:
+        if ((obj.get("interact") or {}).get("op") or {}).get("kind") != "container":
+            return                                         # unknown: silent no-op
+    elif oid.startswith("loot:"):
+        # D133 (AP-019): an editor LOOT object flagged `container` is a REAL
+        # D92 container — contents live in SQLite under the one existing
+        # (room_id, object_id) key, namespace "loot:<entry id>", mirrors the
+        # D105 "tok:<token_id>" carcass key. Unflagged loot keeps the legacy
+        # note-pickup untouched.
+        obj = next((l for l in mp.get("loot", [])
+                    if l.get("id") == oid[5:] and l.get("container")), None)
+        if obj is None:
+            return
+    else:
         return                                             # unknown: silent no-op
     if not is_dm:
         planes = {(t.get("floor") or "") for t in authz.controlled_rows(room_id, user["id"])}

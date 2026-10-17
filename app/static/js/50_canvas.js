@@ -536,6 +536,12 @@ function objectAt(x, y){
   const c = cellSize(), cx = Math.floor(x / c), cy = Math.floor(y / c);
   return (state.grid.objects || []).find(o => o.x === cx && o.y === cy) || null;
 }
+function lootAt(x, y){
+  // D133: WORLD cell lookup for editor loot objects (glyph layer).
+  if (!state.grid) return null;
+  const c = cellSize(), cx = Math.floor(x / c), cy = Math.floor(y / c);
+  return (state.grid.loot || []).find(l => l.x === cx && l.y === cy) || null;
+}
 function ownToken(){
   if (!state.room) return null;
   const sel = state.tokens.find(t => t.id === state.sel);
@@ -663,7 +669,8 @@ function paint(cx, cy){
   else if (b === "loot"){
     gm.loot = gm.loot.filter(l => !(l.x===cx && l.y===cy));
     const label = ($("loot-label").value || "").trim().slice(0,80) || "Loot";
-    gm.loot.push({ id: eid(), x:cx, y:cy, label, taken_by:null });
+    gm.loot.push({ id: eid(), x:cx, y:cy, label, taken_by:null,
+                   container: ($("loot-container") && $("loot-container").checked) ? 1 : 0 });
   }
   else if (b === "obj"){
     // D82: authored as pure DATA; the server only ever runs allowlisted ops.
@@ -920,6 +927,10 @@ function onDown(e){
           return; }
         wsSend({ type:"interact", object_id: ob.id,
                  floor: state.viewFloor || "" }); return; }  // D88
+      const lo = lootAt(wx, wy);                         // D133: container loot
+      if (lo && lo.container){
+        if (typeof openLootObject === "function") openLootObject(lo);
+        return; }
     }
     // Keep the selected movable token while clicking an empty destination.
     // Clearing the sheet here used to clear state.sel before ownToken(), which

@@ -328,6 +328,15 @@ def _entity(e, w, h, ox=0, oy=0):
     else:
         tb = e.get("taken_by")
         out["taken_by"] = int(tb) if isinstance(tb, (int, float)) else None
+        # D133: `container` flags this loot glyph as a REAL D92 container
+        # (contents in SQLite under the key "loot:<id>"); `hinted` is the
+        # one-time whisper marker; `dm_only` mirrors the chest precedent.
+        if e.get("container"):
+            out["container"] = 1
+        if e.get("hinted"):
+            out["hinted"] = True
+        if e.get("dm_only"):
+            out["dm_only"] = True
     return out
 
 

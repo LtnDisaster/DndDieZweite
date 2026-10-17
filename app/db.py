@@ -256,6 +256,7 @@ def init_db():
         if col not in cols:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
     migrate("room_state", "map_json", "map_json TEXT DEFAULT ''")
+    migrate("item_defs", "value", "value REAL DEFAULT 0")  # D132: gp value line
     migrate("characters", "weapons", "weapons TEXT DEFAULT '[]'")
     migrate("characters", "items", "items TEXT DEFAULT '[]'")
     migrate("characters", "skills", "skills TEXT DEFAULT '{}'")
@@ -317,6 +318,9 @@ def init_db():
     migrate("messages", "npc_token_id", "npc_token_id INTEGER")
     migrate("messages", "style", "style TEXT DEFAULT ''")
     migrate("room_state", "audio_json", "audio_json TEXT DEFAULT '{}'")
+    # D141: fog-memory ghosts outlive the process (TODO P2) — one merged
+    # {user_id: {token_id: snapshot}} blob per room, written at disconnect.
+    migrate("room_state", "ghosts_json", "ghosts_json TEXT DEFAULT '{}'")
     migrate("characters", "class_levels", "class_levels TEXT DEFAULT ''")
     # D101: background id/name chosen in the guided character flow (rule-pack
     # ``background`` row). Pure bookkeeping — it seeds nothing mechanically by

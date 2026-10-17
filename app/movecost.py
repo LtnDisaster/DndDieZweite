@@ -32,7 +32,8 @@ def terrain_mult(mp, x, y):
     return 2 if (t is not None and mapmodel.difficult(t)) else 1
 
 
-def route_cost(mp, route, footprint: int = 1, mode: str = "walk"):
+def route_cost(mp, route, footprint: int = 1, mode: str = "walk",
+               strained: bool = False):
     """5e cost of moving a footprint-sized token over `route` — WORLD cell
     origins starting WITH the current position, e.g. [origin] + path.
 
@@ -46,6 +47,13 @@ def route_cost(mp, route, footprint: int = 1, mode: str = "walk"):
     from .footprint import wh
     w, h = wh(footprint)
     fly = mode == "fly"
+    # D140/D144 (SRD 5.2.1, Special Travel Speeds): swimming or climbing
+    # WITHOUT the matching speed costs 1 extra foot per foot (2 extra in
+    # difficult terrain); WITH the speed it moves at normal cost. Whether
+    # the creature has the speed is creature knowledge — the caller (the
+    # only creature-aware layer) passes `strained`. Literal SRD addition,
+    # not a multiplication.
+    strained = strained and mode in ("swim", "climb")
     total = 0
     diag = 0
     for prev, cur in zip(route, route[1:]):
@@ -70,7 +78,11 @@ def route_cost(mp, route, footprint: int = 1, mode: str = "walk"):
                    for y in range(prev[1], prev[1] + h)
                    if mapmodel.in_world(mp, x, y)}
             mult = max([terrain_mult(mp, x, y) for (x, y) in new - old] or [1])
-        total += unit * mult
+        if strained:
+            unit = unit + (2 if mult == 2 else 1)
+        else:
+            unit = unit * mult
+        total += unit
     return total
 
 

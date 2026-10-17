@@ -2,7 +2,7 @@
 import json
 import random
 
-from .. import db, movecost, npc
+from .. import db, gear, movecost, npc
 from .. import conditions as C
 from . import authz, death as D, health
 from .dice import dex_mod
@@ -93,9 +93,14 @@ async def _fire_events(room_id, events, round_uid):
 
 
 def token_dex_mod(tok):
-    """DEX modifier for any token: an attached character, else an NPC stat block."""
+    """DEX modifier for any token: an attached character, else an NPC stat block.
+    AP-015 (audit F4): 2024 exhaustion applies its −2/level to Initiative rolls."""
     if tok["character_id"]:
-        return dex_mod(tok["character_id"])
+        ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
+        if ch is None:
+            return 0
+        sheet = gear.as_sheet(ch)
+        return gear.dex_mod(sheet) + gear.exhaustion_roll_mod(sheet)
     block = npc.load(tok)
     return npc.dex_mod(block) if block else 0
 
@@ -115,6 +120,45 @@ async def _cond_update(room_id, token_id, conds):
         await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
         return
     await send_cond_bump(room_id, tok, conds)
+
+
+async def _save_ends(room_id, token_id):
+    """D130 (AP-016): 'Save Ends' — a condition entry carrying a save ability
+    (``sa``) and a DC repeats the save at the END of the affected creature's
+    own turn, through the ONE existing save derivation (``opposed.save_roll``
+    judged by ``beats_dc``); success removes exactly that entry. No second
+    clock is invented — this rides the existing end-of-turn moment beside the
+    D80 ``until:"end"`` turn clock, which stays independent."""
+    if not token_id:
+        return
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (token_id, room_id))
+    if tok is None:
+        return
+    conds = C.load(tok)
+    targets = [c for c in conds if c.get("sa") and c.get("dc") is not None]
+    if not targets:
+        return
+    from . import opposed
+    from .concentration import _announce_roll
+    p = opposed.participant(room_id, tok)
+    if p is None:
+        return
+    new, changed = conds, False
+    for c in targets:
+        sv = opposed.save_roll(p, c["sa"])
+        dc = c["dc"]
+        ok = bool(sv) and not sv.get("auto_fail") and opposed.beats_dc(sv["total"], dc)
+        line = (f"🎲 {p['name']} — {c['k']} save at end of turn: "
+                + (f"{c['sa'].upper()} d20({sv['kept']}) {sv['mod']:+d} = {sv['total']} vs DC {dc}"
+                   if sv and not sv.get("auto_fail") else "AUTO-FAIL")
+                + (" — the condition ends" if ok else " — it stays"))
+        await _announce_roll(room_id, tok, line)
+        if ok:
+            new = [e for e in new if e is not c]
+            changed = True
+    if changed:
+        db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(new), tok["id"]))
+        await _cond_update(room_id, token_id, new)
 
 
 def get_init(room_id):
@@ -243,7 +287,13 @@ def move_remaining(init, token_id, mode=None):
     m = mode or t.get("move_mode") or "walk"
     entry = by.get(m)
     if entry is None:
-        return 0
+        # D144: swimming/climbing WITHOUT the speed draws on the WALK pool
+        # and pays the SRD surcharge per step (movecost) — the budget
+        # follows the creature's walk allowance, never a phantom 0.
+        if m in ("swim", "climb") and "walk" in by:
+            entry = by["walk"]
+        else:
+            return 0
     return max(0, int(entry["total"]) - int(entry["spent"]))
 
 
@@ -308,6 +358,7 @@ async def handle_init_next(ws, room_id, user, is_dm, msg):
         return
     init = get_init(room_id)
     if init["combat"] and init["order"]:
+        await _save_ends(room_id, turn_token(init))
         events = []
         init, wrapped, updates = advance_turn(room_id, init, events)
         for token_id, conds in updates:
@@ -332,6 +383,7 @@ async def _end_turn_common(ws, room_id, user, is_dm):
         if not authz.controls(tok, user["id"], False):      # D82: or its assigned controller
             await send_to(ws, "error", {"msg": "Only the active token's owner (or the DM) can end the turn"})
             return
+    await _save_ends(room_id, turn.get("token_id"))
     events = []
     init, wrapped, updates = advance_turn(room_id, init, events)
     for token_id, conds in updates:
@@ -401,6 +453,10 @@ async def handle_dash(ws, room_id, user, is_dm, msg):
     turn = init.get("turn") or {}
     if turn.get("token_id") != tok["id"]:
         await send_to(ws, "error", {"msg": "It is not your turn"})
+        return
+    if C.hook_bool(C.load(tok), room_id, "no_actions"):
+        # D134 (audit F5): Dash is an action — incapacitated forbids it.
+        await send_to(ws, "error", {"msg": "You can't take actions right now"})
         return
     if turn.get("action") == "used":
         await send_to(ws, "error", {"msg": "No action left this turn"})

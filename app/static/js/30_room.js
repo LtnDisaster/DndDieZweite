@@ -1159,7 +1159,9 @@ function _rotRowHtml(tok){
    and refuses switching tricks. */
 function _moveModeRowHtml(tok){
   const sp = tokenSpeeds(tok);
-  const modes = ["walk","fly","swim","climb"].filter(m => m === "walk" || sp[m] > 0);
+  // D140: swim/climb are always choosable (SRD surcharge without the
+  // speed); flying genuinely needs a fly speed.
+  const modes = ["walk","fly","swim","climb"].filter(m => m !== "fly" || sp.fly > 0);
   if (modes.length < 2) return "";
   state.moveMode = state.moveMode || {};
   const act = state.moveMode[tok.id] || "walk";
@@ -2428,6 +2430,15 @@ function openNpcChest(tokId){
                      items: [], coins: 0, loading: true };
   setSideTab("inv"); renderInvChest();
   wsSend({ type: "npc_inv", action: "inspect", token_id: tokId });
+}
+/* D133: a map LOOT object flagged `container` opens the SAME chest window on
+   the server key "loot:<id>" — contents arrive only from inv_container. */
+function openLootObject(lo){
+  state.invChest = { object_id: "loot:" + lo.id, label: lo.label || "Loot",
+                     floor: state.viewFloor || "", items: [], coins: 0, loading: true };
+  setSideTab("inv"); renderInvChest();
+  wsSend({ type: "inv_container", action: "inspect", object_id: "loot:" + lo.id,
+           floor: state.viewFloor || "" });
 }
 function openLootChest(tokId){
   const tok = state.tokens.find(t => t.id === tokId);

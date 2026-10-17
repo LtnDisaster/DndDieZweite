@@ -703,6 +703,7 @@ def _viewer_token_view(room, user, tokens_all, view_floor, mp):
             t.pop("floor", None)                 # D86: nor which plane it stands on
             t.pop("light", None)                 # D87: nor how brightly it burns
             t.pop("darkvision", None)            # D89: nor how well it sees
+    ws.hydrate_ghosts(room["id"], uid)          # D141: ghosts outlive a restart
     last = ws._last_seen.get(room["id"], {}).get(uid, {})
     vis_ids = {t["id"] for t in tokens}
     ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]
