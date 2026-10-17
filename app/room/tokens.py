@@ -484,16 +484,20 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
         "name": label,
         "level": base.get("level"), "stats": base.get("stats"),
         "hp": base.get("hp"), "max_hp": base.get("max_hp"), "ac": base.get("ac"),
-        "speed": base.get("speed"), "spells": base.get("spells"),
-        "attacks": base.get("attacks"), "spell_slots": base.get("spell_slots"),
-        "saves": base.get("saves"), "defenses": base.get("defenses"),
-        "abilities": base.get("abilities"), "resources": base.get("resources"),
-        "notes": base.get("notes"),
+        "speed": base.get("speed"), "fly": base.get("fly"), "swim": base.get("swim"),
+        "climb": base.get("climb"), "darkvision_ft": base.get("darkvision_ft"),
+        "attacks": base.get("attacks") or [],
+        "spells": base.get("spells") or [], "spell_slots": base.get("spell_slots") or {},
+        "skills": base.get("skills") or {},
+        "saves": base.get("saves") or {}, "defenses": base.get("defenses") or {},
+        "abilities": base.get("abilities") or [], "resources": base.get("resources") or [],
+        "companion": base.get("companion"), "notes": base.get("notes") or "",
     })
     size = _clean_size(msg.get("size") or base.get("size"))
     fw, fh = _clean_span(msg, size)
     disposition = _clean_disposition(msg.get("disposition") or base.get("disposition"))
     fl = str(msg.get("floor") or "")        # D86/D88: plane for new tokens
+    darkvision = min(999, max(0, int(block.get("darkvision_ft") or 0) // 5))
     if fl and not floors.exists(room_id, fl):
         return await send_to(ws, "error", {"msg": "No such floor"})
     mp = get_map(room_id, fl)               # terrain of THAT plane decides placement
@@ -529,9 +533,9 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
                                     (room_id, char_id)) is None:
             return await send_to(ws, "error", {"msg": "No such character in this room"})
     tid = db.x("INSERT INTO tokens (room_id,label,color,x,y,npc,size,disposition,fw,fh,floor,"
-               "owner_user_id,character_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               "owner_user_id,character_id,darkvision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (room_id, label, color, x, y, db.json_dumps(block), size, disposition, fw, fh, fl,
-                owner_uid, char_id))
+                owner_uid, char_id, darkvision))
     tok = db.q1("SELECT * FROM tokens WHERE id=?", (tid,))
     sys_msg(room_id, f"DM added token '{label}'.")
     await broadcast_token_add(room_id, tok)
@@ -548,12 +552,15 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
     base = msg.get("npc") if isinstance(msg.get("npc"), dict) else msg
     merged.update({k: base[k] for k in
                    ("level", "stats", "hp", "max_hp", "ac", "speed", "fly", "swim", "climb",
-                    "attacks", "spells",
-                    "spell_slots", "saves", "defenses",
-                    "abilities", "resources", "notes") if k in base})
+                    "darkvision_ft", "attacks", "spells",
+                     "spell_slots", "saves", "defenses", "size", "companion",
+                     "abilities", "resources", "notes") if k in base})
     label = str(msg.get("label", tok["label"]))[:32]
     merged["name"] = label
+    if "darkvision_ft" not in merged:
+        merged["darkvision_ft"] = int(tok.get("darkvision") or 0) * 5
     block = npc.clean_npc(merged)
+    darkvision = min(999, max(0, int(block.get("darkvision_ft") or 0) // 5))
     color = _clean_color(msg.get("color", tok["color"]))
     size = _clean_size(base.get("size", tok.get("size", "Medium")))
     fw, fh = _clean_span(base, size, tok)
@@ -578,8 +585,9 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
             return
         x, y = footprint.origin_pixels(origin, footprint.token_span(candidate), mp["cell"])
     db.x("UPDATE tokens SET npc=?, label=?, color=?, size=?, disposition=?, x=?, y=?, "
-         "fw=?, fh=? WHERE id=?",
-         (db.json_dumps(block), label, color, size, disposition, x, y, fw, fh, tok["id"]))
+         "fw=?, fh=?, darkvision=? WHERE id=?",
+         (db.json_dumps(block), label, color, size, disposition, x, y, fw, fh,
+          darkvision, tok["id"]))
     await broadcast(room_id, "snapshot", None)
 
 

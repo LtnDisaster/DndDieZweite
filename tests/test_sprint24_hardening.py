@@ -17,6 +17,11 @@ def client():
     return TestClient(main.app)
 
 
+def _def_id(client, dm, code, name):
+    return next(d["id"] for d in state_of(client, dm, code)["item_defs"]
+                if d["name"] == name)
+
+
 def _tok_of(client, user, code, cid):
     return next(t["id"] for t in state_of(client, user, code)["tokens"]
                 if t.get("character_id") == cid)
@@ -133,7 +138,6 @@ def test_malformed_props_never_arm_an_attack(client):
         assert "No equipped weapon" in ev["payload"]["msg"]
 
 
-@pytest.mark.skip(reason="sprint24 timebox: grant-of-2nd-def flaky in test harness; server-side range gate implemented, live pin deferred")
 def test_out_of_range_and_cross_reach_refused(client):
     dm, player, code, ch = base_room(client)
     with ws_connect(client, dm, code) as dws:
@@ -141,7 +145,7 @@ def test_out_of_range_and_cross_reach_refused(client):
             "name": "Dart", "kind": "weapon",
             "props": {"damage_dice": "1d4", "ability": "dex", "range_ft": 15}}})
         recv_until(dws, "whisper")
-        dart = def_ids(client, dm, code)[0]
+        dart = _def_id(client, dm, code, "Dart")
         dws.send_json({"type": "inv_grant", "char_id": ch["id"], "def_id": dart, "qty": 1})
         recv_until(dws, "inv_changed")
         dws.send_json({"type": "add_token", "label": "FarOff", "x": 625, "y": 425})
@@ -152,14 +156,14 @@ def test_out_of_range_and_cross_reach_refused(client):
         equip_main(pws, ch["id"], item["id"])
         recv_until(pws, "inv_changed")
         _attack(pws, item["id"], token_id=tok, target_id=far)   # 20ft vs range 15
-        assert "out of range" in recv_until(pws, "error")["payload"]["msg"]
+        assert "maximum range" in recv_until(pws, "error")["payload"]["msg"]
         # same distance, melee weapon: 20ft vs 5+0 reach
         with ws_connect(client, dm, code) as dws:
             dws.send_json({"type": "item_def", "action": "create", "defn": {
                 "name": "Dagger", "kind": "weapon",
                 "props": {"damage_dice": "1d4", "ability": "dex"}}})
             recv_until(dws, "whisper")
-            dg = def_ids(client, dm, code)[-1]
+            dg = _def_id(client, dm, code, "Dagger")
             dws.send_json({"type": "inv_grant", "char_id": ch["id"], "def_id": dg, "qty": 1})
             recv_until(dws, "inv_changed")
         dag = next(i for i in own_char(client, player, code)["items"] if i["name"] == "Dagger")

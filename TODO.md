@@ -485,8 +485,9 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [x] F2 hidden-target probing oracle closed; error byte-identical to nonexistent
 - [x] F3 inv_ops namespaced per acting char/object (no migration)
 - [x] tests/test_sprint24_hardening.py (7 live-dispatch adversarial tests)
-- [ ] DEFERRED: live range/reach pin (harness grant-of-2nd-def flaky — server
-      gate itself implemented; skip marker carries the reason)
+- [x] Live range/reach pin restored (`tests/test_sprint24_hardening.py`): the old
+      harness failure came from alphabetically ambiguous definition-ID lookup;
+      lookup is now by name. No skip remains.
 
 ## Done — Sprint 25 Phase A: CSV content packages (2026-10-12, D95)
 - [x] `app/content.py` — ONE content engine: 8-kind schema (species/class/subclass/
@@ -841,6 +842,80 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       keine fremden Regeltexte außer SRD-5.1-freigegeben, keine Änderung an
       55_diorama.js, keine Git-Befehle. Kanonisch: 775 passed, 1 skipped,
       0 failed (doku-only — Erwartung erfüllt).
+
+## Done — Nachtschicht 2026-10-16 (D115): Gear-/Build-Lücken ohne neue Maschinen schließen
+
+- [x] **Ausrüstung → Engines:** `movement._speeds` und
+      `visibility._token_darkvision_cells` lesen `gear.effective_gear`;
+      `speed_bonus_ft` erhöht das Bewegungsfeld, `darkvision_ft` erhöht den
+      LOS-Radius in einer Darkvision-Sicht (5 ft je Rasterschritt),
+      `hit_dice_bonus` wirkt im Short Rest und `hands:2` nutzt die bestehende
+      Zwei-Hände-Regel.
+- [x] **Origin/Build:** Background-`skill_prof` wird im bestehenden
+      `_replay_origin`-Pfad angewandt; `feats.spells_grant` läuft über dieselbe
+      Grant-Achse wie Subklassen und landet im bestehenden `spell_state`;
+      `classes.expertise` ist eine optionale Skill-Achse mit fail-closed Prüfung.
+- [x] **Provenienz/UI:** Background-Tools/Sprachen/Feature, Species-Projektion,
+      `classes.weapon_prof`/`armor_prof` und Subclass-Features erscheinen als
+      read-only Build-Ledger/UI; keine zweite Größen-, Bewegungs- oder
+      Proficiency-Maschine.
+- [x] Tests: `tests/test_engine_gear_grants.py` (11), Node-`--check` für alle
+      `app/static/js/*.js` grün, `python3 -m compileall -q app` grün.
+- [x] Kanonischer Docker-Lauf: **959 passed, 1 skipped, 0 failed**.
+- [x] Schranken gehalten: keine Git-Befehle, keine `.git`-Aktionen, keine
+      Änderung an `55_diorama.js`, keine Migration, kein externer Dienst und kein
+      Fake-grüner Test. `feats.requires`, mechanische Species-/Klassenwerte und
+      Item-/Zauber-Dauerablauf bleiben dokumentierte offene Grenzen.
+
+## Done — Autonomer Lauf 2026-10-16 (D116/D117): letzter Skip entfernt, Dauer verdrahtet
+
+- [x] **AP-001:** Der Reichweiten-/Reach-Live-Test ist nicht mehr übersprungen.
+      Die Ursache lag im Test (alphabetisch mehrdeutige `item_def`-ID-Auswahl),
+      nicht in der Engine. Zehn Wiederholungen und die Kanonsuite sind grün.
+- [x] **AP-002:** Condition-Hooks wurden vollständig inventarisiert. Die
+      Feature-Matrix ersetzte die veraltete Annahme, `blinded`, `invisible` oder
+      `poisoned` seien nicht verdrahtet.
+- [x] **AP-003:** `duration` ist jetzt ein mechanischer Startwert für
+      `condition`-Operations: `"rounds":"duration"` oder fehlendes `rounds`
+      übernimmt die in Runden umgerechnete Dauer. Die bestehende Conditionsuhr
+      bleibt die einzige Uhr.
+- [x] **AP-004:** `classes.spellcasting_ability` erscheint in Plan, Apply und
+      Build-Ledger sowie im Wizard-/Bogen. Die pro-Zauber-Ausführung bleibt
+      unverändert; es wurde kein zweites Spellcasting-Modell gebaut.
+- [x] **AP-005:** `classes.expertise` ist eine geführte Checkbox-Auswahl im
+      Wizard. Serverseitig werden exakte Anzahl, Duplikate und fehlende
+      Übung geprüft; der Erfolg nutzt weiterhin nur die Skill-Achse.
+- [x] **AP-006:** `scripts/e2e_build_wizard.py` prüft die komplette Wizard-Kette
+      in echtem headless Chromium; Playwright läuft in einem temporären venv.
+- [x] **AP-007:** `feats.requires` prüft Attributswert-, Skill-Proficiency- und
+      Feature-Voraussetzungen fail-closed; unbekannte Formen werden abgewiesen.
+      Der Wizard zeigt Verfügbarkeit und fehlende Voraussetzungen.
+- [x] **AP-008:** `npc.project_creature()` übersetzt `creatures.csv` in den
+      bestehenden NPC-/Bestiarium-Block; DM-Review und Bestiarium-Import sind
+      DM-only, mit echtem Chromium-Nachweis.
+- [x] **AP-009:** `darkvision_ft` überlebt CSV → NPC-Block → Spawn und nutzt
+      die bestehende D89-Token-Sinnensäule; der NPC-Editor bearbeitet Feet und
+      leitet Token-Zellen serverseitig ab.
+- [x] **AP-010:** Der Bestiarium-Spawn sendet den vollständigen NPC-Block;
+      projizierte Skills erscheinen im Monster-Sheet, inklusive echter
+      Chromium-Verifikation an Hawk-kin.
+- [x] **AP-011:** `resource.mode=restore` erweitert dieselbe Effekt- und
+      Ressourcen-Achse; Kosten-Preflight, Unbekannt-Fail-closed und echter
+      `ability_cast`-Nachweis bleiben erhalten.
+- [x] **AP-012:** `build.species` versorgt die bestehende Movement-, LOS- und
+      Footprint-Kette; Tests belegen Stoutheart 25 ft/12 Zellen und Kit-kin
+      Small-Token ohne neue Engine.
+- [x] **AP-013:** `companion` überlebt CSV → NPC-Block → Creature-Review, Spawn,
+      Sheet und Bestiarium als Markierung; Token-Steuerung/Ownership bleiben auf
+      den bestehenden Pfaden. Echte WS-Angriffs- und Slotpfade sichern den
+      vollständigen Spawn-Block.
+- [x] Docs: `AUTONOMOUS_WORK_LOG.md`, `DECISIONS.md`
+      (D116/D117/D118/D119/D120/D121/D122/D123/D124/D125/D126/D127), `FEATURE_MATRIX.md`,
+      `FEATURE_COMPLETE_GAPS.md`, `CSV_ONLY_READINESS.md` und
+      `EFFECT_GRAMMAR.md`.
+- [x] Kanonischer Docker-Lauf: **981 passed, 0 skipped, 0 failed**.
+- [x] Schranken gehalten: keine Git-Befehle, keine `.git`-Aktionen, keine
+      Änderung an `55_diorama.js`, keine Migration und keine zweite Engine.
 
 ## Done — Sprint 43 (D114): vertikale Token-Geometrie, `openv`, vertikaler Flug und UI
 

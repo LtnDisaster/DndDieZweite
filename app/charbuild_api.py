@@ -35,7 +35,7 @@ def _authorize(request, code, cid):
 def build_plan(request: Request, code: str, cid: int,
                class_id: str = "", to: int = 1, user=Depends(require_user)):
     room = _authorize(request, code, cid)
-    return charbuild.plan(class_id, to, room["id"])
+    return charbuild.plan_for_character(cid, class_id, to, room["id"])
 
 
 @router.post("/{code}/{cid}/apply")

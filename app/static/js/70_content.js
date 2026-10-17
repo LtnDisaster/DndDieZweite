@@ -90,6 +90,46 @@ async function refreshContentKinds() {
   } catch (e) { el.textContent = "—"; }
 }
 
+async function ctCreatureImport(id, button){
+  const code = state.room.code;
+  button.disabled = true;
+  try {
+    const r = await fetch(`/api/content/${code}/creature/${encodeURIComponent(id)}/to-bestiary`,
+      { method: "POST" });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+    toast(`${d.projection.name} is in your bestiary`);
+    await loadBestiary();
+  } catch (e) {
+    toast(e.message); button.disabled = false;
+  }
+}
+
+async function ctCreatures(){
+  if (!state.room || state.room.role !== "dm") return;
+  const box = $("ct-creatures"), status = $("ct-creature-status");
+  box.innerHTML = ""; status.textContent = "Loading…";
+  try {
+    const d = await api(`/content/${state.room.code}/creature-rows`);
+    const rows = d.creatures || [];
+    status.textContent = `${rows.length} imported creature row(s)`;
+    for (const c of rows){
+      const row = document.createElement("div");
+      row.className = "journal-item";
+      row.style.cssText = "display:flex;justify-content:space-between;gap:8px";
+      const b = document.createElement("button");
+      b.className = "ghost"; b.type = "button"; b.textContent = "To bestiary";
+      b.disabled = !c.ready; b.onclick = () => ctCreatureImport(c.id, b).catch(e => toast(e.message));
+      const left = document.createElement("span");
+      left.innerHTML = `<b>${esc(c.name)}</b>` +
+        (c.companion ? ` <small title="Marked as companion">🐾</small>` : "") +
+        ` <small style="opacity:.7">${c.ready ? "NPC block ready" : esc(c.error || "unsupported free-form text")}</small>`;
+      row.appendChild(left); row.appendChild(b); box.appendChild(row);
+    }
+    if (!rows.length) box.innerHTML = '<div class="journal-item">No creature rows in this rule pack.</div>';
+  } catch (e){ status.textContent = e.message; }
+}
+
 function wireContent() {
   const sel = $("ct-export-kind");
   if (sel && !sel.options.length) for (const k of CT_KINDS) {
@@ -100,4 +140,6 @@ function wireContent() {
     () => ctDownload($("ct-export-kind").value, false).catch(e => toast(e.message));
   if ($("btn-ct-export-zip")) $("btn-ct-export-zip").onclick =
     () => ctDownload(null, true).catch(e => toast(e.message));
+  if ($("btn-ct-creatures")) $("btn-ct-creatures").onclick =
+    () => ctCreatures().catch(e => toast(e.message));
 }

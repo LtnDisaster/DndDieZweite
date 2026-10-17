@@ -1000,7 +1000,7 @@ def test_npc_attack_resolves_vs_target_ac(client):
     dm = reg(client, "dm")
     code = client.post("/api/rooms", json={"name": "Smash"}, headers=H(dm)).json()["code"]
     with ws_connect(client, dm, code) as ws:
-        ws.send_json({"type": "add_token", "label": "Squire", "x": 300, "y": 300, "ac": 10})
+        ws.send_json({"type": "add_token", "label": "Squire", "x": 450, "y": 300, "ac": 10})
         def_id = recv_until(ws, "token_add")["payload"]["id"]
         ws.send_json({"type": "add_token", "label": "Brute", "x": 400, "y": 300, "max_hp": 20, "hp": 20,
                       "attacks": [{"id": "bite", "name": "Bite", "to_hit": 30, "dmg": "1d6"},

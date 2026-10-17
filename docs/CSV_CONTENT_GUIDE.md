@@ -90,12 +90,12 @@ Legende: **F** = Pflicht. Typ in Klammern.
 |---|---|---|
 | `id` **F** | id | stabile interne ID |
 | `name` **F** | Text | Anzeigename |
-| `size` | tiny/small/medium/large/huge/gargantuan | Größe (Standard `medium`) |
-| `speed_ft`,`fly_ft`,`swim_ft`,`climb_ft` | 0–999 | Bewegung in ft (Schritt `speed_ft` Standard 30) |
-| `darkvision_ft` | 0–999 | Dunkelsicht (0 = keine) |
+| `size` | tiny/small/medium/large/huge/gargantuan | Größe; setzt beim Charakter-Seating den bestehenden `tokens.size`-Footprint (D126) |
+| `speed_ft`,`fly_ft`,`swim_ft`,`climb_ft` | 0–999 | Bewegung in ft; speist die bestehende `gear.clean_speeds()`-Ableitung (D126) |
+| `darkvision_ft` | 0–999 | Dunkelsicht; speist die bestehende LOS-Zellen-Ableitung (D126) |
 | `ability_bonuses` | Attributs-Boni | z. B. `dex+2` |
-| `languages` | Text | Sprachen (Freitext) |
-| `traits` | Text | Merkmale (Anzeige; mechanisch nur Dunkelsicht/Schwimmen via Spalten oben) |
+| `languages` | Text | Sprachen (Freitext/Provenance) |
+| `traits` | Text | Merkmale (Anzeige; keine eigene Adjudikations-Engine) |
 | `image` | asset | Porträt |
 | `manual` | Text | Hinweis, was die Engine **nicht** automatisch umsetzt |
 
@@ -276,6 +276,12 @@ Instanzen (Uhren, `cond_add`) bleiben unverändert.
 `saves`, `attacks`, `spells`, `abilities`, `darkvision_ft`, `tags`, `companion`
 (bool, Begleiter-Markierung), `image`, `manual`.
 
+Seit D122 können DMs im Regelwerk-Panel die NPC-Projektion einer importierten
+Zeile prüfen und sie in ihr Bestiarium übernehmen. Unterstützte Werte werden in
+den bestehenden `npc.clean_npc()`-Block übersetzt; einfache Angriffe folgen dem
+Muster `Bite +4 to hit; 1d6+2 piercing`. Nicht unterstützter Freitext bleibt
+sichtbar und deaktiviert den Import.
+
 ---
 
 ## 5. Import
@@ -454,9 +460,9 @@ Begleiter sind **keine CSV-Art**, sondern vorhandene **Tokens** mit
 vergeben **nur DMs** über den generischen **`token_controller`** (Ziel muss Raum-
 mitglied sein); Reiten bleibt die azyklische **`token_mount`**-Beziehung. Ein
 Spieler kann daher **fremde Begleiter nicht übernehmen** und sieht nur Tokens, die
-ihm ohnehin sichtbar sind. `creatures.csv` hat eine `companion`-Markierung als
-Anzeige; die eigentliche Bindung/Steuerung läuft über die Token-Oberfläche, nie
-über eine zweite Engine.
+ihm ohnehin sichtbar sind. `creatures.csv` markiert mit `companion` einen NPC-Block
+(D127) als Anzeige/Hinweis; die eigentliche Bindung/Steuerung läuft über die
+Token-Oberfläche, nie über eine zweite Engine.
 
 ---
 

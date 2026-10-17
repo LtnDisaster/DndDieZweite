@@ -38,17 +38,35 @@ verweigert** (laut im Bericht, nie still korrigiert).
 | `damage` | `expr` | `type`, `target` | Würfel → `room/health`-Schadenspfad inkl. Resistenz-Filter, Chronik |
 | `heal` | `expr` | `target` | `health.change_hp` (Heilung) |
 | `temp_hp` | `expr` | `target` | Temp-HP-Aktualisierung des Blatts (never stacks, max) |
-| `condition` | `key` | `rounds` (1–20), `until` (`start`/`end`), `target` | `cond_add`-Pfad (D80-Uhren, `src`-Anker = Auslöser) |
+| `condition` | `key` | `rounds` (0–999 oder `"duration"`), `until` (`start`/`end`), `target` | `cond_add`-Pfad; `"duration"` bzw. ein fehlendes `rounds` übernimmt den vom Zauber/Item in Runden umgerechneten `duration`-Wert — keine zweite Uhr |
 | `condition_remove` | `key` | `target` | entfernt den Key über den bestehenden Pfad |
 | `break_concentration` | — | `target` | setzt die Concentration-Fahne + Konzentrit-Sichtbarkeit (BRUCH-Rettungswurf selbst = S42, dokumentiert) |
 | `save` | `dc`, `ability` | `success` / `failure` (je Op-Kette) | echter Rettungswurf über den Würfelkanal (sichtbar gefiltert wie everywhere else); Teilketten laufen nur bei passendem Ausgang |
 | `check` | `dc`, `ability` | `success` / `failure` | Attributsprobe über denselben Würfelkanal |
 | `forced_move` | `cells` (1–10), `dir` | `target`, `path` (`push`/`pull`) | `moveforced.apply_forced_move` — Hindernis-Trunkierung wie bei Push-Mastery |
-| `resource` | `id` (Ressourcen-Pool der Klasse) | `amount` (nur 1) | Klassenressource **zahlen**; nur zahlbar → sonst keine Wirkung, kein Verbrauch |
+| `resource` | `id` (Ressourcen-Pool der Klasse) | `amount` (nur 1), `mode` (`cost` Standard oder `restore`) | `cost`: Klassenressource **zahlen**; nur zahlbar → sonst keine Wirkung, kein Verbrauch. `restore`: eine vorhandene Ressource um 1 bis zu `max` auf demselben `characters.resources`-Ledger zurückgeben; unbekannte ID scheitert, volle Ressource bleibt unverändert |
 
 `target`: `self` (der Träger/Wirkende) oder `target` (aktueller Kontext-Ziel —
 bei `on_hit` z. B. das Getroffene). `expr` = einfacher Würfelausdruck
 (`\d*d\d+(\s*[+-]\s*\d+)?`, nichts anderes — kein Mathe, keine Variablen).
+
+### Dauer als Startwert von Bedingungen
+
+`condition.rounds` darf entweder explizit sein oder den Marker `"duration"`
+tragen (ein fehlendes `rounds` ist gleichbedeutend). Der Effekt-Core rechnet
+ausschließlich für diesen Startwert die vorhandene Spalte `duration` des Zauber-
+oder Item-Eintrags in Runden um:
+
+- `1 round` → 1
+- `1 minute` → 10
+- `1 hour` → 60
+- `1 day` → 999 (bestehende Obergrenze des Zustandszählers)
+- `instant`, `permanent` oder ein nicht parsebarer Wert → 0 (bisheriges
+  Dauer-/Sofort-Marker-Verhalten)
+
+Die bestehende Initiativ-/Rundenlogik bleibt die einzige Uhr. Der Item-Effekt
+speichert den Marker `"duration"` im prop, damit ein später geänderter
+`props.duration` beim nächsten Auslösen tatsächlich wirkt.
 
 ## 3. Der Zustandskatalog (`conditions.csv`)
 

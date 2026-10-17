@@ -67,10 +67,23 @@ def _cell_elev(mp, cx, cy):
 
 
 def _speeds(tok):
-    """All movement allowances in feet — always through gear.clean_speeds (SSOT)."""
+    """All movement allowances in feet — always through gear.clean_speeds (SSOT).
+
+    D115: a PC sheet must be read as the full gear-aware sheet, not merely its
+    legacy `speed` column: equipment speed_bonus_ft already belongs to that one
+    canonical derivation. NPCs keep using their structured NPC block."""
     if tok["character_id"]:
-        speeds = gear.clean_speeds(db.q1("SELECT speed FROM characters WHERE id=?",
-                                         (tok["character_id"],)))
+        sheet = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?",
+                                    (tok["character_id"],)) or {})
+        species = (sheet.get("build") or {}).get("species") or {}
+        if species:
+            sheet = dict(sheet)
+            for sheet_key, species_key in (("speed", "speed_ft"), ("fly", "fly_ft"),
+                                           ("swim", "swim_ft"), ("climb", "climb_ft")):
+                value = int(species.get(species_key) or 0)
+                if value:
+                    sheet[sheet_key] = value
+        speeds = gear.clean_speeds(sheet)
     else:
         speeds = gear.clean_speeds(db.j(tok["npc"]) if tok["npc"] else {})
     # D109 SRD Slow / D111 catalog hook: speed_delta from the condition

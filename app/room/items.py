@@ -65,7 +65,9 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
         # a re-sent op can neither heal twice nor fire twice.
         from .. import effectops
         try:
-            ops = effectops.validate(effect_cell)
+            ops = effectops.validate(
+                effect_cell,
+                duration_rounds=effectops.duration_rounds((it.get("props") or {}).get("duration")))
             ctx = effectops.make_ctx(room_id, caster=tok, target=tok, trigger="use",
                                      op_id=(str(msg.get("op_id", "")) + ":fx")[:40]
                                      if op_id else "")

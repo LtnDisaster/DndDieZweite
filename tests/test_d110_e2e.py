@@ -160,7 +160,8 @@ def test_full_dungeon_runthrough(client, monkeypatch):
     # class level 1 through the build API (chronological, choices server-checked)
     r = client.post(f"/api/build/{code}/{ch1['id']}/apply", headers=H(p1), json={
         "class_id": "scout", "to": 1,
-        "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"]}})
+        "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                    "levels": {"1": {"expertise": "stealth"}}}})
     assert r.status_code == 200 and r.json()["ok"], r.text
     r = client.post(f"/api/build/{code}/{ch2['id']}/apply", headers=H(p2), json={
         "class_id": "warden", "to": 1, "choices": {"skills": ["athletics", "perception"]}})

@@ -247,7 +247,8 @@ def test_lock_validated_build_still_open_to_owner(client):
     files = {p.name: pathlib.Path(p).read_text(encoding="utf-8") for p in pathlib.Path(PACK).glob("*.csv")}
     assert content.import_package(files, room_id=rid_of(code), mode="apply", apply=True)["ok"]
     ok, res = charbuild.apply(ch["id"], "scout", 1,
-                              {"skills": ["stealth", "perception", "acrobatics", "athletics"]},
+                              {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                               "levels": {"1": {"expertise": "stealth"}}},
                               rid_of(code))
     assert ok, res
     assert db.q1("SELECT level FROM characters WHERE id=?", (ch["id"],))["level"] == 1
@@ -266,7 +267,8 @@ def test_end_to_end_flow(client):
 
     # build a level-1 scout (validated owner path)
     ok, _ = charbuild.apply(ch["id"], "scout", 1,
-                            {"skills": ["stealth", "perception", "acrobatics", "athletics"]}, rid)
+                            {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                             "levels": {"1": {"expertise": "stealth"}}}, rid)
     assert ok
     tok = char_token(client, player, code, ch["id"])
 

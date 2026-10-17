@@ -208,9 +208,17 @@ function renderPrepWizard(){
     if (spec.feat_choice || spec.ability_boost_or_feat){
       const cur = w.feat ? "feat:" + w.feat : (w.ability ? "ab:" + w.ability : "");
       const groups = [];
-      if (spec.feat_choice)
-        groups.push(`<optgroup label="Feats">${(p.options.feat || []).map(f =>
-          `<option value="feat:${esc(f.id)}" ${cur === "feat:" + f.id ? "selected" : ""}>${esc(f.name)}</option>`).join("")}</optgroup>`);
+      if (spec.feat_choice){
+        const opts = spec.feat_options && spec.feat_options.length
+          ? spec.feat_options
+          : (p.options.feat || []).map(f => ({ id: f.id, name: f.name, available: true, missing: [] }));
+        groups.push(`<optgroup label="Feats">${opts.map(f => {
+          const selected = cur === "feat:" + f.id;
+          const disabled = !selected && !f.available ? " disabled" : "";
+          const hint = f.available ? "" : ` — missing ${f.missing.join(", ")}`;
+          return `<option value="feat:${esc(f.id)}" ${selected ? "selected" : ""}${disabled}>${esc(f.name || feats[f.id] || f.id)}${esc(hint)}</option>`;
+        }).join("")}</optgroup>`);
+      }
       if (spec.ability_boost_or_feat)
         groups.push(`<optgroup label="Ability score +2">${STATS.map(([k, l]) =>
           `<option value="ab:${k}+2" ${cur === "ab:" + k + "+2" ? "selected" : ""}>${l} +2</option>`).join("")}</optgroup>`);
@@ -229,10 +237,22 @@ function renderPrepWizard(){
         list("pw-sp", spec.pool_spells, reqS, w.spells, spells, "Spells") + `</div>`);
       known.push("cantrips", "spells");
     }
-    const unsupported = Object.keys(spec).filter(k => !known.includes(k) && !["pool_cantrips", "pool_spells"].includes(k));
+    const reqE = +spec.expertise || 0;
+    if (reqE){
+      const have = (w.expertise || []), opts = (spec.expertise_skills || []);
+      parts.push(`<label class="tiny">Expertise — choose ${reqE}</label>` +
+        `<div class="row" style="flex-wrap:wrap">` + (opts.length
+          ? opts.map(k => `<label class="tiny" style="margin:1px 6px"><input type="checkbox" class="pw-exp" data-lvl="${esc(lvl)}" value="${esc(k)}" ${have.includes(k) ? "checked" : ""}> ${esc(prepSkillLabel(k))}</label>`).join("")
+          : `<small style="opacity:.6">No proficient skills are currently available.</small>`) + `</div>`);
+      known.push("expertise");
+    }
+    const unsupported = Object.keys(spec).filter(k =>
+      !known.includes(k) && !["pool_cantrips", "pool_spells", "expertise_skills", "feat_options"].includes(k));
     if (unsupported.length)
       parts.push(`<div style="color:#f1c40f">Level ${lvl}: unsupported decision type(s) ${esc(unsupported.join(", "))} — use Expert mode; do not skip.</div>`);
   }
+  if (n.spell && n.spell.ability)
+    parts.push(`<div><small style="opacity:.75">Casting ability: <b>${esc(n.spell.ability.toUpperCase())}</b> (class content row)</small></div>`);
   if (n.spell && n.spell.model === "prepared")
     parts.push(`<div><small style="opacity:.7">Prepared caster: the server pre-parses from the class pool — no spell choice needed.</small></div>`);
   const missing = prepMissing();
@@ -269,6 +289,15 @@ function renderPrepWizard(){
         if (Object.keys(ent).length) p.wiz.levels[lvl] = ent; else delete p.wiz.levels[lvl];
         prepWizSummary();
       };
+  for (const c of wiz.querySelectorAll(".pw-exp"))
+    c.onchange = () => {
+      const lvl = c.dataset.lvl, ent = Object.assign({}, p.wiz.levels[lvl] || {});
+      const set = new Set(ent.expertise || []);
+      c.checked ? set.add(c.value) : set.delete(c.value);
+      if (set.size) ent.expertise = [...set]; else delete ent.expertise;
+      if (Object.keys(ent).length) p.wiz.levels[lvl] = ent; else delete p.wiz.levels[lvl];
+      prepWizSummary();
+    };
 }
 
 function prepMissing(){
@@ -284,6 +313,12 @@ function prepMissing(){
     const rc = +spec.cantrips || 0, rs = +spec.spells || 0;
     if (rc && (w.cantrips || []).length < rc) miss.push(`level ${lvl} cantrips`);
     if (rs && (w.spells || []).length < rs) miss.push(`level ${lvl} spells`);
+    const re = +spec.expertise || 0;
+    if (re){
+      const have = new Set((w.expertise || []).filter(k => (spec.expertise_skills || []).includes(k))).size;
+      if (have < re) miss.push(`level ${lvl} expertise (${re - have} more)`);
+      else if (have > re) miss.push(`level ${lvl} expertise (remove ${have - re})`);
+    }
   }
   return miss;   // an open Expert JSON may still fill gaps — the SERVER is the validator
 }
@@ -356,6 +391,7 @@ async function prepApply(){
         else if (n.kind === "subclass") names.push(`subclass (${(n.options || []).join(", ")})`);
         else if (n.kind === "level_choice") names.push(`level ${n.level}: ${n.feat_choice ? "feat" : ""}${n.feat_choice && n.ability_boost_or_feat ? " or " : ""}${n.ability_boost_or_feat ? "ability +2" : ""}`);
         else if (n.kind === "spells") names.push(`level ${n.level}: ${n.cantrips || 0} cantrip(s), ${n.spells || 0} spell(s)`);
+        else if (n.kind === "expertise") names.push(`level ${n.level}: ${n.count} expertise choice(s) from: ${(n.options||[]).map(prepSkillLabel).join(", ")}`);
         else names.push(JSON.stringify(n));
       }
       out.innerHTML = `<span style="color:#f1c40f">Server still needs choices:</span><br><small>${esc(names.join(" · "))}</small>`;
@@ -479,10 +515,16 @@ function renderOriginReport(){
   if (!j){ out.innerHTML = ""; return; }
   const lbl = a => ((STATS.find(s => s[0] === a) || [a, a.toUpperCase()])[1]);
   const parts = [];
+  const bgList = (x) => (x || []).map(v => esc(v)).join(", ");
+  const bgInfo = [j.background_feature,
+    (j.background_languages || []).length ? "Languages: " + bgList(j.background_languages) : "",
+    (j.background_tool_prof || []).length ? "Tool proficiencies: " + bgList(j.background_tool_prof) : ""]
+    .filter(Boolean).join(" · ");
   if (j.applied){
     const as = Object.entries(j.applied.asi || {}).map(([k, v]) => `${esc(lbl(k))} +${v}`).join(", ");
     out.innerHTML = `<span style="color:#9d9">Origin already granted</span> — ` +
       `background <b>${esc(j.applied.background || j.background_name || "")}</b> · ${as} · ` +
+      `${bgInfo || "no background details in the rule pack"} · ` +
       `the build ledger keeps the proof; nothing can be granted twice.`;
     return;
   }
@@ -491,6 +533,9 @@ function renderOriginReport(){
   if (!j.background){ out.innerHTML = parts.join("<br>") || "<span style='opacity:.7'>Save a background first.</span>"; return; }
   parts.push(`<b>${esc(j.background_name)}</b> · ability scores this origin may raise: ${ab.map(a => esc(lbl(a))).join(", ") || "—"}`);
   if (j.feat) parts.push(`Origin feat: <b>${esc(j.feat.name)}</b> — ${esc(j.feat.effect || "see feat text")}`);
+  if (j.background_feature) parts.push(`Background feature: <b>${esc(j.background_feature)}</b>`);
+  if ((j.background_languages || []).length) parts.push(`Languages: ${bgList(j.background_languages)}`);
+  if ((j.background_tool_prof || []).length) parts.push(`Tool proficiencies: ${bgList(j.background_tool_prof)}`);
   const sel = p.originSel || (p.originSel = {mode: "plus2_plus1", plus2: ab[0] || "", plus1: ab[1] || ab[0] || ""});
   parts.push(`<div class="row" style="flex-wrap:wrap">` +
     `<label class="tiny"><input type="radio" name="org-mode" value="plus2_plus1" ${sel.mode === "plus2_plus1" ? "checked" : ""}> +2 and +1</label>` +

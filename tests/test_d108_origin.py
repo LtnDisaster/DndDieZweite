@@ -356,7 +356,7 @@ def test_origin_then_class_build_and_further_levels(client):
     _apply_build(client, player, code, ch["id"], "scout", 4,
                  {"skills": "stealth,perception,acrobatics,athletics",
                   "subclass": "tradition_stalker",
-                  "levels": {"4": {"ability": "str+2"}}})
+                  "levels": {"1": {"expertise": "stealth"}, "4": {"ability": "str+2"}}})
     st = _stats(ch["id"])
     assert st == {"str": 12, "dex": 10, "con": 10, "int": 12, "wis": 11, "cha": 10}
     assert _skills(ch["id"]).get("investigation") == 1     # origin feat still live
@@ -377,7 +377,7 @@ def test_class_build_then_origin_replays_without_double(client):
     _apply_build(client, player, code, ch["id"], "scout", 4,
                  {"skills": "stealth,perception,acrobatics,athletics",
                   "subclass": "tradition_stalker",
-                  "levels": {"4": {"ability": "str+2"}}})
+                  "levels": {"1": {"expertise": "stealth"}, "4": {"ability": "str+2"}}})
     assert _stats(ch["id"])["str"] == 12
     hp_before = db.q1("SELECT hp, max_hp FROM characters WHERE id=?", (ch["id"],))
     assert _apply(client, player, code, ch["id"], {"mode": "three"}).json()["ok"] is True
@@ -405,6 +405,7 @@ def test_character_put_cannot_forgery_or_erase_grants(client):
     assert _stats(ch["id"])["int"] == 10                     # raw sheet edit allowed
     # the next chronology write replays the REAL grant, restoring origin values
     _apply_build(client, player, code, ch["id"], "scout", 1,
-                 {"skills": "stealth,perception,acrobatics,athletics"})
+                 {"skills": "stealth,perception,acrobatics,athletics",
+                  "levels": {"1": {"expertise": "stealth"}}})
     assert _stats(ch["id"])["int"] == 11
     assert _build(ch["id"])["origin"] == led_before["origin"]

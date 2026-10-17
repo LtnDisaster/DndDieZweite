@@ -611,7 +611,9 @@ def map_to_ability(row):
         # very shell (same targeting/DC/cost/chronicle) — no second engine.
         from . import effectops
         try:
-            ops = effectops.validate(row["effects"])
+            ops = effectops.validate(row["effects"],
+                                     duration_rounds=effectops.duration_rounds(
+                                         row.get("duration")))
         except effectops.EffectError:
             return None                          # row coerced valid; paranoia guard
         if not isinstance(ops, list):

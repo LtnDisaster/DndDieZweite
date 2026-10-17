@@ -398,10 +398,11 @@ function renderBestiary(){
 async function saveNpcToBestiary(n, name, tok){
   try {
     await api("/creatures", "POST", { name: name || "Creature", level: n.level, stats: n.stats,
-      hp: n.hp, max_hp: n.max_hp, ac: n.ac, speed: n.speed, attacks: n.attacks || [],
+      hp: n.hp, max_hp: n.max_hp, ac: n.ac, speed: n.speed,
+      darkvision_ft: n.darkvision_ft || 0, attacks: n.attacks || [],
       spells: n.spells || [], spell_slots: n.spell_slots || {},
-      saves: n.saves || {}, defenses: n.defenses || {},
-      abilities: n.abilities || [], resources: n.resources || [], notes: n.notes || "",
+       saves: n.saves || {}, defenses: n.defenses || {}, companion: !!n.companion,
+       abilities: n.abilities || [], resources: n.resources || [], notes: n.notes || "",
       size: tok?.size || n.size || "Medium", disposition: tok?.disposition || n.disposition || "" });
     toast("Saved to Bestiary"); await loadBestiary();
   } catch(e){ toast(e.message); }
@@ -1278,11 +1279,30 @@ function renderSheet(tok){
   // owns every rule and re-checks them, so this UI holds no class logic.
   const buildBlock = ((own || isDM) && ch.id) ? (() => {
     let led = {}; try { led = ch.build ? (typeof ch.build === "string" ? JSON.parse(ch.build) : ch.build) : {}; } catch { led = {}; }
+    const profs = led.class_proficiencies || {};
+    const casting = led.casting || {};
+    const castTxt = casting.ability ? `Casting ability: ${esc(casting.ability.toUpperCase())}` : "";
+    const profTxt = ["weapons", "armor", "tools"]
+      .filter(k => (profs[k] || []).length)
+      .map(k => `${k[0].toUpperCase() + k.slice(1)}: ${esc((profs[k] || []).join(", "))}`)
+      .join(" · ");
+    const sp = led.species || {};
+    const spTxt = sp.name ? [sp.size ? `${esc(sp.size)}` : "",
+      `${sp.speed_ft || 0} ft speed`,
+      sp.fly_ft ? `${sp.fly_ft} ft fly` : "", sp.swim_ft ? `${sp.swim_ft} ft swim` : "",
+      sp.climb_ft ? `${sp.climb_ft} ft climb` : "",
+      sp.darkvision_ft ? `${sp.darkvision_ft} ft darkvision` : "",
+      (sp.languages || []).length ? `Languages: ${esc((sp.languages || []).join(", "))}` : "",
+      (sp.traits || []).length ? `Traits: ${esc((sp.traits || []).join(", "))}` : ""]
+      .filter(Boolean).join(" · ") : "";
     const hist = (led.history || []).map(h => `<div>L${h.level}: ${esc((h.features || []).join(", "))}</div>`).join("");
     return `<details class="sheet-sec"><summary><h3>⬆️ Build / Level-up</h3></summary>` +
       `<div class="meta" style="opacity:.75">${esc(led.class_id || clsTxt || "—")}` +
         (led.applied_through ? ` · built to ${led.applied_through}` : " · unbuilt") +
         (led.subclass ? ` · ${esc(led.subclass)}` : "") + `</div>` +
+      (profTxt ? `<div class="meta" style="opacity:.75">Proficiencies · ${profTxt}</div>` : "") +
+      (castTxt ? `<div class="meta" style="opacity:.75">${castTxt}${casting.model ? ` · ${esc(casting.model)} caster` : ""}</div>` : "") +
+      (spTxt ? `<div class="meta" style="opacity:.75">Species · ${esc(sp.name)} — ${spTxt}</div>` : "") +
       (hist ? `<div class="meta" style="opacity:.8">${hist}</div>` : "") +
       `<div class="row"><input id="bld-class" placeholder="class id" value="${esc(led.class_id || "")}" style="max-width:120px">` +
       `<input id="bld-to" type="number" min="1" max="20" value="${(led.applied_through || 0) + 1}" style="width:52px" title="build TO level">` +
@@ -1424,7 +1444,7 @@ function renderSheet(tok){
     <div class="hpbar"><div style="width:${Math.max(0,ch.hp/ch.max_hp*100)}%;${ch.hp/ch.max_hp<=.25?"background:var(--red)":""}"></div></div>
     <b>HP ${ch.hp}/${ch.max_hp}</b>${ch.temp_hp ? ` (+${ch.temp_hp} temp)` : ""} · AC ${ac} · Speed ${ch.speed} ft
     ${(der.speed_effective && der.speed_effective !== ch.speed) ? `<small style="opacity:.7"> (→ ${der.speed_effective} ft worn)</small>` : ""}${der.darkvision_ft ? ` · <span title="darkvision from equipped items">👁 ${der.darkvision_ft} ft</span>` : ""}
-    ${der.prof_bonus != null ? `<div class="meta" style="opacity:.75">Initiative ${sgn(der.initiative)} · Proficiency ${sgn(der.prof_bonus)} · Hit dice ${Math.max(0,(ch.hit_dice_max||0)-(ch.hit_dice_spent||0))}/${ch.hit_dice_max||0}</div>` : ""}
+    ${der.prof_bonus != null ? `<div class="meta" style="opacity:.75">Initiative ${sgn(der.initiative)} · Proficiency ${sgn(der.prof_bonus)} · Hit dice ${Math.max(0,(ch.hit_dice_max||0)-(ch.hit_dice_spent||0))}/${ch.hit_dice_max||0}${der.hit_dice_bonus ? ` · Gear ${sgn(der.hit_dice_bonus)}` : ""}</div>` : ""}
     ${deathHtml(tok)}
     ${hpStatesHtml(tok, ch, own || isDM)}
     <div class="statline">${STATS.map(([k,l]) =>
@@ -1649,10 +1669,16 @@ function renderNpcSheet(tok){
       <span class="tiny">fly</span><input id="npc-fly" type="number" min="0" value="${n.fly||0}" style="width:46px">
       <span class="tiny">swim</span><input id="npc-swim" type="number" min="0" value="${n.swim||0}" style="width:46px">
       <span class="tiny">climb</span><input id="npc-climb" type="number" min="0" value="${n.climb||0}" style="width:46px">
+      <span class="tiny">dark</span><input id="npc-dark" type="number" min="0" max="999" value="${n.darkvision_ft||0}" style="width:46px">
     </div>
     <div class="row"><button id="npc-inventory" title="Manage this creature's carried gear (lives on the server, players never see it while it stands)">🎒 Inventory</button>
       <button id="npc-loot" title="Take gear from this fallen creature" class="${(n.hp||0) > 0 ? "hidden" : ""}">💰 Loot</button></div>
     <div class="statline">${statCells}</div>
+    ${n.companion ? `<div class="tiny" id="npc-companion">🐾 Companion</div>` : ""}
+    ${Object.entries(n.skills || {}).filter(([, v]) => +v > 0).length
+      ? `<div class="tiny" id="npc-skills">Skills: ${esc(Object.entries(n.skills).filter(([, v]) => +v > 0)
+          .map(([k, v]) => `${SKILLS[k] ? SKILLS[k][0] : k} ${+v >= 2 ? "★★" : "★"}`).join(", "))}</div>`
+      : ""}
     <div class="row chips" id="npc-abil">${abilRolls}</div>
     <div class="row"><label><input type="checkbox" id="npc-prof"> proficient</label>
       <select id="npc-adv"><option value="">—</option><option value="adv">ADV</option><option value="dis">DIS</option></select></div>
@@ -1706,6 +1732,7 @@ function renderNpcSheet(tok){
   $("npc-fly").oninput = e => n.fly = Math.max(0, +e.target.value||0);
   $("npc-swim").oninput = e => n.swim = Math.max(0, +e.target.value||0);
   $("npc-climb").oninput = e => n.climb = Math.max(0, +e.target.value||0);
+  $("npc-dark").oninput = e => n.darkvision_ft = Math.max(0, Math.min(999, +e.target.value||0));
   $("npc-lvl").oninput = e => { n.level = Math.max(1, Math.min(30, +e.target.value||1)); renderNpcSpells(tok); };
   $("npc-inventory").onclick = () => openNpcChest(tok.id);
   const _nl = $("npc-loot"); if (_nl) _nl.onclick = () => openLootChest(tok.id);
@@ -1748,10 +1775,11 @@ function renderNpcSheet(tok){
   $("npc-save").onclick = () => {
     wsSend({ type:"update_npc", token_id: tok.id, label: ($("npc-name").value||"NPC").slice(0,32),
       level: n.level, stats: n.stats, hp: n.hp, max_hp: n.max_hp, ac: n.ac, speed: n.speed,
-      fly: n.fly || 0, swim: n.swim || 0, climb: n.climb || 0,
+       fly: n.fly || 0, swim: n.swim || 0, climb: n.climb || 0,
+       darkvision_ft: n.darkvision_ft || 0,
       attacks: n.attacks, spells: n.spells, spell_slots: n.spell_slots,
-      saves: n.saves, defenses: n.defenses,
-      abilities: n.abilities, resources: n.resources, notes: n.notes,
+       saves: n.saves, defenses: n.defenses, companion: !!n.companion,
+       abilities: n.abilities, resources: n.resources, notes: n.notes,
       size: $("npc-size").value, disposition: $("npc-disp").value || "neutral" });
     toast("NPC saved");
   };
@@ -1831,6 +1859,7 @@ function renderNpcAttacks(tok){
       (a.dmg?`<button class="atk-go" data-m="damage" title="Roll damage only">Dmg</button>`:"") +
       ((+a.dc>0)?`<button class="atk-go" data-m="dc" title="Post save DC">DC ${+a.dc}</button>`:"") +
       `<span class="tiny">dc</span><input class="na-dc" type="number" min="0" max="30" value="${a.dc||0}" style="width:38px">` +
+      `<span class="tiny">reach</span><input class="na-reach" type="number" min="0" max="999" value="${a.reach==null?5:a.reach}" style="width:48px">` +
       `<button class="na-del" title="Remove">✕</button>`;
     const send = mode => { const v = r.querySelector(".na-tgt").value;
       wsSend({ type:"npc_attack", token_id: tok.id, attack: idx, mode, target_id: v ? +v : null }); };
@@ -1838,6 +1867,7 @@ function renderNpcAttacks(tok){
     r.querySelector(".na-hit").oninput = e => a.to_hit = Math.max(-20, Math.min(30, +e.target.value||0));
     r.querySelector(".na-dmg").oninput = e => a.dmg = e.target.value;
     r.querySelector(".na-dc").oninput = e => a.dc = Math.max(0, Math.min(30, +e.target.value||0));
+    r.querySelector(".na-reach").oninput = e => a.reach = Math.max(0, Math.min(999, +e.target.value||0));
     r.querySelector(".na-del").onclick = () => { n.attacks.splice(idx, 1); renderNpcAttacks(tok); };
     for (const b of r.querySelectorAll(".atk-go")) b.onclick = () => send(b.dataset.m);
     box.appendChild(r);

@@ -267,6 +267,51 @@ def _target_ac(room_id, target_id):
     return (blk.get("ac", 10) if blk else None), t["label"]
 
 
+def _vertical_range_distance(room_id, source, target):
+    """Distance in feet along every legitimate plane relationship (D114).
+
+    Shared BODY planes are physical presence. Otherwise an open shaft may expose
+    the target on one of the attacker's body planes, in which case vertical depth
+    counts. ``None`` means no mechanical attack/reach relationship exists.
+    """
+    from .. import vertical
+    from .net import get_map as _get_map
+    from . import vertical3d
+    maps = vertical3d.maps_for(room_id)
+    level_map = vertical3d.level_map(room_id)
+    source_body = vertical3d.body_planes(room_id, source, maps, level_map)
+    target_body = vertical3d.body_planes(room_id, target, maps, level_map)
+    shared = sorted(source_body & target_body)
+    shaft = []
+    for plane in source_body:
+        observed = vertical3d.observable_cells(room_id, target, plane, maps, level_map)
+        if observed and plane not in shared:
+            shaft.append((plane, observed))
+    candidates = []
+    for plane in shared:
+        if maps.get(plane) is None and _get_map(room_id, plane) is None:
+            continue
+        candidates.append((0, vertical3d.body_cells(room_id, source, plane, maps, level_map),
+                           vertical3d.body_cells(room_id, target, plane, maps, level_map)))
+    for plane, observed in shaft:
+        if maps.get(plane) is None and _get_map(room_id, plane) is None:
+            continue
+        vertical_delta = min(abs(vertical.floor_to_ft(level_map.get(plane, 0))
+                                - vertical.floor_to_ft(level_map.get(other, 0)))
+                             for other in target_body)
+        candidates.append((vertical_delta,
+                           vertical3d.body_cells(room_id, source, plane, maps, level_map),
+                           observed))
+    distance = None
+    for vertical_delta, source_cells, target_cells in candidates:
+        cell_distance = [max(abs(a[0] - t[0]), abs(a[1] - t[1]))
+                         for a in source_cells for t in target_cells]
+        candidate = max((max(cell_distance) * 5 if cell_distance else 0), vertical_delta)
+        if distance is None or candidate < distance:
+            distance = candidate
+    return distance
+
+
 def _roll_dmg(expr, bonus, crit):
     parsed = parse_roll(expr)
     if parsed is None:
@@ -494,55 +539,10 @@ async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
             await send_to(ws, "error", {"msg": "No target token"})
             return
         if tok is not None:                      # reach is plane+distance truth
-            from .. import footprint, floors, vertical
-            from .net import get_map as _get_map
-            from . import vertical3d
-            _maps = vertical3d.maps_for(room_id)
-            _lm = vertical3d.level_map(room_id)
-            # D114: find the legitimate plane relationship first. Shared BODY
-            # planes are physical presence and remain pure 2D. Otherwise an open
-            # shaft can expose target cells on one of the attacker's body planes;
-            # its vertical depth is part of the range. No relation => out of reach.
-            _a_body = vertical3d.body_planes(room_id, tok, _maps, _lm)
-            _t_body = vertical3d.body_planes(room_id, target, _maps, _lm)
-            _shared = sorted(_a_body & _t_body)
-            _shaft = []
-            for _p in _a_body:
-                _obs = vertical3d.observable_cells(room_id, target, _p, _maps, _lm)
-                if _obs and _p not in _shared:
-                    _shaft.append((_p, _obs))
-            if not _shared and not _shaft:
+            dist = _vertical_range_distance(room_id, tok, target)
+            if dist is None:
                 await send_to(ws, "error", {"msg": "Target is out of reach"})
                 return
-            _cands = []
-            for _p in _shared:
-                _mp = _maps.get(_p) or _get_map(room_id, _p)
-                if _mp is None:
-                    continue
-                _cands.append((0, vertical3d.body_cells(room_id, tok, _p, _maps, _lm),
-                               vertical3d.body_cells(room_id, target, _p, _maps, _lm)))
-            for _p, _obs in _shaft:
-                _mp = _maps.get(_p) or _get_map(room_id, _p)
-                if _mp is None:
-                    continue
-                _vc = min(abs(vertical.floor_to_ft(_lm.get(_p, 0))
-                              - vertical.floor_to_ft(_lm.get(q, 0)))
-                          for q in _t_body)
-                _cands.append((_vc, vertical3d.body_cells(room_id, tok, _p, _maps, _lm),
-                               _obs))
-            _dist = None
-            for _vc, _ac, _tc in _cands:
-                _cd = [max(abs(a[0] - t[0]), abs(a[1] - t[1]))
-                       for a in _ac for t in _tc]
-                _d = max((max(_cd) * 5 if _cd else 0), _vc)
-                if _dist is None or _d < _dist:
-                    _dist = _d
-            if _dist is None:
-                await send_to(ws, "error", {"msg": "Target is out of reach"})
-                return
-            # D109 fix: token coordinates are PIXELS; the reach/range maths is
-            # FEET. Existing same-plane distance is unchanged.
-            dist = _dist
             normal_r = prof.get("range_ft", 0)
             long_r = prof.get("range_long_ft", 0)
             if normal_r > 0:                     # D98 ranged tiers: normal / long / beyond
@@ -909,6 +909,16 @@ async def handle_npc_attack(ws, room_id, user, is_dm, msg):
     if mode == "damage":
         await _roll_npc_damage(room_id, user, label, atk)
         return
+    if msg.get("target_id") is not None:
+        target = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                       (msg["target_id"], room_id))
+        if target is None:
+            await send_to(ws, "error", {"msg": "No target token"})
+            return
+        dist = _vertical_range_distance(room_id, tok, target)
+        if dist is None or dist > atk.get("reach", 5):
+            await send_to(ws, "error", {"msg": "Target is out of reach"})
+            return
     adv = await _consume_markers(room_id, tok, msg.get("adv"),
                                  msg.get("target_id"))          # D109 markers
     res = do_roll("1d20", adv)
@@ -1253,8 +1263,12 @@ async def handle_short_rest(ws, room_id, user, is_dm, msg):
     if spend:
         res = do_roll(f"{spend}d{hd}", None)
         if res:
-            healed = max(0, res["total"] + con_mod)
-            rolltxt = f" spent {spend}d{hd} (CON {con_mod:+d}): {healed} HP"
+            gear_bonus = int(gear.effective_gear(ch).get("hit_dice_bonus") or 0) * spend
+            healed = max(0, res["total"] + con_mod + gear_bonus)
+            rolltxt = f" spent {spend}d{hd} (CON {con_mod:+d}"
+            if gear_bonus:
+                rolltxt += f", gear {gear_bonus:+d}"
+            rolltxt += f"): {healed} HP"
     new_hp = min(ch["max_hp"], ch["hp"] + healed)
     resources = gear.clean_resources(db.j(ch.get("resources"), []))
     for r in resources:

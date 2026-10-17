@@ -895,11 +895,8 @@ function onDown(e){
   }
   if (state.spawnCreature && state.room.role === "dm" && !state.editing){
     const { cx, cy } = clickCell(p); const c = state.spawnCreature, blk = c.block || {}, cs = cellSize();
-    wsSend({ type:"add_token", label:c.name, x:(cx+.5)*cs, y:(cy+.5)*cs, level:blk.level, stats:blk.stats,
-      hp:blk.hp, max_hp:blk.max_hp, ac:blk.ac, speed:blk.speed, attacks:blk.attacks,
-      spells:blk.spells, spell_slots:blk.spell_slots, saves:blk.saves, defenses:blk.defenses,
-      abilities:blk.abilities, resources:blk.resources, notes:blk.notes,
-      size:blk.size, disposition:blk.disposition });
+    wsSend({ type:"add_token", label:c.name, x:(cx+.5)*cs, y:(cy+.5)*cs, npc:blk,
+       size:blk.size, disposition:blk.disposition });
     state.spawnCreature = null; return;
   }
   const wx = p.x - state.cam.ox, wy = p.y - state.cam.oy;

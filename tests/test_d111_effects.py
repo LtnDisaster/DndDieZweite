@@ -125,6 +125,7 @@ def test_validator_is_a_closed_world():
         {"ops": [{"op": "heal", "expr": "1d4"}]},                # no version
         {"v": 1, "ops": []},                                     # empty root
         {"v": 1, "ops": [{"op": "heal", "expr": "1d4", "side": "x"}]},  # surplus
+        {"v": 1, "ops": [{"op": "resource", "id": "ki", "mode": "grant"}]},
         {"v": 1, "ops": [{"op": "heal", "expr": "1d4"}] * 9},    # > MAX_OPS
         {"v": 1, "ops": [{"op": "save", "ability": "str", "dc": 10,
                           "success": [{"op": "save", "ability": "str", "dc": 10,
@@ -142,6 +143,11 @@ def test_validator_is_a_closed_world():
          "failure": [{"op": "condition", "key": "shaken", "rounds": 1,
                       "until": "end"}]}]})
     assert good[0]["op"] == "save" and good[0]["target"] == "target"  # defaults
+    resources = effectops.validate([{"op": "resource", "id": "ki"},
+                                    {"op": "resource", "id": "ki",
+                                     "mode": "restore"}])
+    assert resources[0]["mode"] == "cost"           # back-compatible default
+    assert resources[1]["mode"] == "restore"
 
 
 def test_canon_is_byte_stable_and_export_safe():
@@ -176,6 +182,63 @@ def test_builtin_hooks_are_srd_wired():
     assert CND.expired_keys([{"k": "prone", "rounds": 1, "until": ""}],
                             [{"k": "prone", "rounds": 1, "until": "start"}]) == []
     assert CND.expired_keys([{"k": "prone", "rounds": 1, "until": ""}], []) == ["prone"]
+
+
+def test_duration_can_seed_condition_rounds_without_a_second_clock():
+    assert effectops.duration_rounds("Concentration, up to 1 minute") == 10
+    assert effectops.duration_rounds("1 hour") == 60
+    assert effectops.duration_rounds("Instantaneous") == 0
+    assert effectops.duration_rounds("Permanent") == 0
+    assert effectops.duration_rounds("not a duration") == 0
+
+    resolved = effectops.validate(
+        [{"op": "condition", "key": "slicked", "rounds": "duration", "until": "end"}],
+        duration_rounds=10)
+    assert resolved[0]["rounds"] == 10 and resolved[0]["until"] == "end"
+
+    omitted = effectops.validate([{"op": "condition", "key": "slicked"}],
+                                  duration_rounds=3)
+    assert omitted[0]["rounds"] == 3
+
+    carried = effectops.canon([{"op": "condition", "key": "slicked"}],
+                              preserve_duration=True)
+    assert json.loads(carried)["ops"][0]["rounds"] == "duration"
+    assert effectops.validate(carried, duration_rounds=10)[0]["rounds"] == 10
+
+
+def test_spell_duration_feeds_its_effect_condition():
+    row = {
+        "id": "test_slick", "name": "Test Slick", "level": 1, "school": "transmutation",
+        "casting_ability": "int", "targeting": "single", "range_ft": 30,
+        "casting_time": "1 action", "duration": "Concentration, up to 1 minute",
+        "resolution": "auto", "class_list": "testcaster",
+        "effects": '[{"op":"condition","key":"slicked","until":"end"}]',
+    }
+    defn = C.map_to_ability(row)
+    assert defn is not None
+    assert defn["ops"][0]["rounds"] == 10
+
+
+def test_item_duration_seeds_condition_rounds(client):
+    users, code = _room(client)
+    dm, player = users[0], users[1]
+    ch = _player_char(client, player, code)
+    tok = token_of(client, player, code, ch)
+    did = _mkdef(client, dm, code, {
+        "effects": '[{"op":"condition","key":"slicked","until":"end"}]',
+        "duration": "1 minute",
+        "trigger": "use",
+    }, name="Long Oil", kind="potion")
+    grant_item(client, dm, code, ch["id"], did)
+    it = next(i for i in char_items(client, player, code) if i["def_id"] == did)
+    assert it["props"]["duration"] == "1 minute"
+    assert json.loads(it["props"]["effects"])["ops"][0]["rounds"] == "duration"
+    with ws_connect(client, player, code) as ws:
+        ws.send_json({"type": "use_item", "token_id": tok, "item_id": it["id"],
+                      "op_id": "u" + uuid.uuid4().hex[:8]})
+        _recv(ws, "whisper", expect=lambda p: "slicked" in str(p).lower())
+    entry = next(c for c in conds_of(tok) if c["k"] == "slicked")
+    assert entry["rounds"] == 10 and entry["until"] == "end"
 
 
 def test_conditions_csv_merges_and_invalidates(client):
@@ -455,6 +518,30 @@ def test_resource_preflight_costs_nothing(client):
         err = recv_until(ws, "error")["payload"]["msg"]
     assert "ki" in err and "not available" in err
     assert _hp(ch["id"])["hp"] == 10              # the heal did NOT sneak through
+
+
+def test_resource_restore_uses_the_existing_ledger(client):
+    users, code = _room(client)
+    player = users[1]
+    cell = effectops.canon([{"op": "resource", "id": "ki", "mode": "restore"}])
+    csv = ("id,name,effects\n"
+           f"ki_restore,\"Ki Restore\",\"{cell.replace(chr(34), chr(34) * 2)}\"\n")
+    C.import_package({"spells.csv": csv}, rid_of(code), mode="apply", apply=True)
+    ch = _player_char(client, player, code)
+    tok = token_of(client, player, code, ch)
+    db.x("UPDATE characters SET resources=? WHERE id=?",
+         (db.json_dumps([{"id": "ki", "name": "Ki", "current": 0, "max": 2,
+                          "reset": "short"}]), ch["id"]))
+    _set_abilities(ch["id"], ["ki_restore"])
+    with ws_connect(client, player, code) as ws:
+        ws.send_json({"type": "ability_cast", "token_id": tok,
+                      "ability_id": "ki_restore", "target_id": tok,
+                      "op_id": "r" + uuid.uuid4().hex[:8]})
+        res = recv_until(ws, "ability_result")["payload"]
+    assert res["entries"][0]["applied"]
+    resources = gear.clean_resources(db.j(
+        db.q1("SELECT resources FROM characters WHERE id=?", (ch["id"],))["resources"], []))
+    assert next(r for r in resources if r["id"] == "ki")["current"] == 1
 
 
 def test_trigger_ping_pong_is_bounded(client):

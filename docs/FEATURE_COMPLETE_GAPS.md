@@ -45,15 +45,19 @@ CSV-Arbeit. Reihenfolge ist die einzige sinnvolle (Unterbau zuerst).
 |---|---|---|---|
 | Effektgrammatik: Bewegungs-/Positionseffekte | Schub, Teleport, erzwungener Schritt — `moveforced`-Engine existiert schon, nur nicht als Effekttyp ansprechbar | M | G |
 | Effektgrammatik: Probe/Wurf als Effekt | Rettung/Angriff innerhalb einer Effekt-Kette (nicht nur als Auflösung eines Zaubers) | M | G |
-| Effektgrammatik: Ressourcen ändern (gewähren, nicht nur kosten) | `resource`-Feld kennt nur Kosten | S | G |
-| Effektgrammatik: Dauer mit Rettungs-Ende | Bedingungs-Runden kennen nur feste `rounds`/`until`-Anker | M | G |
+| Effektgrammatik: Ressourcen ändern (gewähren, nicht nur kosten) | ✅ D125: `resource.mode=restore` gibt eine vorhandene Charakter-Ressource um 1 Nutzung zurück; `cost` bleibt Standard alter Zellen und der atomare Preflight bezahlt nur Kosten. Eine völlig neue Ressource erzeugen bleibt bewusst nicht Aufgabe eines Effekts | S | G |
+| Effektgrammatik: Dauer mit Rettungs-Ende | ⚠ D117: `duration` is now the initial-round source for a condition op via `"rounds":"duration"` (or omitted rounds); an explicit save that ENDS the condition on success remains open | M | G |
 | Zustandskatalog als CSV (`conditions.csv`) | 18 Keys hartcodiert; Wirkung-Hooks bleiben Code pro KEY-TYP, Katalog+Anker+Hooks-Flags werden Daten | M | G |
 | Item-Effektgrammatik | heute `heal`+charges; Ziel: dieselbe Effektgrammatik wie der Executor, ausgelöst bei use/equip/attack | L (baut auf G oben auf) | G |
-| creatures.csv → NPC-Block-Projektion | Import heute bereits, Projektion fehlt komplett | M | G |
-| Spezies → Bogen (Größe→Token-Footprint, Tempo, Sinne, Sprach-Traits) | Größen-Footprint-Engine ist fertig (NPC-Seite), nur nicht für PC gemappt | M | G |
-| Dauer-Ablauf-Engine für Zauber-Effekte | Bedingungen ticken bereits (3 Uhren) — Konsument für spell `duration` | M | G |
-| Ausrüstungs-Speed/`darkvision_ft` an die Pfade hängen | Ein `_speeds`-Pflegestück + Sicht-Hook | S | G |
-| `feats.requires`, `feats.spells_grant`, Background-Fertigkeiten auf den Bogen, `classes.proficiencies` | jeweils ein klarer, kleiner Anwendungspunkt im Build-Rechner | je S–M | G |
+| creatures.csv → NPC-Block-Projektion | ✅ D122: projection to the one existing `npc.clean_npc()` shape, DM preview/import into the personal bestiary, and real-Chromium click-through; unsupported free-form text stays visible instead of being silently faked | M | G |
+| Spezies → Bogen (Größe→Token-Footprint, Tempo, Sinne, Sprach-Traits) | ✅ D126: size/speed/modes/darkvision drive the existing sheet→movement/LOS/footprint paths; languages/traits remain provenance/display and deliberately have no new adjudication engine | M | G |
+| Dauer-Ablauf-Engine für Zauber-Effekte | ⚠ D117: spell/item `duration` now seeds condition rounds through the existing combat clock; non-combat wall-clock expiry remains intentionally absent | M | G |
+| Ausrüstungs-Speed/`darkvision_ft` an die Pfade hängen | ✅ Nachtschicht 2026-10-16: `movement._speeds` and darkvision LOS read `gear.effective_gear`; equipment feet are converted to LOS cells at 5 ft/cell | S | G |
+| `feats.spells_grant`, Background-Fertigkeiten auf den Bogen | ✅ Nachtschicht 2026-10-16: origin/background skills and feat spell grants flow through the existing build chronology | je S | G |
+| Background-Tools/-Sprachen/-Feature, `classes.weapon_prof/armor_prof`, Subclass-Features, Spezies-Daten | ⚠ Nachtschicht 2026-10-16: now ledger/sheet provenance and display where possible; still no separate adjudication engine (correct by design) | M | G |
+| `feats.requires` | ✅ D121: ability-score, skill-proficiency and prior-feat prerequisites are parsed and server-enforced; unknown forms fail closed. Weapon/tool/spellcasting/rank prerequisites remain intentionally unsupported until a real mechanic exists | S | G |
+| `classes.spellcasting_ability` in Build/UI | ✅ D118: plan/apply/build-ledger carry the class casting ability and prep/room UI display it; per-spell ability execution intentionally remains the single authoritative path | S | G |
+| `classes.expertise` guided UI | ✅ D119: plan/apply expose level, count and candidate skills; prep wizard renders checkboxes; server requires exact, unique, proficient choices through the existing skill axis | S | G |
 
 ## C. Reiner CSV-Inhalt (sobald A/B grünen — keine Engine-Arbeit mehr)
 
@@ -127,6 +131,10 @@ und jeweils eine geschlossene Nutzer-Erzählung liefert:
    Blind/Poison-Hooks, Monster-Sonderaktionen aus NPC-Block (B-Vorstufe).
 5. **S44 — Datenprojektion (B):** creatures.csv→NPC, Spezies→Bogen,
    Feat-/Background-Lücken schließen, Ausrüstungs-Speed/Darkvision.
+   **Teile umgesetzt (Nachtschicht 2026-10-16):** Ausrüstungs-Speed/Darkvision,
+   Background-Fertigkeiten/Tools/Sprachen/Feature, `feats.spells_grant`,
+   Klassen-/Subclass-/Spezies-Provenienz. `feats.requires` sowie mechanische
+   Adjudikation der Klassen-/Spezieswerte bleiben offen.
 6. **S45+ — CSV-Produktion (C) & Betrieb (O):** SRD-Packs, Bestiarium,
    Abenteuer, Deploy-Härtung.
 

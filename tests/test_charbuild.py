@@ -49,7 +49,7 @@ def test_plan_scout_level20_chronology(client):
     assert p["needs"]["skills"] and p["needs"]["skill_count"] == 4
     assert len(p["needs"]["skill_options"]) == 11
     assert p["needs"]["subclass"] and "tradition_stalker" in p["subclass_options"]
-    assert set(p["needs"]["levels"]) == {"4", "8", "12", "16", "19"}
+    assert set(p["needs"]["levels"]) == {"1", "4", "6", "8", "12", "16", "19"}
 
 
 def test_plan_rejects_no_level1_and_out_of_range(client):
@@ -63,7 +63,8 @@ def test_plan_rejects_no_level1_and_out_of_range(client):
 def test_apply_level1_sets_hp_saves_skills(client):
     _dm, player, _code, _ch, rid = _room(client)
     cid = _fresh(client, player)["id"]
-    ok, res = CB.apply(cid, "scout", 1, {"skills": ["stealth", "perception", "acrobatics", "athletics"]}, rid)
+    ok, res = CB.apply(cid, "scout", 1, {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                                           "levels": {"1": {"expertise": "stealth"}}}, rid)
     assert ok and res["level"] == 1 and res["max_hp"] == 14
     row = db.q1("SELECT * FROM characters WHERE id=?", (cid,))
     assert progression.load(row) == [{"class_id": "scout", "level": 1}]
@@ -71,6 +72,7 @@ def test_apply_level1_sets_hp_saves_skills(client):
     assert set(db.j(row["saves"], {})) >= {"dex", "int"}
     skills = gear.clean_skills(db.j(row["skills"], {}))
     assert {"stealth", "perception", "acrobatics", "athletics"} <= {k for k, v in skills.items() if v}
+    assert skills["stealth"] == 2
 
 
 def test_apply_missing_choices_writes_nothing(client):
@@ -90,7 +92,8 @@ def test_apply_level8_applies_chronological_choices(client):
     cid = _fresh(client, player)["id"]
     choices = {"skills": ["stealth", "perception", "acrobatics", "athletics"],
                "subclass": "tradition_stalker",
-               "levels": {"4": {"ability": {"dex": 2}}, "8": {"feat": "feat_keen"}}}
+               "levels": {"1": {"expertise": "stealth"}, "4": {"ability": {"dex": 2}},
+                          "6": {"expertise": "perception"}, "8": {"feat": "feat_keen"}}}
     ok, res = CB.apply(cid, "scout", 8, choices, rid)
     assert ok and res["level"] == 8 and res["max_hp"] == 49   # 14 + 5*7
     assert res["subclass"] == "tradition_stalker" and res["feats"][0]["id"] == "feat_keen"
@@ -109,7 +112,8 @@ def test_apply_level20_and_repeat_guard(client):
     cid = _fresh(client, player)["id"]
     choices = {"skills": ["stealth", "perception", "acrobatics", "athletics"],
                "subclass": "tradition_stalker",
-               "levels": {"4": {"ability": {"dex": 2}}, "8": {"ability": {"dex": 2}},
+               "levels": {"1": {"expertise": "stealth"}, "4": {"ability": {"dex": 2}},
+                          "6": {"expertise": "perception"}, "8": {"ability": {"dex": 2}},
                           "12": {"ability": {"dex": 2}}, "16": {"ability": {"dex": 2}},
                           "19": {"ability": {"dex": 2}}}}
     ok, res = CB.apply(cid, "scout", 20, choices, rid)
@@ -123,21 +127,60 @@ def test_forward_only_multi_step_merges_decisions(client):
     _dm, player, _code, _ch, rid = _room(client)
     cid = _fresh(client, player)["id"]
     step1 = {"skills": ["stealth", "perception", "acrobatics", "athletics"],
-             "subclass": "tradition_stalker", "levels": {"4": {"ability": {"dex": 2}}}}
+             "subclass": "tradition_stalker",
+             "levels": {"1": {"expertise": "stealth"}, "4": {"ability": {"dex": 2}}}}
     assert CB.apply(cid, "scout", 5, step1, rid)[0]
     row = db.q1("SELECT * FROM characters WHERE id=?", (cid,))
     assert gear.as_sheet(row)["stats"]["dex"] == 16
-    # advancing to 8 only supplies the NEW level-8 choice; the level-4 ASI is remembered
-    ok, res = CB.apply(cid, "scout", 8, {"levels": {"8": {"feat": "feat_keen"}}}, rid)
+    # advancing to 8 supplies the NEW level-6/8 choices; level-1/4 are remembered
+    ok, res = CB.apply(cid, "scout", 8, {"levels": {"6": {"expertise": "perception"},
+                                                       "8": {"feat": "feat_keen"}}}, rid)
     assert ok and res["level"] == 8
     stats = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (cid,)))["stats"]
     assert stats["dex"] == 16 and stats["wis"] == 13             # level-4 + level-8 both retained
 
 
+def test_feat_prerequisite_parser_supports_modelled_and_refuses_other_forms():
+    assert CB._parse_feat_requires("Dex 13 or higher")[0] == [
+        {"kind": "ability", "ability": "dex", "score": 13}]
+    assert CB._parse_feat_requires("Skill Proficiency — Stealth")[0] == [
+        {"kind": "skill", "skill": "stealth"}]
+    assert CB._parse_feat_requires("feat Alert")[0] == [
+        {"kind": "feat", "feat": "alert"}]
+    assert CB._parse_feat_requires("")[0] == []
+    assert CB._parse_feat_requires("Perception 5 ranks")[1].startswith("unsupported prerequisite")
+
+
+def test_plan_for_character_marks_feat_prerequisites(client):
+    _dm, player, _code, _ch, rid = _room(client)
+    cid = _fresh(client, player)["id"]
+    ok, _res = CB.apply(cid, "scout", 1, {
+        "skills": ["stealth", "perception", "acrobatics", "athletics"],
+        "levels": {"1": {"expertise": "stealth"}}}, rid)
+    assert ok
+    p = CB.plan_for_character(cid, "scout", 8, rid)
+    option = next(o for o in p["needs"]["levels"]["8"]["feat_options"] if o["id"] == "feat_keen")
+    assert option["available"] and option["missing"] == []
+
+
+def test_apply_refuses_feat_prerequisite(client):
+    _dm, player, _code, _ch, rid = _room(client)
+    cid = _fresh(client, player)["id"]
+    ok, res = CB.apply(cid, "scout", 8, {
+        "skills": ["stealth", "acrobatics", "athletics", "sleight_of_hand"],
+        "subclass": "tradition_stalker",
+        "levels": {"1": {"expertise": "stealth"}, "4": {"ability": {"dex": 2}},
+                   "6": {"expertise": "acrobatics"}, "8": {"feat": "feat_keen"}}}, rid)
+    assert ok is False
+    assert "prerequisites not met" in res["error"]
+    assert "perception" in res["error"]
+
+
 def test_ledger_survives_reload(client):
     _dm, player, _code, _ch, rid = _room(client)
     cid = _fresh(client, player)["id"]
-    CB.apply(cid, "scout", 1, {"skills": ["stealth", "perception", "acrobatics", "athletics"]}, rid)
+    CB.apply(cid, "scout", 1, {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                               "levels": {"1": {"expertise": "stealth"}}}, rid)
     led = CB.ledger(db.q1("SELECT * FROM characters WHERE id=?", (cid,)))   # fresh load = "restart"
     assert led["class_id"] == "scout" and led["applied_through"] == 1
 
@@ -145,7 +188,8 @@ def test_ledger_survives_reload(client):
 def test_different_class_refused_once_started(client):
     _dm, player, _code, _ch, rid = _room(client)
     cid = _fresh(client, player)["id"]
-    CB.apply(cid, "scout", 1, {"skills": ["stealth", "perception", "acrobatics", "athletics"]}, rid)
+    CB.apply(cid, "scout", 1, {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                               "levels": {"1": {"expertise": "stealth"}}}, rid)
     ok, res = CB.apply(cid, "adept", 2, {}, rid)
     assert ok is False and "already building" in res["error"]
 
@@ -162,14 +206,16 @@ def test_rest_owner_can_plan_and_apply(client):
                    headers=H(player))
     assert r.status_code == 200 and r.json()["ok"] and len(r.json()["levels"]) == 1
     r = _post_apply(client, player, code, ch["id"],
-                    {"class_id": "scout", "to": 1, "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"]}})
+                    {"class_id": "scout", "to": 1, "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                                             "levels": {"1": {"expertise": "stealth"}}}})
     assert r.status_code == 200 and r.json()["ok"] and r.json()["result"]["level"] == 1
 
 
 def test_rest_room_dm_may_build_a_member_character(client):
     dm, _player, code, ch, rid = _room(client)
     r = _post_apply(client, dm, code, ch["id"],
-                    {"class_id": "scout", "to": 1, "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"]}})
+                    {"class_id": "scout", "to": 1, "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                                             "levels": {"1": {"expertise": "stealth"}}}})
     assert r.status_code == 200 and r.json()["ok"]
 
 
@@ -178,7 +224,8 @@ def test_rest_member_not_owner_and_outsider_refused(client):
     outsider = reg(client, "outs")
     member2 = reg(client, "mem")
     join_room(client, member2, code)
-    body = {"class_id": "scout", "to": 1, "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"]}}
+    body = {"class_id": "scout", "to": 1, "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                                             "levels": {"1": {"expertise": "stealth"}}}}
     # a room member who is not the owner and not the DM is refused
     assert _post_apply(client, member2, code, ch["id"], body).status_code == 403
     # an outsider is refused (not even a member)

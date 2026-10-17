@@ -147,7 +147,7 @@ emit("background", [
 
 # ------------------------------------------------------------ feats
 emit("feat", [
-    {'id': 'feat_keen', 'name': 'Keen Mind', 'requires': 'Perception 5 ranks', 'ability_boost': 'wis+1', 'skill_prof': 'perception, investigation', 'effect': '+1 Wisdom; +1 to Perception and Investigation checks', 'category': 'general', 'manual': 'demo feat (house rule); the 2024 SRD has no such prerequisite'},
+    {'id': 'feat_keen', 'name': 'Keen Mind', 'requires': 'Skill Proficiency — Perception', 'ability_boost': 'wis+1', 'skill_prof': 'perception, investigation', 'effect': '+1 Wisdom; +1 to Perception and Investigation checks', 'category': 'general', 'manual': 'demo feat (house rule); the prerequisite is machine-readable and proficiency-based'},
     {'id': 'feat_nimble', 'name': 'Nimble Steps', 'ability_boost': 'dex+1', 'effect': '+1 Dexterity (max 20)', 'category': 'general', 'manual': 'the 5 ft speed increase is not automated today'},
     {'id': 'feat_quick_study', 'name': 'Quick Study', 'skill_prof': 'investigation', 'effect': "Proficiency in Investigation; you can recall a book's exact wording", 'category': 'origin', 'manual': 'demo origin feat (house rule) for bg_scholar'},
     {'id': 'feat_alley_cat', 'name': 'Alley Cat', 'skill_prof': 'stealth', 'effect': 'Proficiency in Stealth; you always know the nearest way out of a building', 'category': 'origin', 'manual': 'demo origin feat (house rule) for bg_urchin'},

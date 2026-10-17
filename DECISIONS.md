@@ -2801,3 +2801,277 @@ lines name conditions by design (public table record, D90).
   `tests/test_d114_phase6_vertical_movement.py` (7) und Phase-8-Integrationstests
   in `tests/test_d114_phase8_integration.py` (4). Kanonischer Stand nach
   Sprint-43-Abschluss: **948 passed, 1 skipped, 0 failed**.
+
+## D115 — Nachtschicht 2026-10-16: bereits vorhandene Gear-/Build-Spalten erreichen die bestehenden Pfade, ohne neue Regelmaschinen
+
+- **Ausgangslage:** D114 ließ eine dokumentierte, schmale Lücke: mehrere
+  CSV-Felder (`speed_bonus_ft`, `darkvision_ft`, `backgrounds.skill_prof`,
+  `feats.spells_grant`, Klassen-/Spezies-/Subclass-Felder) waren bereits
+  validiert importiert, aber teilweise ohne Konsumenten oder nur als Bogenanzeige.
+  Die Nachtschicht entschied nicht für neue Mechanik, sondern dafür, die
+  vorhandenen Kanäle tatsächlich bis zu ihren Konsumenten zu führen.
+
+- **Ausrüstung:** `movement._speeds` liest den vollständigen PC-Sheet durch
+  `gear.as_sheet` und damit `gear.clean_speeds`, statt isoliert nur die
+  `speed`-Spalte. `visibility._token_darkvision_cells` übernimmt zusätzlich
+  `gear.effective_gear()["darkvision_ft"]`; Zellenradius bleibt 5 ft pro
+  Rasterschritt. Der Tokenwert bleibt DM-/Operator-Authoring, Ausrüstung hebt
+  ihn nur auf, ohne eine zweite Sichtmaschine. `hit_dice_bonus` wird über den
+  einen Gear-SSOT in den Short-Rest-Weg gehoben, und `hands:2` nutzt
+  ausschließlich die bestehende Zwei-Hände-Regel.
+
+- **Build:** `backgrounds.skill_prof` wird in `_replay_origin` auf dem
+  bestehenden Origin-/Chronology-Pfad angewandt. `feats.spells_grant` nutzt
+  dieselbe Grant-Achse wie Subklassen und fließt in den bestehenden
+  `spell_state`/`characters.spells`-Pfad; auch außerhalb des Klassenpools
+  gültige Raum-Zauber können projiziert werden. `classes.expertise` wird
+  optional auf der bereits vorhandenen Skill-Achse angewandt (0/1/2): Die
+  Auswahl bleibt hinter der Zeilenkapazität und einer bereits bestehenden
+  Profizienz zurück, wenn die Klasse keine Expertise zulässt.
+
+- **Provenienz statt zweiter Regelkern:** Background-Tools/Sprachen/Features,
+  `classes.weapon_prof`/`armor_prof`, Subclass-Features und die Species-Zeile
+  werden als read-only Ledger-/UI-Projektion erfasst. Sie liefern nachvollziehbare
+  Sheet-Informationen, ohne Größentypen, Bewegung oder Waffen-/Rüstungsadjudikation
+  aus dem bestehenden Fußabdruck-/Item-/Executor-Kern wegzunehmen.
+
+- **Bewusste Grenzen:** `feats.requires` bleibt Inhaltstext; eine echte Prüfung
+  würde ein 2024-Fertigkeitsrangmodell erfordern, das die Engine nicht besitzt.
+  Species-, Klassen- und Subclass-Texte steuern weiterhin nicht automatisch
+  Bewegung, Footprint oder Kampfentscheidungen. `items.duration` und
+  Zauber-Dauerablauf bleiben offene, separat dokumentierte Punkte.
+
+- **Konsequenzen:** Neue Tests in
+  `tests/test_engine_gear_grants.py` (11) pinen Ausrüstungs-Speed, Ausrüstungs-
+  Dunkelsicht, Hit-Dice-Bonus, Hand-Count, Background-Fertigkeiten,
+  Background-Feature/Languages, Feat-Spell-Grant, optionale Klassen-Expertise,
+  Klassen-/Subclass-/Species-Projektion. Kanonischer Stand nach der
+  Nachtschicht: **959 passed, 1 skipped, 0 failed**.
+
+## D116 — AP-001: Der Reichweiten-/Reach-Härtungstest wird nicht reaktiviert, sondern seine eigentliche Testfehlerquelle entfernt
+
+- **Ausgangslage:** Der einzige dauerhafte Kanon-Skip markierte den
+  Live-Härtungstest `test_out_of_range_and_cross_reach_refused` als „flaky in
+  the test harness“. Die Server-Engine hatte die Reichweiten- und Reach-Gates
+  bereits, aber ohne Live-Test blieb die Behauptung unbewiesen.
+
+- **Diagnose:** Kein Race und keine Engine-Lücke: `item_defs` werden im
+  `/state`-Payload alphabetisch sortiert. Der Test griff nach dem Anlegen
+  zweier Definitionen positionell auf `[0]` und `[-1]` zu. Nach der zweiten
+  Anlage war `Dagger` alphabetisch vor `Dart`, sodass der Test versehentlich
+  die erste Waffe erneut grantete. Eine zusätzliche Assert-Drift erwartete die
+  ehemalige Textur „out of range“, während die Engine heute „maximum range“
+  zurückgibt.
+
+- **Entscheidung:** Der Test wird durch eindeutige Namensauflösung determinisch
+  gemacht und prüft die aktuell autoritativen Fehlerformulierungen exakt. Der
+  Skip wird entfernt, statt ihn mit einem Retry zuzukleistern.
+
+- **Konsequenzen:** Die Kanonsuite läuft erstmals wieder vollständig ohne
+  dauerhaften Skip: **960 passed, 0 skipped, 0 failed**. Der angebundene
+  Reichweiten-/Reach-Sicherheitsnachweis ist als AP-001 abgeschlossen und im
+  `docs/AUTONOMOUS_WORK_LOG.md` dokumentiert.
+
+## D117 — AP-003: `duration` wird Startwert der bestehenden Bedingungsuhr, nicht eine zweite Uhr
+
+- **Ausgangslage:** `duration` existierte in `spells.csv` und `items.csv`, aber
+  nur als Text. Eine `condition`-Operation musste ihre Runden manuell
+  wiederholen, was CSV-Inhalt und Mechanik unnötig koppelte und eine falsche
+  „ohne Konsumenten“-Lücke erzeugte.
+
+- **Entscheidung:** Die bestehende Condition/Runden-Lifecycle-Engine bleibt die
+  einzige Uhr. Für ihren START-WERT darf eine condition-Operation `"duration"`
+  verwenden; ein fehlendes `rounds` ist gleichbedeutend. `duration_rounds()`
+  übersetzt ausschließlich in Runden (`1 minute → 10`, `1 hour → 60`, `1 day`
+  auf die bestehende 999-Runden-Obergrenze). `instant`, `permanent` und
+  unbekannte Texte bleiben 0, was dem bisherigen Marker-Verhalten entspricht.
+
+- **Speicherstrategie:** Zaubereffekte werden beim Mapping mit der konkreten
+  Dauer aufgelöst. Item-Definitionen behalten den Marker im kanonischen JSON,
+  damit eine Änderung von `props.duration` beim nächsten Auslösen wirksam wird.
+  Dadurch bleibt die Canonisierung stabil, ohne den Itemwert einzubrennen.
+
+- **Konsequenzen:** Die Kanonsuite wuchs auf **963 passed, 0 skipped, 0 failed**.
+  Die Dokumentation unterscheidet jetzt sauber zwischen combat round expiry,
+  Noncombat-Wanduhr und einem zusätzlichen Save, der eine Bedingung vorzeitig
+  beendet. Nur Ersteres ist durch diese Entscheidung abgedeckt.
+
+## D118 — AP-004: Klassen-Casting-Ability als additive Build-Meta (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `classes.spellcasting_ability` war in den Klassendaten vorhanden,
+  wurde aber vom Build-Plan, Apply-Resultat, Ledger und der UI ignoriert.
+- **Entscheidung:** `charbuild` liest die erste gültige Klassenlevel-Angabe und
+  stellt sie als `plan.needs.spell.ability`, `apply.casting_ability` sowie
+  `build.casting.ability` bereit. Prep-Wizard und Raum-Bogen zeigen die Meta an.
+  Die Ausführung eines registrierten Zaubers behält weiterhin seinen eigenen,
+  geprüften `ability`-Wert.
+- **Grund:** Die Klasse kann ohne einen Execution-Override ehrlich dokumentiert
+  werden. Eine automatische Überschreibung aller Zauber hätte ein zweites,
+  klassenbasiertes Spellcasting-Modell neben der bestehenden Ability-Registry
+  erzeugt und wäre mit Einzel-Zauber-Definitionen, Monster-Abilities und
+  Feat-Abilities in Konflikt geraten.
+- **Konsequenzen:** Das Build-Ledger enthält jetzt casting-Provenienz.
+  Die Kanonsuite wuchs auf **964 passed, 0 skipped, 0 failed**. Eine spätere
+  Execution-Integration bleibt möglich, erfordert aber eine ausdrückliche
+  Architektur- und Migrationsentscheidung.
+
+## D119 — AP-005: Expertise als geführte, serverseitig erzwungene Wahl (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `classes.expertise` war bereits als Datenfeld vorhanden. Das
+  Wizard zeigte es aber nur als ununterstützten Entscheidungstyp, während
+  `apply()` eine Auswahl optional und lückenhaft validierte.
+- **Entscheidung:** Die Klassen-Expertise ist jetzt eine reguläre Build-Wahl.
+  `plan()` und `apply()` melden Level, Anzahl und zulässige Kandidaten; das
+  Wizard rendert Checkboxen. Die Serverprüfung verlangt genau die deklarierte
+  Anzahl, weist Duplikate ab und akzeptiert nur bereits geübte Fertigkeiten.
+  Der Erfolg bleibt eine additive Erhöhung des bestehenden Skillwerts auf `2`.
+- **Grund:** Ohne geführte UI und exakte Validierung wäre CSV-Expertise eine
+  bloße Zahl ohne vertikale Funktionskette. Eine neue Expertise-Engine oder
+  ein zweiter Skillwert wäre überflüssig und würde die bestehende Skill-Achse
+  spalten.
+- **Konsequenzen:** Alle betroffenen Tests versenden jetzt die erforderliche
+  Wahl. Kanon: **964 passed, 0 skipped, 0 failed**. Die eigentliche
+  Browserabnahme der neuen Checkboxen folgt als AP-006.
+
+## D120 — AP-006: reproduzierbarer lokaler Chromium-Runner (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** Der Build-Wizard war backend- und quelltextseitig getestet, aber
+  die neue Expertise-Checkbox war noch nie in einem echten Browser gerendert
+  worden.
+- **Entscheidung:** `scripts/e2e_build_wizard.py` startet gegen eine
+  lokale Testinstanz und prüft in headless Chromium die komplette Kette:
+  Registrierung, Raum, Content-Import, Beitreten, Charakteranlage, Wizard,
+  Skill-/Expertise-Checkboxen, Apply und persistierten Skillwert. Playwright
+  wird bewusst in einem temporären venv installiert und nicht in die
+  Kanon-Test-Image aufgenommen.
+- **Grund:** Ein echtes Browserwerkzeug gehört in die Acceptance, darf aber
+  die deterministische Kanonsuite nicht von Netzwerkzugriffen, großen
+  Binärdateien oder Browser-Library-Abhängigkeiten des Wirts abhängig machen.
+  Der Runner bleibt getrennt, reproduzierbar und optional ausführbar.
+- **Konsequenzen:** Die Wizard-Kette ist erstmals mit echtem Chromium grün.
+  Kanon bleibt **964 passed, 0 skipped, 0 failed**. Weitere Browserketten
+  können schrittweise in demselben Muster ergänzt werden.
+
+## D121 — AP-007: Feature-Voraussetzungen fail-closed und chronologisch (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `feats.requires` war importierbar, wurde aber nie geprüft.
+  Zusätzlich bestand im Recompute eine Chronologie-Lücke: Level-8-Features
+  wurden vor der Level-1-Fertigkeitswahl angewandt.
+- **Entscheidung:** `requires` wird jetzt für Attributswerte, Skill-Proficiency
+  und vorangehende Features geparst. Unbekannte Bedingungen werden abgewiesen.
+  `apply()` prüft sie serverseitig; `plan_for_character()` liefert verfügbare
+  Optionen inklusive fehlender Voraussetzungen, und der Wizard deaktiviert
+  unzulässige Features. Level-1-Skills werden vor späteren Features angewandt.
+- **Grund:** Eine ignorierte CSV-Spalte erzeugt falsche Vertrautheit. Fail-closed
+  verhindert, dass „5 ranks" oder andere unmodellierten Bedingungen als
+  „keine Voraussetzung" gelesen werden. Die Chronologie muss denselben
+  Charakterzustand sehen, den der Bogen und die UI darstellen.
+- **Konsequenzen:** Kanon: **967 passed, 0 skipped, 0 failed**. Der Demo-Feat
+  `feat_keen` nutzt jetzt `Skill Proficiency — Perception` statt des alten
+  rangbasierten Demo-Texts. Weapon-/Tool-/Spellcasting-/Rank-Voraussetzungen
+  bleiben bewusst unsupported, bis eine echte Mechanik existiert.
+
+## D122 — AP-008: Creature-CSV nutzt den einen bestehenden NPC-Block (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `creatures.csv` hatte einen Import, aber keinen Konsumenten;
+  die tatsächlich ausführbaren Monster liefen ausschließlich über die
+  handgepflegten `npc`-Blöcke in Bestiarium/Tokens.
+- **Entscheidung:** `npc.project_creature()` erzeugt aus einer Raum-Zeile den
+  unveränderten `npc.clean_npc()`-Block. DMs können ihn previewen und per POST
+  als persönliches Bestiarium-Template anlegen. Importiertes Freitext-Material,
+  das die NPC-Grammatik nicht trägt, bleibt sichtbar unsupported.
+- **Grund:** Ein eigener `creature_token`-Zweig oder ein zweites Monstermodell
+  hätte Kampf, Bewegung und Ressourcen gespalten. Die Projektion macht CSV zu
+  einem Zulieferer des bestehenden NPC-Pfads, ohne die Autorisierung oder
+  State-Achsen zu duplizieren.
+- **Konsequenzen:** Kanon: **971 passed, 0 skipped, 0 failed**; zwei
+  Chromium-Suiten sind grün. Die projection ist DM-only, raum-scoped und
+  Duplikate werden sichtbar abgewiesen. Komplexere Freitextaktionen bleiben
+  bewusst als DM-Notiz erhalten, statt falsch automatisiert zu werden.
+
+## D123 — AP-009: Dunkelsicht bleibt auf einer Sinnensäule (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** CSV und Token hatten bereits Dunkelsicht-Felder, aber der
+  NPC-Block verlor die Information; ein Monster konnte sie nie nutzen.
+- **Entscheidung:** `npc.clean_npc()` führt Feet als `darkvision_ft`, Spawn und
+  NPC-Editor übersetzen sie in die bestehende Token-Spalte in Zellen
+  (`ft / 5`). Legacy-Token ohne Blockwert bleiben über die Tokenspalte erhalten;
+  eine bewusste Blockbearbeitung aktualisiert die Spalte.
+- **Grund:** Die D89-Sicht-Engine und die D115-Ausrüstungs-Dunkelsicht sind die
+  einzigen mechanischen Dunkelsicht-Pfade. Eine zweite Monster-Sicht oder eine
+  eigene CSV-Tabelle würde dieselbe Sinne-Achse spalten.
+- **Konsequenzen:** Kanon: **973 passed, 0 skipped, 0 failed**. Importierte
+  Monster sehen mit ihren deklarierten 60 ft = 12 Zellen, und der Editor kann
+  den Wert ohne DB-Migration korrigieren. Bewegungsfelder aus Creature-Zeilen
+  bleiben beim Spawn ebenfalls erhalten.
+
+## D124 — AP-010: NPC-Skills bleiben auf einer Daten- und Anzeigensäule (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** Skills wurden bereits in den NPC-Block projiziert, aber das
+  Sheet zeigte sie nicht und der Bestiarium-Spawn schickte nur ein manuell
+  zusammengesetztes Teilfeld.
+- **Entscheidung:** Das Monster-Sheet rendert die bestehende `skills`-Map
+  read-only über den kanonischen `SKILLS`-Namen. Der Spawn sendet den ganzen
+  `npc`-Block an den bestehenden Handler; Server-normalisiert weiterhin Block,
+  Sinnensäule und alle übrigen Werte.
+- **Grund:** Anzeige, Spawn und CSV-Projektion müssen dieselbe Skill-Achse
+  verwenden. Ein clientseitig erratener Block oder eine zweite Monster-Skill-
+  Logik würde dieselbe Information spalten.
+- **Konsequenzen:** Kanon: **976 passed, 0 skipped, 0 failed**; realer Chromium-
+  Import + Spawn zeigt Hawk-kin mit Dunkelsicht 60 ft / 12 Zellen und Perception
+  im Sheet. Expertise bleibt eine Anzeige-Ebene, keine eigene Mechanik.
+
+## D125 — AP-011: Ressourcen-Gewährung bleibt auf dem einen Ressourcen-Ledger (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** Die Effektgrammatik konnte vorhandene Ressourcen nur verbrauchen.
+  Ein zurückgebender Zauber/Trigger hätte sonst einen zweiten Zähler erzeugen
+  müssen.
+- **Entscheidung:** `resource` erhält `mode: cost|restore`; `cost` bleibt
+  Default für alte Zellen. Restore erhöht eine bereits registrierte,
+  kanonische Charakter-Ressource um einen Wert innerhalb ihres `max`-Feldes.
+- **Grund:** `characters.resources` und der resource-Handler sind die einzige
+  Ressourcendarstellung. Die Grammatik darf sie erweitern, aber nicht duplizieren.
+- **Konsequenzen:** Kanon: **977 passed, 0 skipped, 0 failed**. Bestehende
+  Kosten-Preflights bleiben atomar, unbekannte IDs fail-closed, volle
+  Ressourcen unverändert. Die CSV-Schicht kann jetzt sowohl Klassen-/Focus-
+  Nutzungen kosten als auch im Erfolg zurückgeben.
+
+## D126 — AP-012: Speziesdaten nutzen Bewegung, Sicht und Footprint, statt sie nachzubauen (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `species.csv` besaß Geschwindigkeit, Sinne und Größe, aber nur
+  eine Anzeige-Projektion.
+- **Entscheidung:** Die Spezies-Projektion in `characters.build` wird Teil der
+  kanonischen Sheet-Ableitung. Bewegung, LOS-Sicht und Token-Footprint lesen
+  daraus ihre Werte; keine neue Movement-, Sight- oder Footprint-Engine.
+- **Grund:** Eine Spezies ist kein neuer Mechanismus, sondern Input für die
+  bestehenden Engines. Separate Werte in Sheet, Token oder DM-Notiz würden
+  dieselbe Existenz dreimal beschreiben.
+- **Konsequenzen:** Kanon: **979 passed, 0 skipped, 0 failed**. Stoutheart bewegt
+  sich 25 ft und sieht 12 Zellen; Kit-kin bekommt Small-Footprint. Ausrüstungs-
+  Boni und DM-Autoring bleiben übereinanderliegende, unveränderte Ebenen.
+
+## D127 — AP-013: `companion` ist Markierung im NPC-Block, keine zweite Ownership-Engine (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `creatures.csv` führte `companion`, doch die Information verlor
+  sich zwischen Content-API, NPC-Block und DM-UI.
+- **Entscheidung:** `companion` wird als bool-Feld in `npc.clean_npc()` und über
+  `add_token`/`update_npc` in den bestehenden NPC-Block übernommen. Review,
+  Sheet und Bestiarium zeigen/bearbeiten nur dieselbe Markierung.
+- **Grund:** Ob ein Monster ein Begleiter ist, ist Content-Metadatum und
+  Spielhinweis. Ownership, Kontrolle, Kampfnähe und Summon-Regeln gehören zu den
+  bestehenden Token-, Combat- und Encounter-Pfaden und werden hier nicht neu
+  erfunden.
+- **Konsequenzen:** Kanon: **981 passed, 0 skipped, 0 failed**. Der Spawn-Pfad
+  muss weiterhin alle relevanten NPC-Felder vollständig in `clean_npc()` übergeben;
+  ein während der Entwicklung verlorener `attacks`/`spell_slots`-Anteil wurde durch
+  echte WS-Angriffstests sichtbar und behoben.

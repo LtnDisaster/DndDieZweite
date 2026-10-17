@@ -159,6 +159,7 @@ def _char_row(r, mask_items=False, curse="strip"):
         # (base + any speed_bonus_ft from worn items).
         "darkvision_ft": gear.effective_gear(r)["darkvision_ft"],
         "speed_effective": gear.clean_speeds(r)["walk"],
+        "hit_dice_bonus": gear.effective_gear(r)["hit_dice_bonus"],
         # D99: the purse (copper + a display breakdown + the currency table the
         # sheet renders) and the derived carrying report. Both are READ-only
         # server derivations — the client renders, never recomputes, so a client
@@ -208,6 +209,7 @@ class CreatureIn(BaseModel):
     max_hp: int = 10
     ac: int = 10
     speed: int = 30
+    darkvision_ft: int = 0
     attacks: list = []
     spells: list = []
     spell_slots: dict = {}
@@ -218,6 +220,7 @@ class CreatureIn(BaseModel):
     notes: str = ""
     size: str = "Medium"
     disposition: str = ""
+    companion: bool = False
     tags: str = Field(default="", max_length=120)
 
 
@@ -348,11 +351,13 @@ def delete_char(cid: int, user=Depends(require_user)):
 def _creature_block(cr: "CreatureIn"):
     block = npc.clean_npc({"name": cr.name, "level": cr.level, "stats": cr.stats,
                            "hp": cr.hp, "max_hp": cr.max_hp, "ac": cr.ac, "speed": cr.speed,
+                           "darkvision_ft": cr.darkvision_ft,
                            "attacks": cr.attacks, "spells": cr.spells, "spell_slots": cr.spell_slots,
                            "saves": cr.saves, "defenses": cr.defenses,
                            "abilities": cr.abilities, "resources": cr.resources,
                            "notes": cr.notes,
-                           "size": cr.size, "disposition": cr.disposition})
+                            "size": cr.size, "disposition": cr.disposition,
+                            "companion": cr.companion})
     block["name"] = cr.name
     return block
 
@@ -876,6 +881,9 @@ def assign_char(code: str, body: AssignIn, request: Request):
     user, room = room_of(request, code)
     ch = _load_char(body.character_id, user["id"])
     color = COLORS[(user["id"] - 1) % len(COLORS)]
+    from . import charbuild
+    species = charbuild.species_projection(dict(ch), room["id"])
+    size = npc.clean_size(species.get("size")) if species and species.get("size") else "Medium"
     revealed = False
     with db.tx() as c:
         c.execute("UPDATE room_members SET character_id=? WHERE room_id=? AND user_id=?",
@@ -885,13 +893,16 @@ def assign_char(code: str, body: AssignIn, request: Request):
         # footprint.* read via .get() — a raw Row (the SECOND bring for one user,
         # i.e. any re-seat with an existing token) has no .get and 500'd there.
         tok = dict(tok) if tok else None
+        if tok and not (species and species.get("size")):
+            size = tok.get("size") or size
         if tok:
-            c.execute("UPDATE tokens SET character_id=?, label=?, color=? WHERE id=?",
-                      (ch["id"], ch["name"], color, tok["id"]))
+            c.execute("UPDATE tokens SET character_id=?, label=?, color=?, size=? WHERE id=?",
+                      (ch["id"], ch["name"], color, size, tok["id"]))
             px, py = tok["x"], tok["y"]
         else:
-            c.execute("INSERT INTO tokens (room_id,owner_user_id,character_id,label,color,x,y) "
-                      "VALUES (?,?,?,?,?,400,300)", (room["id"], user["id"], ch["id"], ch["name"], color))
+            c.execute("INSERT INTO tokens (room_id,owner_user_id,character_id,label,color,x,y,size) "
+                      "VALUES (?,?,?,?,?,400,300,?)",
+                      (room["id"], user["id"], ch["id"], ch["name"], color, size))
             px, py = 400, 300
         # D102: reveal on the plane the token STANDS ON — a re-seat onto a
         # named floor must not poke holes into the primary map's fog.

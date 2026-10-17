@@ -606,6 +606,11 @@ window.addEventListener("unhandledrejection", function(ev){
               <button id="btn-ct-export" class="ghost">⬇ CSV</button>
               <button id="btn-ct-export-zip" class="ghost">⬇ All (ZIP)</button>
             </div>
+            <div class="row">
+              <button id="btn-ct-creatures" class="ghost">🐺 Review monster projections</button>
+              <small class="meta" style="opacity:.6" id="ct-creature-status">Not loaded</small>
+            </div>
+            <div id="ct-creatures" class="journal-list" style="max-height:170px;overflow:auto"></div>
             <div class="row"><small class="meta" style="opacity:.6">Guide: <code>docs/CSV_CONTENT_GUIDE.md</code></small></div>
           </div>
         </details>

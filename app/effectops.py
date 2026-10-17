@@ -23,7 +23,7 @@ Ops:
     save     {ability, dc, success:[ops], failure:[ops]}
     check    {kind: check|save, ability, dc, success, failure}
     forced_move {kind: push|pull|slide, cells, from?}   -> room.moveforced
-    resource {id, amount:1}                  -> the existing resource ledger
+    resource {id, amount:1, mode?}         -> the existing resource ledger
     opposed {ability, tie?, success, failure}  (v2) -> room.opposed: subject's
                check vs the target's, same ability; tie -> defender|attacker|dm
 
@@ -71,6 +71,31 @@ CURSE_TRIGGERS = TRIGGERS
 _ALLOW = {"damage": {"type"}, "condition": {"rounds", "until"}}
 COND_UNTIL = ("", "start", "end")
 _KEY_RE = re.compile(r"^[\x20-\x7e]{1,24}$")
+_DURATION_UNITS = {"round": 1, "minute": 10, "hour": 60, "day": 1440}
+_DURATION_RE = re.compile(
+    r"(?<!\d)(\d+)\s*(rounds?|minutes?|hours?|days?)(?![a-z])", re.I)
+
+
+def duration_rounds(value):
+    """Translate a SRD-style duration string to combat rounds for a condition.
+
+    This is deliberately NOT a second duration engine. The existing condition
+    lifecycle owns ``rounds``; this parser only converts a spell/item's declared
+    duration into an initial number of rounds. Unknown/instant/permanent values
+    return 0, which remains the existing indefinite/instant marker. A 999-round
+    ceiling matches the condition rounds guard already enforced by the grammar.
+    """
+    text = str(value or "").strip().lower()
+    if not text or "instant" in text or "permanent" in text:
+        return 0
+    total = 0
+    for amount, unit in _DURATION_RE.findall(text):
+        unit = unit[:-1] if unit.endswith("s") else unit
+        try:
+            total = max(total, int(amount) * _DURATION_UNITS[unit])
+        except (TypeError, ValueError, KeyError):
+            continue
+    return max(0, min(999, total))
 
 
 class EffectError(ValueError):
@@ -109,7 +134,8 @@ def _clean_target(op, default="target"):
     return t
 
 
-def _clean_ops(value, depth, allow_empty=False, ver=V):
+def _clean_ops(value, depth, allow_empty=False, ver=V, duration_rounds=0,
+               preserve_duration=False):
     """Validate a (possibly nested) ops list; returns the normalised list."""
     if not isinstance(value, list):
         raise EffectError("ops must be a list")
@@ -143,12 +169,20 @@ def _clean_ops(value, depth, allow_empty=False, ver=V):
             op["key"] = key
             op["target"] = _clean_target(raw)
             if kind == "condition":
-                try:
-                    rounds = int(raw.get("rounds", 0))
-                except (TypeError, ValueError):
-                    raise EffectError("'rounds' must be an integer")
-                if not 0 <= rounds <= 999:
-                    raise EffectError("'rounds' out of range 0..999")
+                raw_rounds = raw.get("rounds")
+                wants_duration = (raw_rounds is None or (isinstance(raw_rounds, str)
+                                                         and raw_rounds.strip().lower() == "duration"))
+                if wants_duration and preserve_duration:
+                    rounds = "duration"
+                elif wants_duration:
+                    rounds = max(0, min(999, int(duration_rounds or 0)))
+                else:
+                    try:
+                        rounds = int(raw_rounds)
+                    except (TypeError, ValueError):
+                        raise EffectError("'rounds' must be an integer")
+                    if not 0 <= rounds <= 999:
+                        raise EffectError("'rounds' out of range 0..999")
                 until = str(raw.get("until", "")).lower()
                 if until not in COND_UNTIL:
                     raise EffectError("'until' must be '', 'start' or 'end'")
@@ -173,7 +207,9 @@ def _clean_ops(value, depth, allow_empty=False, ver=V):
             for name in ("success", "failure"):
                 if name not in raw:
                     raise EffectError(f"'{kind}' needs a '{name}' branch")
-                branches[name] = _clean_ops(raw[name], depth + 1, allow_empty=True, ver=ver)
+                branches[name] = _clean_ops(raw[name], depth + 1, allow_empty=True,
+                                            ver=ver, duration_rounds=duration_rounds,
+                                            preserve_duration=preserve_duration)
             op.update(ability=ab, dc=dc, **branches)
             if kind == "check":
                 ck = str(raw.get("kind", "check")).lower()
@@ -206,7 +242,10 @@ def _clean_ops(value, depth, allow_empty=False, ver=V):
                 raise EffectError("'amount' must be an integer")
             if amount != 1:
                 raise EffectError("v1 supports resource amount 1 only")
-            op.update(id=rid, amount=1, target=_clean_target(raw, "self"))
+            mode = str(raw.get("mode", "cost")).lower()
+            if mode not in ("cost", "restore"):
+                raise EffectError("resource mode must be 'cost' or 'restore'")
+            op.update(id=rid, amount=1, mode=mode, target=_clean_target(raw, "self"))
         elif kind == "opposed":
             if ver < 2:
                 raise EffectError("'opposed' requires grammar v2")
@@ -220,7 +259,9 @@ def _clean_ops(value, depth, allow_empty=False, ver=V):
             for name in ("success", "failure"):
                 if name not in raw:
                     raise EffectError(f"'opposed' needs a '{name}' branch")
-                op[name] = _clean_ops(raw[name], depth + 1, allow_empty=True, ver=ver)
+                op[name] = _clean_ops(raw[name], depth + 1, allow_empty=True,
+                                      ver=ver, duration_rounds=duration_rounds,
+                                      preserve_duration=preserve_duration)
         else:
             raise EffectError(f"unknown op '{kind}'")
         # closed world: reject any key the cleaner above never produced
@@ -232,7 +273,7 @@ def _clean_ops(value, depth, allow_empty=False, ver=V):
     return out
 
 
-def validate(value):
+def validate(value, duration_rounds=0, preserve_duration=False):
     """Parse+validate one effect definition. Accepts dict/list/JSON-string.
     Returns the normalised ops list — or, for a condition-definition cell,
     the normalised HOOK dict {on_start|on_round|on_expire: ops}; raises
@@ -254,7 +295,9 @@ def validate(value):
         # "on_expire": [...]} — effect lists anchored to existing clocks.
         if not value or set(value) - set(COND_HOOKS):
             raise EffectError("definition dict needs v/ops or condition hooks")
-        return {k: _clean_ops(value[k], 1, allow_empty=True)
+        return {k: _clean_ops(value[k], 1, allow_empty=True,
+                              duration_rounds=duration_rounds,
+                              preserve_duration=preserve_duration)
                 for k in sorted(value) if value[k]}
     ops = value
     if isinstance(value, dict):
@@ -267,16 +310,18 @@ def validate(value):
         ops = value.get("ops")
     else:
         ver = V_MIN                      # a bare legacy list is v1 (no opposed)
-    return _clean_ops(ops, 0, ver=ver)
+    return _clean_ops(ops, 0, ver=ver, duration_rounds=duration_rounds,
+                     preserve_duration=preserve_duration)
 
 
-def canon(value):
+def canon(value, duration_rounds=0, preserve_duration=False):
     """Validated value -> canonical JSON string (byte-stable for generator
     and content export), '' for an empty definition. PRESERVES the definition's
     own grammar version (a v1 / bare-list cell keeps canon-ing to v1, byte-
     identically to before D113; only an explicitly v2-authored cell becomes v2),
     so adopting v2 never silently rewrites every stored effect."""
-    ops = validate(value)
+    ops = validate(value, duration_rounds=duration_rounds,
+                   preserve_duration=preserve_duration)
     if not ops:
         return ""
     if isinstance(ops, dict):          # condition hook dict
@@ -488,11 +533,33 @@ async def _run_op(op, ctx):
         return ""
 
     if kind == "resource":
+        if op.get("mode", "cost") == "restore":
+            return _restore_resource(ctx, op)
         # Consumed in the single claim+pay transaction at the end of the chain
         # (see run_ops); reaching here means the preflight passed.
         return ""
 
     return ""
+
+
+def _restore_resource(ctx, op):
+    """Restore one use in the SAME character resource ledger used by costs."""
+    from . import gear
+    tok = _resolve(ctx, op["target"])
+    if tok is None or tok.get("character_id") is None:
+        raise EffectError("resource restore has no paying character")
+    row = db.q1("SELECT resources FROM characters WHERE id=?", (tok["character_id"],))
+    pool = gear.clean_resources(db.j(row["resources"], []) if row else [])
+    entry = next((r for r in pool if r["id"] == op["id"]), None)
+    if entry is None:
+        raise EffectError(f"resource '{op['id']}' is not available")
+    if entry["current"] >= entry["max"]:
+        return ""
+    entry["current"] += op["amount"]
+    db.x("UPDATE characters SET resources=? WHERE id=?",
+         (db.json_dumps(pool), tok["character_id"]))
+    ctx["changed"] = True
+    return f"{tok['label']} restores {entry['name']}"
 
 
 def _resource_preflight(ctx):
@@ -502,7 +569,8 @@ def _resource_preflight(ctx):
     def scan(ops, seen):
         for op in ops:
             if op["op"] == "resource":
-                seen.append(op)
+                if op["mode"] == "cost":
+                    seen.append(op)
             elif op["op"] in ("save", "check", "opposed"):
                 scan(op["success"], seen)
                 scan(op["failure"], seen)
@@ -617,13 +685,14 @@ async def fire(room_id, event, *, token, caster=None, items=(), conds=None,
         if (isinstance(cur, dict) and cur.get("active")
                 and str(cur.get("trigger", "")) == event and cur.get("effects")):
             carriers.append((cur["effects"], "curse", f"curse:{it.get('id')}"))
+        item_duration_rounds = duration_rounds(props.get("duration"))
         for cell, src, key in carriers:
             if len(fired) >= budget:
                 break
             uid = f"trg:{event}:{token['id']}:{key}:{round_uid}"
             if not _claim(room_id, token["id"], uid):
                 continue
-            ops = _safe_validate(cell)
+            ops = _safe_validate(cell, item_duration_rounds)
             if not ops:
                 continue
             ctx = make_ctx(room_id, caster=caster or token,
@@ -659,9 +728,9 @@ def _src_token(entry):
     return db.q1("SELECT * FROM tokens WHERE id=?", (sid,))
 
 
-def _safe_validate(cell):
+def _safe_validate(cell, duration_rounds=0):
     try:
-        return validate(cell)
+        return validate(cell, duration_rounds=duration_rounds)
     except EffectError:
         return []            # a once-valid row that went bad never executes
 

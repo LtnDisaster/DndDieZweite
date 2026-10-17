@@ -188,7 +188,8 @@ def test_starting_gear_broadcasts_inv_changed(client):
 # ---------- the confirmed reload bug: apply must notify every client ----------
 
 SCOUT_L1 = {"class_id": "scout", "to": 1,
-            "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"]}}
+            "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"],
+                        "levels": {"1": {"expertise": "stealth"}}}}
 
 
 def test_apply_broadcasts_snapshot_so_sheets_update_without_reload(client):
@@ -206,7 +207,8 @@ def test_apply_rejects_manipulated_choices(client):
     assert j["ok"] is False and j["needs_choice"][0]["kind"] == "skills"
     body = {"class_id": "scout", "to": 3,
             "choices": {"skills": ["stealth", "perception", "acrobatics", "athletics"],
-                        "subclass": "tradition_ghost"}}
+                        "subclass": "tradition_ghost",
+                        "levels": {"1": {"expertise": "stealth"}}}}
     j = client.post(f"/api/build/{code}/{ch['id']}/apply", headers=H(player), json=body).json()
     assert j["ok"] is False and "subclass" in j["error"]
     # the refusals wrote nothing: still unbuilt

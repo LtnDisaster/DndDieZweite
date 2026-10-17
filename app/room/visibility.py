@@ -3,7 +3,7 @@
 A player receives live token data only when at least one footprint cell is currently
 visible under server-side LOS. Out-of-sight movement is never transmitted; a token
 that leaves sight becomes a faded 'ghost' pinned to its last-seen position."""
-from .. import db, footprint, los, mapmodel
+from .. import db, footprint, gear, los, mapmodel
 from .. import conditions as _conds
 from . import death as _death
 from . import vertical3d
@@ -56,6 +56,21 @@ def viewer_visible_cells(room_id, user_id, mp, floor=None):
                              radius=VISION_R)
 
 
+def _token_darkvision_cells(token):
+    """Darkvision radius in LOS cells. The token column remains the DM/operator
+    authoring value; D115 folds in equipment, and D126 the existing species
+    projection from the same canonical sheet. No second gear or sight engine."""
+    radius = int(token.get("darkvision") or 0)
+    cid = token.get("character_id")
+    if cid:
+        sheet = gear.as_sheet(db.q1("SELECT * FROM characters WHERE id=?", (cid,)) or {})
+        species = (sheet.get("build") or {}).get("species") or {}
+        gear_radius = int(gear.effective_gear(sheet).get("darkvision_ft") or 0) // 5
+        species_radius = int(species.get("darkvision_ft") or 0) // 5
+        radius = max(radius, gear_radius, species_radius)
+    return max(0, radius)
+
+
 def _lit_cells(room_id, user_id, mp, floor=None):
     """D87 — sight in a DARK room comes only from the light the viewer owns
     or operates: the LOS-limited radius of each of their tokens' light, plus
@@ -80,7 +95,7 @@ def _lit_cells(room_id, user_id, mp, floor=None):
         out |= {i for (x, y) in wc if (i := mapmodel.flat_idx(mp, x, y)) is not None}
         # D89: darkvision is a SENSE, not a torch — it only matters exactly
         # where light fails (this branch), and it is still owner-only (L5).
-        rad = max(int(r.get("light") or 0), int(r.get("darkvision") or 0))
+        rad = max(int(r.get("light") or 0), _token_darkvision_cells(r))
         if rad > 0 and wc:
             out |= los.visible_cells(mp, wc, radius=rad)   # -> STORAGE indices
     # D89: static light sources (map lamps, lanterns, braziers) belong to the

@@ -28,6 +28,10 @@ import re
 from . import content, db, gear, progression
 
 ABILITY_SHORT = ("str", "dex", "con", "int", "wis", "cha")
+_ABILITY_REQ_RE = re.compile(
+    r"(?<![a-z])((?:str|dex|con|int|wis|cha))[^\d]{1,20}(\d{1,2})(?:[^\d]{1,20}(?:minimum|or\s+higher))?\b"
+)
+_FEAT_REQ_RE = re.compile(r"(?<![a-z])feat[^\w]+(.+)$")
 _BOOST_RE = re.compile(r"^([a-z]+)([+-]\d{1,2})$")
 MAX = progression.MAX_TOTAL_LEVEL
 
@@ -53,8 +57,140 @@ def _class_rows(class_id, room_id):
     return {int(r.get("level") or 0): r for r in content.class_levels(class_id, room_id)}
 
 
+def _species_row(ref, room_id):
+    want = str(ref or "").strip().lower()
+    if not want:
+        return None
+    for r in content.load("species", room_id):
+        if str(r.get("id") or "").lower() == want or str(r.get("name") or "").lower() == want:
+            return r
+    return None
+
+
+def _species_projection(char, room_id):
+    """Read-only projection of the species row named by the character."""
+    row = _species_row((char or {}).get("race"), room_id)
+    if row is None:
+        return None
+    return {
+        "id": row.get("id"), "name": row.get("name") or row.get("id"),
+        "size": row.get("size") or "", "speed_ft": _int(row.get("speed_ft")),
+        "fly_ft": _int(row.get("fly_ft")), "swim_ft": _int(row.get("swim_ft")),
+        "climb_ft": _int(row.get("climb_ft")), "darkvision_ft": _int(row.get("darkvision_ft")),
+        "languages": _split_raw(row.get("languages")),
+        "traits": _split_raw(row.get("traits")),
+    }
+
+
+def species_projection(char, room_id):
+    """Public projection used by room seating; it never replaces movement/sight."""
+    return _species_projection(char, room_id)
+
+
+def _class_proficiencies(rows, to):
+    """Weapon/armor/tool proficiencies named by the class rows applied so far.
+
+    This is a read-only ledger snapshot for the sheet. It intentionally does not
+    replace item/weapon adjudication or invent a second proficiency engine.
+    """
+    out = {"weapons": [], "armor": [], "tools": []}
+    for level in range(1, to + 1):
+        row = rows.get(level) or {}
+        out["weapons"] = sorted(set(out["weapons"]) | set(_split_raw(row.get("weapon_prof"))))
+        out["armor"] = sorted(set(out["armor"]) | set(_split_raw(row.get("armor_prof"))))
+        out["tools"] = sorted(set(out["tools"]) | set(_split_raw(row.get("tool_prof"))))
+    return out
+
+
 def _feat_rows(room_id):
     return {r.get("id"): r for r in content.load("feat", room_id)}
+
+
+def _norm_words(text):
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def _parse_feat_requires(raw):
+    """Machine-readable prerequisite list from ``feats.csv:requires``.
+
+    Semicolons separate independent requirements. Supported: ``Dex 13``,
+    ``Skill Proficiency — Stealth`` and ``feat Alert``. Anything else fails
+    closed — an unmodelled prerequisite must never be read as 'no prerequisite'.
+    """
+    conds = []
+    for part in str(raw or "").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        words = _norm_words(part)
+        feat = _FEAT_REQ_RE.match(part.strip().lower())
+        if feat:
+            conds.append({"kind": "feat", "feat": " ".join(feat.group(1).split())})
+            continue
+        ability = _ABILITY_REQ_RE.search(part.strip().lower())
+        if ability:
+            score = int(ability.group(2))
+            if 1 <= score <= 30:
+                conds.append({"kind": "ability", "ability": ability.group(1),
+                              "score": score})
+                continue
+        skill = next((s for s in gear.SKILLS if f" {s} " in f" {words} "), None)
+        if skill and re.search(r"\b(?:skill|proficien\w*)\b", words):
+            conds.append({"kind": "skill", "skill": skill})
+            continue
+        return None, f"unsupported prerequisite {part!r} — model it or remove it"
+    return conds, ""
+
+
+def _feat_prereq_errors(row, stats, skills, feats_applied):
+    conds, error = _parse_feat_requires(row.get("requires"))
+    if error:
+        return [error]
+    stats = stats if isinstance(stats, dict) else {}
+    skills = gear.clean_skills(skills if isinstance(skills, dict) else {})
+    names = {str(f.get("id") or "").strip().lower() for f in feats_applied}
+    names |= {str(f.get("name") or "").strip().lower() for f in feats_applied}
+    out = []
+    for cond in conds:
+        kind = cond["kind"]
+        if kind == "ability":
+            ab = cond["ability"]
+            have = _int(stats.get(ab, 10)) or 10
+            if have < cond["score"]:
+                out.append(f"{ab.upper()} {cond['score']} (currently {have})")
+        elif kind == "skill":
+            sk = cond["skill"]
+            if _int(skills.get(sk, 0)) < 1:
+                out.append(f"proficiency in {sk}")
+        elif kind == "feat":
+            if cond["feat"] not in names:
+                out.append(f"feat {cond['feat']}")
+    return out
+
+
+def _feat_choice_options(room_id, stats, skills, feats_applied):
+    rows = _feat_rows(room_id)
+    out = []
+    for feat_id in sorted(rows):
+        row = rows[feat_id]
+        missing = _feat_prereq_errors(row, stats, skills, feats_applied)
+        out.append({"id": feat_id, "name": row.get("name") or feat_id,
+                    "category": str(row.get("category") or "general"),
+                    "requires": str(row.get("requires") or ""),
+                    "available": not missing, "missing": missing})
+    return out
+
+
+def _ledger_feat_ids(led):
+    led = led if isinstance(led, dict) else {}
+    out = []
+    origin = led.get("origin")
+    if isinstance(origin, dict) and origin.get("feat"):
+        out.append(str(origin["feat"]))
+    for entry in led.get("history") or []:
+        if isinstance(entry, dict) and entry.get("feat"):
+            out.append(str(entry["feat"]))
+    return list(dict.fromkeys(out))
 
 
 def _subclass_rows(class_id, room_id):
@@ -76,6 +212,25 @@ def _spell_rows(class_id, room_id):
         (cantrips if lvl == 0 else spells).append(r["id"])
     return {"cantrips": sorted(cantrips), "spells": sorted(spells),
             "by_id": {r["id"]: r for r in content.spell_pool(class_id, room_id)}}
+
+
+def _feat_grants(feats_applied, room_id):
+    """Spell ids automatically granted by feats in ``spells_grant``.
+
+    The same column already existed for subclasses; D115 brings feats into the
+    one existing spell-grant chronology instead of adding a second source."""
+    rows = _feat_rows(room_id)
+    grants = []
+    for entry in feats_applied:
+        row = rows.get(str(entry.get("id") or "")) or {}
+        grants += _split(row.get("spells_grant"))
+    return grants
+
+
+def _all_spell_rows(room_id):
+    """All room-visible spell definitions, used only to render granted ids that
+    may live outside the class list (for example a subclass/feat grant)."""
+    return {r["id"]: r for r in content.load("spell", room_id)}
 
 
 def _casting(rows):
@@ -100,7 +255,16 @@ def _casting(rows):
         casting = True
     if not casting:
         return None
-    return {"first": first or 1, "model": "prepared" if prepared else "known"}
+    ability = ""
+    for lvl in sorted(rows):
+        raw = rows[lvl].get("spellcasting_ability")
+        v = raw[0] if isinstance(raw, (list, tuple)) and raw else raw
+        v = str(v or "").strip().lower()
+        if v:
+            ability = v if v in ABILITY_SHORT else ""
+            break
+    return {"first": first or 1, "model": "prepared" if prepared else "known",
+            "ability": ability}
 
 
 def _subclass_grants(subclass, room_id):
@@ -146,7 +310,8 @@ def plan(class_id, to, room_id) -> dict:
                          "subclass": False, "levels": {}}
     if casting and casting["first"] <= to:
         needs["spell"] = {"model": casting["model"], "first": casting["first"],
-                          "pool_cantrips": pool["cantrips"], "pool_spells": pool["spells"]}
+                           "ability": casting.get("ability") or "",
+                           "pool_cantrips": pool["cantrips"], "pool_spells": pool["spells"]}
     for lvl in range(1, to + 1):
         r = rows.get(lvl, {})
         info = {
@@ -168,8 +333,14 @@ def plan(class_id, to, room_id) -> dict:
         if info["subclass_choice"]:
             needs["subclass"] = True
         if info["ability_boost_or_feat"] or info["feat_choice"]:
-            needs["levels"][str(lvl)] = {"ability_boost_or_feat": info["ability_boost_or_feat"],
-                                         "feat_choice": info["feat_choice"]}
+            needs["levels"].setdefault(str(lvl), {}).update({
+                "ability_boost_or_feat": info["ability_boost_or_feat"],
+                "feat_choice": info["feat_choice"],
+            })
+            info["needs_choice"] = True
+        expertise = _int(r.get("expertise"))
+        if expertise:
+            needs["levels"].setdefault(str(lvl), {})["expertise"] = expertise
             info["needs_choice"] = True
         # spell progression (D97): known-model classes pick new spells where the
         # class row's totals increase; prepared casters choose none (re-prepare is
@@ -194,6 +365,37 @@ def plan(class_id, to, room_id) -> dict:
 # --------------------------------------------------------------------------
 # apply (the single mutation site)
 # --------------------------------------------------------------------------
+def _expertise_options(class_id, room_id, ch):
+    """Skills that may legitimately become expert. A class's own level-1 skill
+    options are available while its level-1 choices are being made; already
+    proficient skills remain available for later class features."""
+    rows = _class_rows(class_id, room_id)
+    current = gear.clean_skills(_as_dict((ch or {}).get("skills")))
+    current = {k for k, v in current.items() if v >= 1}
+    class_options = {k for k in _split(rows.get(1, {}).get("skill_options")) if k in gear.SKILLS}
+    return sorted(current | class_options)
+
+
+def plan_for_character(char_id, class_id, to, room_id=0):
+    """``plan`` enriched with the per-character choices an interactive client can
+    offer. The rules themselves remain in ``plan``/``apply`` — this helper only
+    supplies the current candidate list; it is not a second validator."""
+    p = plan(class_id, to, room_id)
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (int(char_id),))
+    if not p.get("ok") or ch is None:
+        return p
+    raw_stats = _as_dict(ch.get("stats"))
+    stats = {str(k).lower(): (_int(raw_stats.get(k, 10)) or 10) for k in raw_stats}
+    skills = gear.clean_skills(_as_dict(ch.get("skills")))
+    feats_applied = [{"id": fid} for fid in _ledger_feat_ids(ledger(ch))]
+    for lvl, spec in (p.get("needs") or {}).get("levels", {}).items():
+        if spec.get("feat_choice") or spec.get("ability_boost_or_feat"):
+            spec["feat_options"] = _feat_choice_options(room_id, stats, skills, feats_applied)
+        if spec.get("expertise"):
+            spec["expertise_skills"] = _expertise_options(p["class_id"], room_id, ch)
+    return p
+
+
 def apply(char_id, class_id, to, choices=None, room_id=0):
     """Advance ``class_id`` to ``to`` for a character, forward-only and
     idempotent. ``choices`` may carry only the NEW decisions; earlier ones are
@@ -219,6 +421,9 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
     p = plan(class_id, to, room_id)
     if not p["ok"]:
         return False, {"error": "; ".join(p["errors"]) or "cannot plan build"}
+    for lvl, spec in p["needs"].get("levels", {}).items():
+        if spec.get("expertise"):
+            spec["expertise_skills"] = _expertise_options(class_id, room_id, ch)
 
     dec = dict(_decisions(led))              # merge incoming over remembered
     for k, v in (choices or {}).items():
@@ -245,7 +450,10 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
     spell_state = payload["spell_state"]
     led.update({"class_id": class_id, "applied_through": to,
                 "subclass": payload["subclass"], "base_stats": payload["base_stats"],
-                "decisions": dec, "history": payload["history"]})
+                "decisions": dec, "history": payload["history"],
+                "class_proficiencies": payload["class_proficiencies"],
+                "casting": payload["casting"],
+                "species": payload["species"]})
     # D109: masteries accrued by the levels applied NOW (forward-only —
     # levels applied earlier never produce grants retroactively).
     gains = _mastery_gains(class_id, applied, to, room_id)
@@ -288,6 +496,8 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
         res["known"] = sorted(spell_state["abilities"])
         res["slots"] = {lv: d["max"] for lv, d in spell_state["spell_slots"].items() if d["max"]}
         res["spell_model"] = p["needs"]["spell"]["model"]
+        if p["needs"]["spell"].get("ability"):
+            res["casting_ability"] = p["needs"]["spell"]["ability"]
     return True, res
 
 
@@ -350,6 +560,10 @@ def origin_options(char, room_id):
         return out
     out["background"] = row.get("id")
     out["background_name"] = row.get("name") or row.get("id")
+    out["background_tool_prof"] = _split_raw(row.get("tool_prof"))
+    out["background_languages"] = _split_raw(row.get("languages"))
+    out["background_feature"] = row.get("feature") or ""
+    out["background_manual"] = row.get("manual") or ""
     ab = [a for a in (row.get("asi_abilities") or []) if a in ABILITY_SHORT]
     out["asi_abilities"] = ab
     stats = _as_dict(char.get("stats"))
@@ -406,6 +620,7 @@ def _apply_origin_locked(c, char_id, background, asi, room_id):
         led["base_stats"] = dict(_as_dict(ch.get("stats")))
     led["origin"] = {"background": row["id"], "feat": str(row["origin_feat"]).strip(),
                      "asi": deltas}
+    led["species"] = _species_projection(ch, room_id)
 
     built = str(led.get("class_id") or "")
     applied_through = int(led.get("applied_through") or 0)
@@ -422,6 +637,7 @@ def _apply_origin_locked(c, char_id, background, asi, room_id):
         if not ok:
             return False, payload
         stats, skills = payload["stats"], payload["skills"]
+        led["class_proficiencies"] = payload["class_proficiencies"]
     else:
         stats = dict(led["base_stats"])
         skills = dict(gear.clean_skills(_as_dict(ch.get("skills"))))
@@ -433,6 +649,10 @@ def _apply_origin_locked(c, char_id, background, asi, room_id):
     feat_row = _feat_rows(room_id).get(led["origin"]["feat"], {})
     return True, {"origin": led["origin"], "background": row["id"],
                   "background_name": row.get("name", row["id"]),
+                  "background_tool_prof": _split_raw(row.get("tool_prof")),
+                  "background_languages": _split_raw(row.get("languages")),
+                  "background_feature": row.get("feature") or "",
+                  "background_manual": row.get("manual") or "",
                   "feat": feat_row.get("name", led["origin"]["feat"]),
                   "stats": stats,
                   "skills": sorted(k for k, v in skills.items() if v)}
@@ -467,11 +687,19 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
     hit_die = _int(first.get("hit_die")) or 8
     max_hp = _int(first.get("hp_base")) or (hit_die)
     feats_applied, history = [], []
+    requested_expertise = {}
     origin = led.get("origin") if isinstance(led.get("origin"), dict) else None
     if origin:
         ok, note = _replay_origin(origin, room_id, stats, skills, feats_applied)
         if not ok:
             return False, {"error": note}
+    # Level-1 skill choices are chronologically available before any later
+    # feat prerequisite is checked. Applying them after all feats would make a
+    # later prerequisite see a character who had not made the first-level choice.
+    if p["needs"]["skills"]:
+        for sk in _split(dec.get("skills"))[: p["needs"]["skill_count"]]:
+            if sk in gear.SKILLS:
+                skills[sk] = max(skills.get(sk, 0), 1)
     for lvl in range(1, to + 1):
         r = rows.get(lvl, {})
         if lvl > 1:
@@ -486,27 +714,51 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
         elif isinstance(ch_level, dict) and ch_level.get("ability"):
             _apply_ability_boost(ch_level["ability"], stats)
             entry["ability"] = ch_level["ability"]
+        if isinstance(ch_level, dict) and ch_level.get("expertise"):
+            requested_expertise[lvl] = _split(ch_level["expertise"])
         history.append(entry)
 
-    # level-1 class skill choices
-    if p["needs"]["skills"]:
-        for sk in _split(dec.get("skills"))[: p["needs"]["skill_count"]]:
-            if sk in gear.SKILLS:
-                skills[sk] = max(skills.get(sk, 0), 1)
+    # Expertise selections ride the existing skill value axis. Every source is
+    # applied first; validation then requires the exact number granted by the
+    # class row and rejects duplicates or non-proficient selections.
+    for lvl, raw in sorted(requested_expertise.items()):
+        chosen = list(dict.fromkeys(raw))
+        allowed = _int((rows.get(lvl) or {}).get("expertise"))
+        if len(raw) != allowed or len(chosen) != allowed:
+            return False, {"error": f"level {lvl} requires exactly {allowed} expertise choice(s)"}
+        for sk in chosen:
+            if sk not in gear.SKILLS:
+                return False, {"error": f"unknown skill for expertise: {sk}"}
+            if skills.get(sk, 0) < 1:
+                return False, {"error": f"cannot gain expertise in non-proficient {sk}"}
+        for sk in chosen:
+            skills[sk] = 2
+            history[lvl - 1]["expertise"] = sorted(set((history[lvl - 1].get("expertise") or []) + chosen))
 
     subclass = str(dec.get("subclass") or "")
     if subclass and subclass not in _subclass_rows(class_id, room_id):
         return False, {"error": f"unknown subclass '{subclass}' for {class_id}"}
+    if subclass:
+        by_level = {int(r.get("level") or 0): r for r in _subclass_rows(class_id, room_id)[subclass]}
+        for level, srow in sorted(by_level.items()):
+            if level > to:
+                continue
+            entry = history[level - 1]
+            entry["subclass"] = srow.get("name") or subclass
+            entry["features"] += _split_raw(srow.get("features"))
 
     # -- spell state (Phase C / D97) — only for a class that actually casts up to
     # ``to``; a non-caster (or a caster below its first casting level) leaves the
     # existing abilities/spells/slots/resources columns completely untouched.
+    # D115: subclass AND feat grants ride the same chronology. They are still
+    # projected through the existing abilities/spells columns — no new engine.
     spell_state = None
     casting = p["needs"].get("spell")
     if casting:
         pool = _spell_rows(class_id, room_id)
-        by_id = pool["by_id"]
-        grants = set(_subclass_grants(subclass, room_id)) if subclass else set()
+        by_id = {**pool["by_id"], **_all_spell_rows(room_id)}
+        grants = (set(_subclass_grants(subclass, room_id)) if subclass else set())
+        grants |= set(_feat_grants(feats_applied, room_id))
         known = set()
         if casting["model"] == "prepared":
             known |= set(pool["cantrips"]) | set(pool["spells"])
@@ -530,21 +782,30 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
             "spells": gear.clean_spells(_spell_display(known, by_id)),
             "spell_slots": slots_out,
             "resources": _class_resources(rows, to, ch),
+            "casting_ability": casting.get("ability") or "",
         }
 
     return True, {"base_stats": base_stats, "stats": stats, "skills": skills,
                   "saves": saves, "hit_die": hit_die, "max_hp": max_hp,
                   "feats_applied": feats_applied, "history": history,
-                  "subclass": subclass, "spell_state": spell_state}
+                  "subclass": subclass, "spell_state": spell_state,
+                  "casting": casting,
+                  "class_proficiencies": _class_proficiencies(rows, to),
+                  "species": _species_projection(ch, room_id)}
 
 
 def _replay_origin(origin, room_id, stats, skills, feats_applied):
     """Apply a RECORDED origin grant onto the recompute state. The deltas were
-    validated at grant time; the feat must STILL exist and STILL be an Origin
+    validated at grant time; the background's skill proficiencies come from the
+    SAME background row, and the feat must STILL exist and STILL be an Origin
     feat — a later pack edit that drops or recategorises it fails the whole
     recompute visibly (no half-grant, no silent skip)."""
     for ab, delta in sorted((origin.get("asi") or {}).items()):
         _bump(stats, str(ab).lower(), _int(delta))
+    bg_row = _background_row(str(origin.get("background") or ""), room_id) or {}
+    for sk in _split(bg_row.get("skill_prof")):
+        if sk in gear.SKILLS:
+            skills[sk] = max(skills.get(sk, 0), 1)
     feat_id = str(origin.get("feat") or "")
     if feat_id:
         ok, note = _apply_feat(feat_id, room_id, stats, skills, feats_applied,
@@ -615,6 +876,14 @@ def _check_choices(p, dec, class_id, room_id):
             if len(sel_c) < req_c or len(sel_s) < req_s:
                 need.append({"kind": "spells", "level": int(lvl), "cantrips": req_c,
                              "spells": req_s, "pool_cantrips": pc, "pool_spells": ps})
+        req_e = int(spec.get("expertise") or 0)
+        if req_e:
+            opts = list(spec.get("expertise_skills") or [])
+            got_e = _split(chosen.get("expertise")) if isinstance(chosen, dict) else []
+            sel_e = [x for x in got_e if x in opts]
+            if len(sel_e) != req_e or len(set(sel_e)) != len(sel_e):
+                need.append({"kind": "expertise", "level": int(lvl), "count": req_e,
+                             "options": opts})
     return need
 
 
@@ -626,6 +895,10 @@ def _apply_feat(feat_id, room_id, stats, skills, applied, category=None):
     if category is not None and str(row.get("category") or "") != category:
         return False, (f"feat '{feat_id}' is category "
                        f"'{row.get('category') or 'general'}', not '{category}'")
+    missing = _feat_prereq_errors(row, stats, skills, applied)
+    if missing:
+        name = row.get("name") or feat_id
+        return False, f"feat '{name}' prerequisites not met: {'; '.join(missing)}"
     for ab, delta in _parse_bonuses(row.get("ability_boost")):
         _bump(stats, ab, delta)
     for sk in _split(row.get("skill_prof")):
@@ -663,6 +936,12 @@ def _as_dict(v):
     if isinstance(v, str):
         return db.j(v, {}) or {}
     return v if isinstance(v, dict) else {}
+
+
+def _split_raw(v):
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [x.strip() for x in re.split(r"[,;]+", str(v or "")) if x.strip()]
 
 
 def _split(v):

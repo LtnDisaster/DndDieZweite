@@ -316,7 +316,9 @@ def clean_props(props):
         if k == "effects":                     # D111: canonical op-list JSON or drop
             from . import effectops
             try:
-                c = effectops.canon(str(v or ""))
+                # A "duration" marker is deliberately NOT resolved here: an item's
+                # live props.duration may later be edited, and execution resolves it.
+                c = effectops.canon(str(v or ""), preserve_duration=True)
             except effectops.EffectError:
                 continue                       # never execute a corrupt definition
             if c:
@@ -467,14 +469,15 @@ def clean_equipment(equip, items):
 
 def wields_two_handed(item):
     """D98: does this ITEM occupy both hands right now? True for a fixed
-    two-hander (props.two_handed), or a VERSATILE weapon currently gripped
-    two-handed (per-instance 'grip' the owner chose). The single rule used by
-    both can_equip and inventory.equip_slot / set_grip."""
+    two-hander (`props.two_handed`, or the explicit `props.hands` count), or a
+    VERSATILE weapon currently gripped two-handed (per-instance 'grip' the owner
+    chose). The single rule used by both can_equip and inventory.equip_slot /
+    set_grip."""
     if not isinstance(item, dict):
         return False
     p = item.get("props") or {}
-    return bool(p.get("two_handed")) or (bool(p.get("versatile"))
-                                         and str(item.get("grip", "one")) == "two")
+    return (bool(p.get("two_handed")) or _clampi(p.get("hands", 0), 0, 2, 0) == 2
+            or (bool(p.get("versatile")) and str(item.get("grip", "one")) == "two"))
 
 
 def can_equip(item, slot, equipment=None, items=None):
@@ -649,7 +652,7 @@ def effective_gear(char):
     active = _active_gear(char) if isinstance(char, dict) else []
     stats = {a: _base_score(char, a) for a in ABILITIES}
     bonus, skill_prof, expertise, save_prof = {}, set(), set(), set()
-    darkvision, speed, carry = 0, 0, 0
+    darkvision, speed, carry, hit_dice = 0, 0, 0, 0
     for _it, p in active:
         aset = p.get("attribute_set")
         if aset:
@@ -671,11 +674,14 @@ def effective_gear(char):
         darkvision = max(darkvision, _clampi(p.get("darkvision_ft", 0), 0, 999, 0))
         speed += _clampi(p.get("speed_bonus_ft", 0), -99, 999, 0)
         carry += _clampi(p.get("carry_bonus", 0), 0, 9999, 0)
+        hit_dice += _clampi(p.get("hit_dice_bonus", 0), -10, 10, 0)
+    hit_dice = max(-99, min(99, hit_dice))
     for a, d in bonus.items():
         stats[a] = max(1, min(30, stats[a] + d))
     return {"stats": stats, "skill_prof": skill_prof, "expertise": expertise,
             "save_prof": save_prof, "darkvision_ft": darkvision,
-            "speed_bonus_ft": speed, "carry_bonus": carry, "active": active}
+            "speed_bonus_ft": speed, "hit_dice_bonus": hit_dice,
+            "carry_bonus": carry, "active": active}
 
 
 # ---------- skills ----------
@@ -701,7 +707,8 @@ def stat_mod(char, ability):
 # strings, and _stat_mod correctly treats a non-dict as missing, which is how
 # "ability modifier is silently 0" production bugs are born (2026-10 sprint).
 _JSON_COLUMNS = ("stats", "skills", "saves", "items", "spells", "spell_slots",
-                 "defenses", "resources", "abilities", "class_levels", "equipment")
+                 "defenses", "resources", "abilities", "class_levels", "equipment",
+                 "build")
 _JSON_LIST_DEFAULTS = ("items", "spells", "resources", "abilities")
 
 
