@@ -14,7 +14,10 @@ Erweiterbarkeit, danach CSV-Produktion und Serverbetrieb.
 Kanonscher Stand vor D110: 826 passed, 1 skipped, 0 failed. Aktueller Kanon
 (D112, Sprint 41): 883 passed, 1 skipped. Kanon D113 (Sprint 42 Phases 2–7):
 921 passed, 1 skipped. Kanon D114 (Sprint 43): 948 passed, 1 skipped.
-**Aktueller Kanon autonom / D127: 981 passed, 0 skipped, 0 failed.**
+**Aktueller Kanon autonom / D128: 985 passed, 0 skipped, 0 failed.**
+(D128 war im gepushten Stand implementiert und getestet, aber undokumentiert;
+die Recovery-Sitzung 2026-10-17 bestätigte 985 als Baseline und reichte die
+Doku nach — siehe `docs/RECOVERY_2026-10-17.md` und DECISIONS D128.)
 
 AP-001 beseitigte den letzten dauerhaften Skip. AP-003 verdrahtete die
 bestehende `duration`-Angabe als Startwert für Bedingungen. AP-004 nahm

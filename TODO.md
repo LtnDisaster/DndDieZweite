@@ -917,6 +917,25 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [x] Schranken gehalten: keine Git-Befehle, keine `.git`-Aktionen, keine
       Änderung an `55_diorama.js`, keine Migration und keine zweite Engine.
 
+## Done — Autonomer Nachtrag + Recovery 2026-10-17 (D128/AP-014)
+
+- [x] **D128/AP-014 nachdokumentiert:** NPC-Angriffs-`reach` ist seit dem
+      gepushten Stand hartes Gate über `dice._vertical_range_distance`
+      (CSV-Projektion „reach N ft“, `clean_npc`-Clamp 0–999,
+      `na-reach`-Editorfeld). Code und `tests/test_d128_npc_reach.py` waren
+      bereits vorhanden; DECISIONS/AP-Abschnitt fehlten durch den
+      Sitzungsabbruch und wurden in der Recovery-Sitzung nachgereicht.
+- [x] **Recovery-Baseline:** kanonischer Lauf **985 passed, 0 skipped,
+      0 failed** (981 + 4 D128-Tests) — keine unfertige Integration im Code;
+      reparaturbedürftig war ausschließlich die Doku.
+- [x] Runtime-Start + `/api/health` + Build-Hash-Konsistenz geprüft; echte
+      Chromium-E2E (`e2e_build_wizard.py`, `e2e_creature_projection.py`)
+      gegen Wegwerf-Instanz beide **PASS**.
+- [x] `docs/CSV_ONLY_READINESS.md` („reach advisory“ → durchgesetztes Gate),
+      `docs/FEATURE_MATRIX.md` (Kanon 985/D128), `docs/AUTONOMOUS_WORK_LOG.md`
+      (AP-014 + Recovery-Lauf) und `DECISIONS.md` (D128) aktualisiert.
+- [x] Bericht: `docs/RECOVERY_2026-10-17.md`.
+
 ## Done — Sprint 43 (D114): vertikale Token-Geometrie, `openv`, vertikaler Flug und UI
 
 - [x] **Phase 2 Fallen-Konsistenz:** Legacy-Trap-d20 läuft über

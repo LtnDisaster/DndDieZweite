@@ -3075,3 +3075,34 @@ lines name conditions by design (public table record, D90).
   muss weiterhin alle relevanten NPC-Felder vollständig in `clean_npc()` übergeben;
   ein während der Entwicklung verlorener `attacks`/`spell_slots`-Anteil wurde durch
   echte WS-Angriffstests sichtbar und behoben.
+
+## D128 — NPC-Angriffsreichweite wird hartes Gate auf der bestehenden Footprint-/Ebenen-Distanz (2026-10-16/17; Doku nachgereicht in der Recovery-Sitzung 2026-10-17)
+
+- **Status:** umgesetzt (Code und Tests waren bereits im gepushten Stand
+  enthalten; der Doku-Abschnitt wurde vor dem Abbruch der autonomen Sitzung
+  nicht mehr geschrieben und wird hier in `docs/RECOVERY_2026-10-17.md`
+  belegter Session nachgereicht, statt die Umsetzung neu zu erfinden).
+- **Kontext:** Der Angriffsauslöser des NPC-Blocks behandelte Distanz nur als
+  Nachbarschafts-Advisory. Deklarierte Reichweiten (SRD: „reach 10 ft“,
+  Longspear usw.) existierten als Freitext in `creatures.csv`, ohne Konsument —
+  jede entfernte Ansage war entweder still falsch oder vom DM-Gefühl abhängig.
+  `dice._vertical_range_distance` (D109/D114) war bereits DIE eine
+  Footprint-Zellen × 5 ft messende, ebenenrichtige Distanz der
+  Spielerangriffe.
+- **Entscheidung:** `npc.project_creature()` liest „reach N ft“ aus der
+  Angriffszeile; `npc.clean_npc()` normalisiert `reach` (Clamp 0–999, Default
+  5 ft). `handle_npc_attack` prüft das Ziel gegen `atk["reach"]` über
+  `_vertical_range_distance` — dieselbe Distanzquelle wie Spielerangriffe und
+  Interaktionen; Fail-closed mit „out of reach“, wenn keine meszbare Linie
+  existiert. Der NPC-Editor zeigt/bearbeitet `reach` je Angriff
+  (`na-reach`-Feld, 0–999). Es wurde keine zweite Reichweiten-Mechanik gebaut.
+- **Grund:** Angriffsauslösung und Interaktion müssen dieselbe Geometrie
+  wahrnehmen. Eine advisory deklarierte Regelzahl ist eine falsifizierte
+  Datenlinie ohne Konsument — sie wird entweder Leser-fähig gemacht oder
+  sichtbar abgelehnt.
+- **Konsequenzen:** Kanon: **985 passed, 0 skipped, 0 failed** (Baseline der
+  Recovery-Sitzung 2026-10-17, `tests/test_d128_npc_reach.py`: 4 neue Tests —
+  Standard-Reichweite verweigert die zweite Zelle, deklarierte 10-ft-Reichweite
+  trifft, CSV-Projektion und `clean_npc`-Rundreise behalten `reach`,
+  Editor-Pin). `docs/CSV_ONLY_READINESS.md` wurde von „advisory“ auf das
+  durchgesetzte Gate korrigiert.

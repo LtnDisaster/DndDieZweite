@@ -5,7 +5,8 @@
 - Ziel: kontinuierliche, vertikal getestete Verbesserung ohne vorzeitigen Abschluss.
 - Basis: D&D 5e Revision 2024 / SRD 5.2.1.
 - Startpunkt dieses Laufs: `959 passed, 1 skipped, 0 failed`.
-- Aktueller Kanon: `981 passed, 0 skipped, 0 failed` (D127).
+- Aktueller Kanon: `985 passed, 0 skipped, 0 failed` (D128, bestätigt im
+  Recovery-Lauf 2026-10-17; davor D127 = 981).
 - Grenzen: keine Git-/`.git`-Aktionen, keine Änderung an `55_diorama.js`, keine
   destruktive Migration, keine zweite Regel-/Engine, keine künstlichen Skips.
 - Priorisierung: Kritikalität → Sicherheit → fehlende Engine-Verbindungen →
@@ -28,6 +29,7 @@
 | AP-011 | Effektgrammatik: Ressourcen wiederherstellen, nicht nur verbrauchen | P2 | getestet |
 | AP-012 | Spezies-Geschwindigkeit/Dunkelsicht/Größe auf bestehenden Pfaden | P2 | getestet |
 | AP-013 | `companion` aus `creatures.csv` bis NPC-Block und DM-UI | P2 | getestet |
+| AP-014 | `reach` aus NPC-Angriffen als hartes Reichweiten-Gate (D128) | P2 | getestet (Doku nachgereicht 2026-10-17) |
 
 ## AP-001 — Reichweiten-/Reach-Härtungstest entskippen
 
@@ -505,3 +507,59 @@ im Editor gesetzt oder gespeichert werden.
   Teil des kanonischen Spawn-Blocks; die bestehenden echten WS-Angriffstests
   bleiben grün.
 - Kanon: `981 passed, 0 skipped, 0 failed`.
+
+## AP-014 — NPC-Angriffsreichweite als hartes Gate auf der einen Footprint-Distanz
+
+### Problem und Auswirkung
+
+Der NPC-Angriff prüfte Distanz nur als Nachbarschafts-Advisory. Deklarierte
+Reichweiten („reach 10 ft“ in `creatures.csv`-Angriffszeilen) hatten keinen
+Konsumenten; die Zahl war irreführender Inhalt statt Regel.
+
+### Lösung
+
+- `project_creature()` liest „reach N ft“; `clean_npc()` normalisiert das Feld
+  (Clamp 0–999, Default 5 ft).
+- `handle_npc_attack` gateert das Ziel über dieselbe
+  `dice._vertical_range_distance`-Distanz (Footprint-Zellen × 5 ft,
+  ebenenrichtig) wie Spielerangriff und Interaktion; Fail-closed mit
+  „Target is out of reach“.
+- Der NPC-Editor bearbeitet `reach` je Angriff (`na-reach`, 0–999).
+- Keine zweite Reichweiten-Mechanik; DECISIONS D128.
+
+### Testnachweise
+
+- `tests/test_d128_npc_reach.py` (4 echte WS-/Unit-/UI-Pin-Tests).
+- Kanon: `985 passed, 0 skipped, 0 failed`.
+
+### Hinweis zur Doku-Lücke
+
+Dieses Paket wurde in der abgebrochenen autonomen Sitzung (2026-10-16/17)
+implementiert und gepusht, aber der Doku-Abschnitt (D128/AP-014) und der
+Kanon-Eintrag fehlten. Die Recovery-Sitzung 2026-10-17 hat Code und Tests
+unverändert übernommen, die Baseline als grün verifiziert und die Doku
+nachgereicht. Details: `docs/RECOVERY_2026-10-17.md`.
+
+## Recovery-Lauf 2026-10-17 (Marathon-Bergung)
+
+- Frischer Clone, Branch `feature/csv-character-system`; keine Git-Aktionen,
+  `55_diorama.js` unangetastet.
+- Baseline `COMPOSE_PROFILES=test docker compose run --build --rm test`:
+  **985 passed, 0 skipped, 0 failed** in 103 s — exakt D127-Kanon (981) + die
+  4 D128-Tests. Keine fehlgeschlagene oder halbfertige Integration im
+  Testkorpus auffindbar.
+- `node --check` über alle `app/static/js/*.js` grün; alle Python-Dateien
+  AST-frei von Syntaxfehlern.
+- Runtime-Image startet; `/api/health` `{"ok":true}`, Build-Hash-Check über
+  alle JS-Dateien konsistent. Hinweis Betrieb: Dieser Host läuft mit
+  Rootless-/Fuse-Docker — der ./data-Bind des Compose-App-Dienstes braucht auf
+  solchen Hosts uid-seitige Anpassung (Check hier mit einer Wegwerf-Instanz
+  unter `--user 0:0` und frischem Datenverzeichnis unter `$HOME` geführt;
+  keine Projektdaten berührt).
+- Echte Chromium-E2E (Playwright 1.64, Chromium 156, headless, in
+  Wegwerf-Containern; Repo nur lesend gemountet):
+  `scripts/e2e_build_wizard.py` **PASS**, `scripts/e2e_creature_projection.py`
+  **PASS** (inkl. NPC-Skill-Anzeige im Monster-Sheet).
+- Repariert werden musste am Code nichts; repariert wurde die Doku:
+  DECISIONS D128 nachgetragen, `CSV_ONLY_READINESS.md`-Zeile „reach advisory“
+  auf das durchgesetzte Gate korrigiert, FEATURE_MATRIX-Kanon auf 985/D128.
