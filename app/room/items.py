@@ -49,6 +49,11 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
     if not it["heal"] and not (it.get("props") or {}).get("effects"):
         await send_to(ws, "error", {"msg": f"{it['name']} isn't usable"})
         return
+    # D153: a vial without a charge counter holds exactly one sip — without
+    # this normalization a charges==-1 potion took the unlimited branch and
+    # never emptied, so content-pack potions were infinite.
+    if it["kind"] in ("potion", "scroll") and it["charges"] < 0:
+        it["charges"] = 1
     if it["charges"] == 0:
         await send_user(room_id, user["id"], "whisper", {"text": f"{it['name']} is depleted."})
         return

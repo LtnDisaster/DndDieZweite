@@ -1018,11 +1018,10 @@ window.addEventListener("mouseup", onUp); window.addEventListener("touchend", on
 window.addEventListener("resize", resize);
 window.addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
-  if (e.key === "?"){ const h = $("help-overlay");
-    if (h){ h.classList.toggle("hidden"); e.preventDefault(); } return; }
+  if (e.key === "?"){ if (typeof setHelp === "function") setHelp(!helpVisible());
+    e.preventDefault(); return; }   // D149: the overlay lives in 65_help.js
   if (e.key === "Escape"){
-    const h = $("help-overlay");
-    if (h && !h.classList.contains("hidden")){ h.classList.add("hidden"); return; }
+    if (typeof helpVisible === "function" && helpVisible()){ setHelp(false); return; }
     // D84: Escape = explicit deselect (plan, ruler, selection+sheet) — the
     // footprint outline is gone in normal gameplay without hunting a button.
     clearPlan(); state.ruler = null; state.sel = null; renderSheet(null); draw();

@@ -3600,3 +3600,82 @@ lines name conditions by design (public table record, D90).
   ein Token, das UNSICHTBAR endet — ein Pfad durch die Wand existiert nicht,
   der DM muss teleportieren; und /state hydratisiert, prune aber auch wieder,
   wenn der Beweis-Socket vorher schließt. TODO-P2-Zeile damit belegt.
+
+## D149 — In-App-Hilfe als Modul (Suche, Kategorien, Kontext)
+- **Status:** umgesetzt.
+- **Kontext:** Die Hilfe war statischer Text im Chronik-Panel: nicht durchsuchbar,
+  nicht nach Kontext, nie aktuell gehalten. Doku existsierte doppelt (statisch vs.
+  realidad) und veraltete still.
+- **Entscheidung:** app/static/js/65_help.js als eigenes Modul — 42 Einträge in 8
+  Kategorien (start/chars/combat/magic/maps/content/dm/errors), Suche (#help-search),
+  Kategorie-Tabs (#help-cats), Kontext-Chip (helpCtxCat(): game→combat, chars→chars,
+  inv→magic, story→dm, dm→dm). ?/Esc in 50_canvas/60_main delegieren nur noch an
+  setHelp()/helpVisible(); 99_boot MODULES/REQUIRED tragen das Modul. Jeder
+  Hilfe-Eintrag nennt den echten UI-Griff (Button-ID oder Pfad), keine Fiktion.
+- **Grund:** Hilfe, die nicht finde-bar ist, ist Doku-Friedhof. Eintrag nur für
+  Dinge, die Audit/E2E als bedienbar belegt haben (test_d149 pinnt das).
+- **Konsequenzen:** index.html verliert den statischen Block; Hilfe wächst ab jetzt
+  mit jedem Feature-Decision-Eintrag.
+
+## D150 — AP-022 Geschlossen: Stabilize- und give-Buttons
+- **Status:** umgesetzt.
+- **Kontext:** D136 (Stabilize) und D137 (inv_transfer) waren reine Server-Ops —
+  die Audit-Matrix fand keinen einzigen Aufrufpfad im Client. Feature vorhanden,
+  im Spiel nicht existent.
+- **Entscheidung:** 🩺 Stabilize sitzt im Death-Block des Sheets (deathHtml/#dstab,
+  eigene Person gesperrt wie serverseitig); 🫱 give sitzt auf der Inventarzeile des
+  eigenen Chars und öffnet den Picker (#give-to/#give-qty/#give-go). Der Server
+  prüft alle Gate erneut (Adjacenz, Aktion, Turn, Besitzer); der Button ist nur
+  die Abkürzung, nie die Erlaubnis. Bewusst KEINE erfundene UI: pickpocket_take,
+  forced_move, knock_prone und class_levels bleiben DM-direct/intern (Doku, keine
+  Tasten-Fiktion).
+- **Grund:** AP-022 (Server-op ohne UI) war der drittgrößte Audit-Befund; ein
+  Server-Handler, den kein Mensch drücken kann, ist ein Test-Handler.
+- **Konsequenzen:** test_d150 pinnt Sende-Payloads + Picker-Reset + Hilfe-Deckung.
+
+## D151 — Test-Schulden der Audit-Matrix abgearbeitet
+- **Status:** umgesetzt.
+- **Kontext:** turn_mark, death_clear, quest_obj_add und quest_fail hatten UI,
+  aber keinen einzigen pytest-Nachweis — Matrix-Eintrag „getestet: nein".
+- **Entscheidung:** tests/test_d151_ops_coverage.py: turn_mark (DM + Besitzer,
+  Toggle zurück auf available), death_clear (DM-only), quest_obj_add/quest_fail
+  (Flow + „Only the DM manages quests"). Server-Fehlerstrings werden wörtlich
+  gepinnt, weil die Hilfe sie zitiert.
+- **Grund:** Die Matrix darf keine Spalte „glaubt grün" enthalten.
+- **Konsequenzen:** Kanon 1065 → 1084.
+
+## D152 — Trank ohne Ladenzähler = genau ein Schluck
+- **Status:** umgesetzt.
+- **Kontext:** D146 konsumiert nur, wenn charges>0 auf 0 fällt. Content-Pack-Trank
+  (charges=-1) lief im handle_use_item-Else-Zweig und wurde NIE verbraucht —
+  unendliche Healing Draughts, Wirtschaft kaputt, trotz grüner D146-Tests (die
+  nutzten props-charges=1).
+- **Entscheidung:** In handle_use_item normalisieren: kind potion/scroll mit
+  charges<0 ⇒ charges=1, danach übernimmt der getestete D146-Pfad. Andere
+  ladungslose Heiler (Stäbe) bleiben unbegrenzt — Test pinnt beide Richtungen.
+- **Grund:** Ein Trank ohne Zähler dokumentiert genau eine Dosis; „-1" kann nicht
+  „für immer" bedeuten, wenn das Item eine Einweg-Kategorie hat.
+- **Konsequenzen:** test_d152_uncounted_vial_consumes.py (3 Pins). E2E D ist damit
+  erst wahr: Use verbrauchte vorher lautlos nichts.
+
+## D153 — E2E-C-Suite + vier Stale-UI-Pfade
+- **Status:** umgesetzt.
+- **Kontext:** scripts/e2e_playability_suite.py (Szenarien C–G gegen echte
+  Live-Instanz) fand vier Bugs, die statischer Audit + API-Tests nicht sehen:
+  (1) refreshRoom malte ein OFFENES Sheet nicht neu — Grants/HP/Tod kamen erst
+  nach erneutem Klick an; (2) die Private-Card des Bundesgenossen hatte keinen
+  Death-Block — der D150-Stabilize-Button war für Spieler faktisch unerreichbar;
+  (3) POST /floors aktualisierte state.floors, aber das eigene offene Sheet
+  (ws floors_changed geht nur an die ANDERN); (4) der presence-Handler machte
+  immer .add() — das #online-Roster wuchs, Offline-Geister blieben grün.
+- **Entscheidung:** Alle vier gefixt (Sheet-Re-Mal-Guard: offen && !npcEdit &&
+  !npc; Death-Block + wireDeath in der Private-Card — tok.death ist öffentlicher
+  Table-State, die Inventar-Privatsphäre bleibt unangetastet; Re-Mal im
+  fl-add-Antwortzweig; presence: online?add:delete). Suite bleibt als
+  scripts/e2e_playability_suite.py liegen (C: Sterben/Tod/Sichern/Stabilize/
+  Initiative/Chip/Angriff, D: Grant/Use/give, E: Floor anlegen + Ebene wechseln,
+  F: Chat/Reload/Presence, G: Hilfe) und läuft gegen jede Live-Instanz.
+- **Grund:** Buttons, die auf totem Daten-Stand sitzen, sind für den Spieler
+  kaputt — egal ob der Server recht hat.
+- **Konsequenzen:** test_d153_ui_refresh_closure.py pinnt alle vier Stellen;
+  E2E A–G grün; Kanon 1093.

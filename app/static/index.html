@@ -710,28 +710,9 @@ window.addEventListener("unhandledrejection", function(ev){
 <div id="help-overlay" class="help-overlay hidden">
   <div class="help-card panel">
     <div class="row"><h2 style="flex:1">How to play</h2><button id="btn-help-close" class="ghost">✕</button></div>
-    <p><b>Views.</b> Tactical is the top-down grid; Diorama is the same room and the same
-      server pathfinding in an isometric table view. Your token, movement and path previews
-      behave identically in both.</p>
-    <p><b>Movement.</b> Click your token, then click a destination: you get a path preview
-      first. Double-click the previewed goal (or press the confirm button) to walk.
-      The walk stops at traps, closed doors, and if you drop to 0 HP.</p>
-    <p><b>Fog of war.</b> Explored terrain stays explored. The DM's 💡 brush toggles
-      room-wide terrain reveal; hidden creatures still need line of sight either way.</p>
-    <p><b>Doors.</b> Click a door next to your token to open or close it. Locked doors
-      need the key — or the DM. Some doors only the DM can move at all (“it won't
-      budge”), and secret passages show up for the DM's map only.</p>
-    <p><b>DM & NPCs.</b> Create a token in 🎲 DM → add a name, click it, and the full
-      statblock editor opens: Identity, Combat, Abilities up top; conditions, defences,
-      spellcasting, attacks, actions and resources in collapsible sections.
-      “＋ Bestiary” saves the block as a template; Encounters spawn saved monsters.</p>
-    <p><b>Sidebar tabs.</b> ⚔ Game (initiative, party) · 👤 Chars (your character) ·
-      📜 Story (quests, journal) · 🎲 DM tools. Chat and dice stay visible always.</p>
-    <p><b>Audio.</b> ▶ starts or resumes the room ambience (self-hosted tracks resume
-      where they were; YouTube/Spotify embeds restart). ⏸ pauses, Stop clears the source.</p>
-    <p><b>Keys.</b> <kbd>?</kbd> help · <kbd>Esc</kbd> close / cancel path ·
-      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows pan the camera ·
-      middle/right-drag pans too.</p>
+    <input id="help-search" type="search" placeholder="Search the manual — rest, trap, grapple…" autocomplete="off">
+    <div id="help-cats" class="help-cats"></div>
+    <div id="help-list" class="help-list"></div>
     <p class="meta">Anything surprising? Tell your DM — the server decides everything
       that matters, so what you see is what really happened.</p>
   </div>
@@ -744,6 +725,7 @@ window.addEventListener("unhandledrejection", function(ev){
 <script src="/static/js/50_canvas.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/55_diorama.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/60_main.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/65_help.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/70_content.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/80_prep.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/99_boot.js?v=__BUILDTOKEN__"></script>

@@ -80,6 +80,22 @@ body.dbg-on .dbg { display: inline-block; font: 11px/1.4 ui-monospace, monospace
 .help-card { max-width: 620px; max-height: 84vh; overflow-y: auto; }
 .help-card kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
   padding: 0 .3em; font-size: .85em; }
+/* D149: searchable help — search field, category chips, collapsible entries */
+#help-search { width: 100%; box-sizing: border-box; margin: .2rem 0 .5rem; }
+.help-cats { display: flex; flex-wrap: wrap; gap: .3rem; margin: 0 0 .5rem; }
+.help-cats button { padding: .25rem .55rem; font-size: .78rem; border-radius: 999px; opacity: .7; }
+.help-cats button.active { opacity: 1; background: var(--panel2); border-color: var(--gold); }
+.help-entry { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 .4rem; }
+.help-entry summary { cursor: pointer; padding: .45rem .6rem; font-weight: 600; list-style: none; }
+.help-entry summary::-webkit-details-marker { display: none; }
+.help-entry summary::before { content: "▸ "; color: var(--gold); }
+.help-entry[open] summary::before { content: "▾ "; }
+.help-entry[open] summary { border-bottom: 1px solid var(--line); }
+.help-entry .help-body { padding: .5rem .6rem; }
+.help-entry .help-body b { color: var(--gold); }
+/* D150: give-recipient row inside the inventory */
+.give-row { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
+  margin-top: .4rem; padding: .35rem .5rem; border: 1px dashed var(--line); border-radius: 8px; }
 /* category tab bar: first sidebar row, always in view (no sticky needed) */
 .side-tabs { flex: 0 0 auto; min-height: 0; gap: .3rem; margin: 0; }
 .side-tabs button { flex: 1; padding: .35rem .4rem; font-size: .8rem; opacity: .7;

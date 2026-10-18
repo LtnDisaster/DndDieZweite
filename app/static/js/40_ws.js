@@ -60,9 +60,12 @@ function connectWS(code){
         break;
       }
       case "initiative": state.init = p; renderInit(); break;
-      case "presence": state.online.add(p.username); renderOnline();
+      case "presence": {   // D153: offline was only announced in the log — the
+                          // roster set never shrank, so ghosts stayed online
+        if (p.online) state.online.add(p.username); else state.online.delete(p.username);
+        renderOnline();
         appendGameLogMessage({ type:"system", body: `${p.username} ${p.online ? "connected" : "disconnected"}` });
-        break;
+      } break;
       case "explored": { const g = state.grid;
         // D102 plane guard: reveals belong to the plane that was walked.
         if (g && p.cells && String(p.floor || "") === String(state.viewFloor || ""))

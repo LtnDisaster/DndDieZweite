@@ -117,7 +117,12 @@ function renderFloorPanel(){
       .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
         .then(j => { throw new Error((j && j.detail) || "Cannot add floor"); }))
       .then(j => { inp.value = ""; state.floors = j.floors || state.floors;
-                   renderFloorPanel(); renderViewFloor(); })
+                   renderFloorPanel(); renderViewFloor();
+                   // D153: the ws floors_changed broadcast goes to the OTHER
+                   // clients — the actor's own open sheet kept stale options.
+                   if (state.sel && !$("sheet").classList.contains("hidden")) {
+                     const st = state.tokens.find(x => x.id === state.sel);
+                     if (st && state.npcEdit == null && !st.npc) renderSheet(st); } })
       .catch(err => toast(err.message || "Cannot add floor"));
   };
 }
@@ -263,6 +268,14 @@ async function refreshRoom(){
   state.messages = s.messages || []; state.chat = s.chat || [];
   applyAudioState(s.audio || {}); renderChatTargets(); renderVoiceTargets(); renderAudio();
   renderFeed(); applySideTab(); applyFeedPanels();
+  // D153: an OPEN sheet used to freeze at its render-time snapshot — a DM grant
+  // or HP change never landed until the next click. Re-render from the fresh
+  // state, but never while the NPC statblock editor holds unsaved edits.
+  if (state.sel && !$("sheet").classList.contains("hidden")){
+    const t = state.tokens.find(x => x.id === state.sel);
+    if (!t) renderSheet(null);
+    else if (state.npcEdit == null && !t.npc) renderSheet(t);
+  }
 }
 
 /* ---------- bestiary (DM-owned monster templates) ---------- */
@@ -1186,6 +1199,18 @@ function wireRotRow(tok){
   $("rot-right").onclick = () => send(90);
   $("rot-reset").onclick = () => { if (cur() !== 0) send(360 - cur()); };
 }
+/* D150: recipient picker for handing an item to another character (inv_transfer). */
+function _giveRowHtml(ch, itemId){
+  const it = (ch.items || []).find(x => x.id === itemId);
+  if (!it) return "";
+  const cands = (state.room.members || []).filter(m => m.char && m.char.id !== ch.id);
+  if (!cands.length) return `<div class="give-row">🫱 Nobody else is at this table yet.</div>`;
+  return `<div class="give-row">🫱 <b>${esc(it.name)}</b> →
+    <select id="give-to">${cands.map(m => `<option value="${m.char.id}">${esc(m.char.name)} (${esc(m.username)})</option>`).join("")}</select>
+    qty <input id="give-qty" type="number" min="1" max="${it.qty || 1}" value="1" style="width:3.5rem">
+    <button id="give-go" class="primary">Give</button>
+    <button id="give-x" class="ghost">✕</button></div>`;
+}
 function renderSheet(tok){
   state.sel = tok ? tok.id : null;
   updateMoveControls();
@@ -1199,10 +1224,15 @@ function renderSheet(tok){
   // D93: peers only ever receive the tactical allow-list (items/stats/spells
   // are sheet-private) — such a row renders as a compact public card.
   if (ch && ch.items === undefined && state.room.role !== "dm"){
+    // D153: the private card had no death block, so a party member looking at
+    // a downed ally saw "ask X at the table" and no way to Stabilize — the
+    // whole D150 button was DM-only in practice. tok.death is public table
+    // state, so only that block is shared; the sheet stays private.
     $("sheet-body").innerHTML = `<div class="hpbar"><div style="width:${Math.max(0,(ch.hp||0)/Math.max(1,ch.max_hp)*100)}%"></div></div>` +
       `<b>HP ${ch.hp}/${ch.max_hp}</b>${ch.temp_hp ? ` (+${ch.temp_hp} temp)` : ""} · AC ${ch.ac_total != null ? ch.ac_total : ch.ac} · Speed ${ch.speed} ft` +
-      `<div class="meta">Private sheet — ask ${esc(ch.name)} at the table.</div>`;
+      `<div class="meta">Private sheet — ask ${esc(ch.name)} at the table.</div>` + deathHtml(tok);
     $("hp-btns").classList.add("hidden"); $("hp-adv").classList.add("hidden");
+    wireDeath(tok);
     return;
   }
   const clsTxt = ch && ch.class_levels && ch.class_levels.length
@@ -1245,6 +1275,8 @@ function renderSheet(tok){
     if (isDM && it.recharge) btns.push(`<button data-a="recharge" data-id="${it.id}">Recharge</button>`);
     // D112: authorise this character item as stealable (Model B subset).
     if (isDM) btns.push(`<button data-a="pk" data-id="${it.id}" title="Authorise this item for a pickpocket steal (Model B)">${it.pick ? "🤝 steal ✓" : "🤝 steal"}</button>`);
+    // D150: hand one of MY items to another character at this table.
+    if (own) btns.push(`<button data-a="give" data-id="${it.id}" title="Hand it to another character at this table — one transaction, no half-moves">🫱 give</button>`);
     return `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind]||"🎒"} ${esc(it.name)}${it.qty > 1 ? " ×" + it.qty : ""}</span> <small>${chips}</small>
       <small style="opacity:.6">${it.kind==="armor" ? ("AC "+(it.ac||(it.acBonus?("+"+it.acBonus):""))) : (it.heal?("+HP "+it.heal):"")}</small>
       ${it.unidentified ? "" : `<small style="opacity:.55"> ${esc(it.desc||"")}</small>`}<span class="inv-btns">${btns.join("")}</span></div>`;
@@ -1453,7 +1485,7 @@ function renderSheet(tok){
       `<div class="stat"><small>${l}</small>${v(ch.stats,k)} <small>${der.stat_mods ? sgn(der.stat_mods[k]) : mod(v(ch.stats,k))}</small></div>`).join("")}</div>
     ${conditionsHtml(tok)}
     ${defenseHtml(ch.defenses)}
-    ${inv.length ? `<div class="inv"><div class="wlabel">Inventory <small style="opacity:.6">(attuned ${(ch.items||[]).filter(x=>x.attunable&&x.attuned).length}/${der.attune_max || 3})</small></div>${invRows}</div>` : ""}
+    ${inv.length ? `<div class="inv"><div class="wlabel">Inventory <small style="opacity:.6">(attuned ${(ch.items||[]).filter(x=>x.attunable&&x.attuned).length}/${der.attune_max || 3})</small></div>${invRows}${(own && state.giveId) ? _giveRowHtml(ch, state.giveId) : ""}</div>` : ""}
     ${attackBlock}${specialBlock}${skillBlock}${saveBlock}${bookBlock}${buildBlock}
     ${_walletBlock}${_weightBlock}${_compBlock}
     <details><summary style="cursor:pointer;font-size:.8rem;opacity:.7">Notes</summary><div style="white-space:pre-wrap;font-size:.82rem">${esc(ch.notes)}</div></details>`;
@@ -1466,7 +1498,17 @@ function renderSheet(tok){
     else if (b.dataset.a === "recharge") wsSend({ type:"recharge", char_id: ch.id, item_id: id });
     else if (b.dataset.a === "pk") wsSend({ type:"pickable", char_id: ch.id, item_id: id,
              action: (b.textContent || "").indexOf("✓") >= 0 ? "clear" : "set", op_id: invOpId() });
+    else if (b.dataset.a === "give") { state.giveId = (state.giveId === id ? null : id); renderSheet(tok); }
   };
+  // D150: the one-shot recipient picker for 🫱 give — the server move is atomic.
+  const gGo = $("give-go"), gX = $("give-x");
+  if (gGo) gGo.onclick = () => {
+    const to = +$("give-to").value, qty = Math.max(1, +$("give-qty").value || 1);
+    wsSend({ type:"inv_transfer", char_id: ch.id, to_char_id: to, item_id: state.giveId,
+             qty, op_id: invOpId() });
+    state.giveId = null; renderSheet(tok); toast("Handing it over…");
+  };
+  if (gX) gX.onclick = () => { state.giveId = null; renderSheet(tok); };
   // D99 wiring — money (authorised intents only) + companion controls (reuse the
   // existing token_controller / token_mount / del_token / add_token handlers).
   const _money = (action, row, extra) => {
@@ -2017,14 +2059,23 @@ function deathHtml(tok){
   const boxes = n => { let h = ""; for (let i=0;i<3;i++) h += `<span class="dsv${i<n?" on":""}"></span>`; return h; };
   const status = d.dead ? `<b style="color:var(--red)">DEAD</b>` : d.stable ? `<b style="color:var(--green)">Stable</b>` : `<b style="color:var(--red)">Dying</b>`;
   const roll = (own || isDM) && !d.stable && !d.dead ? `<button id="dsave" class="primary">☠ Roll Death Save</button>` : "";
+  // D150 (AP-022 UI closure): D136's Stabilize existed only as a WS op — the
+  // button rides the patient's death block; the server re-checks adjacency,
+  // the action and whose turn it is. A player can never stabilise themselves.
+  const mt = myToken();
+  const stab = (d.stable || d.dead) ? "" :
+    ((isDM || (mt && mt.id !== tok.id))
+      ? `<button id="dstab" class="ghost" title="Medicine check DC 10 — your action; you must be next to the patient">🩺 Stabilize</button>` : "");
   const clr = isDM ? `<button id="dclear" class="ghost">Clear</button>` : "";
   return `<div class="death"><div class="wlabel">Death Saves</div>
     <div class="dsrow"><span class="tiny">Succ</span><span class="dsucc">${boxes(d.s)}</span>
       <span class="tiny">Fail</span><span class="dfail">${boxes(d.f)}</span>${status}</div>
-    <div class="row dsbtns">${roll}${clr}</div></div>`;
+    <div class="row dsbtns">${roll}${stab}${clr}</div></div>`;
 }
 function wireDeath(tok){
   const b = $("dsave"); if (b) b.onclick = () => wsSend({ type:"death_save", token_id: tok.id });
+  const s = $("dstab"); if (s) s.onclick = () => { const m = myToken();
+    wsSend({ type:"stabilize", token_id: m ? m.id : -1, target_token_id: tok.id }); };
   const c = $("dclear"); if (c) c.onclick = () => wsSend({ type:"death_clear", token_id: tok.id });
 }
 
@@ -2160,6 +2211,10 @@ function renderInv(){
         btns.push(`<input id="split-q" type="number" min="1" max="${it.qty - 1}" value="1" style="width:52px">` +
                   `<button data-a="splitgo" data-id="${it.id}">Go</button>` +
                   `<button data-a="splitcancel">✕</button>`);
+      // D153: Use lived only on the sheet — the inventory window itself had no
+      // consumable path. Same server gate (use_item), same known/charges guard.
+      if (it.heal && known && it.charges !== 0)
+        btns.push(`<button data-a="use" data-id="${it.id}">Use</button>`);
       if (it.stackable)
         btns.push(`<button data-a="combine" data-id="${it.id}" ${state.invCombine === it.id ? "class='active'" : ""}>${state.invCombine === it.id ? "pick other" : "Combine"}</button>`);
       if (isDM) btns.push(`<button data-a="remove" data-id="${it.id}" style="color:var(--red)">Remove</button>`);
@@ -2201,6 +2256,9 @@ function renderInv(){
       if (a === "equip"){
         const slot = items.querySelector(`select[data-slot="${id}"]`)?.value || "main_hand";
         wsSend({ type: "inv_equip", char_id: ch.id, slot, item_id: id, op_id: invOpId() });
+      } else if (a === "use"){   // D153: consumable path in the inventory window
+        const t = state.tokens.find(x => x.character_id === ch.id);
+        wsSend({ type: "use_item", token_id: t ? t.id : -1, item_id: id, op_id: invOpId() });
       } else if (a === "split"){ state.invSplit = id; renderInv(); }
       else if (a === "splitcancel"){ state.invSplit = null; renderInv(); }
       else if (a === "splitgo"){

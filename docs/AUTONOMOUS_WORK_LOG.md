@@ -884,3 +884,24 @@ nachgereicht. Details: `docs/RECOVERY_2026-10-17.md`.
 - Jetzt Invarianten statt Vermutungen: stable <=> '— stable' im Wurf-Text,
   und (death==NULL) <=> nat20. Jeder Wurf bestaektigt sie — der Zufall kann
   den Test nicht mehr kneifen. Kanon bleibt 1065/0/0.
+
+## Nachtschicht 3.0 — Operation Spielbereit (2026-10-18)
+
+- Feature->UI->Test-Matrix komplett: 91 WS-Handler + 59 REST-Pfade, tote
+  DOM-IDs und JS->REST-Pfade keine. Befunde und Taten: D149 (In-App-Hilfe
+  65_help.js: Suche/Kategorien/Kontext, 42 Eintraege), D150 (Stabilize- und
+  give-Buttons — Server-Ops ohne Sendeort; bewusst KEINE UI fuer
+  pickpocket_take/forced_move/knock_prone/class_levels), D151 (Test-Schulden
+  turn_mark/death_clear/quest_* getilgt), D152 (Trank ohne Ladenzaehler war
+  unendlich — Normalisierung auf eine Dosis, E2E-gefangen wo D146 blind war),
+  D153 (E2E fand vier Stale-UI-Pfade: offenes Sheet nach Refresh,
+  Private-Card ohne Death-Block, floor-POST ohne Eigen-Refresh,
+  Presence-Roster wuchs nur).
+- E2E-Suite C-G neu (scripts/e2e_playability_suite.py), A/B erneut gegreen;
+  alle sieben Szenarien laufen gegen die Live-Instanz (8010) und sind rc=0.
+  Infrastruktur-Rezept inkl. Register-Ratelimit-Falle dokumentiert
+  (docs/PLAYABILITY_AUDIT_2026-10-18.md Abschnitt 9).
+- Kanon 1065 -> 1093 passed, 0 skipped, 0 failed; node --check ueber alle
+  Module sauber. Manuelle Browser-Liste (9 Punkte, 30-60 min) priorisiert im
+  Report; Regelentscheidung Massive-Damage-Exactness bewusst NICHT gefallen
+  und als solche markiert.

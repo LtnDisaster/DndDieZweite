@@ -249,13 +249,12 @@ function wire(){
   $("view-tactical").onclick = () => setViewMode("tactical");
   $("view-diorama").onclick = () => setViewMode("diorama");
   renderViewToggle();
-  const helpOverlay = () => $("help-overlay");
-  const setHelp = on => { const h = helpOverlay(); if (h) h.classList.toggle("hidden", !on); };
+  // D149: the overlay itself is owned by 65_help.js — these are entry points only.
   const helpBtn = $("btn-help");
-  if (helpBtn) helpBtn.onclick = () => setHelp(helpOverlay().classList.contains("hidden"));
+  if (helpBtn) helpBtn.onclick = () => setHelp(!helpVisible(), helpCtxCat());
   const helpClose = $("btn-help-close");
   if (helpClose) helpClose.onclick = () => setHelp(false);
-  const hOverlay = helpOverlay();
+  const hOverlay = $("help-overlay");
   if (hOverlay) hOverlay.onclick = e => { if (e.target === hOverlay) setHelp(false); };
   for (const b of document.querySelectorAll("#side-tabs button"))
     b.onclick = () => { localStorage.setItem(sideTabKey(), b.dataset.tab); applySideTab(); };
