@@ -898,3 +898,25 @@ Both on the same plane, the target in reach (touching footprints) and visible.
 - [ ] Ein Token auf Ebene „Upper" (2. deklarierte Ebene) mit Boden-Höhe +3 liegt
       geometrisch bei 2·10 + 3·10 = 50 ft (nur Anzeige/Buchführung; Ebenen
       bleiben unabhängig, keine Kollision über die Höhe).
+
+## Nachtschicht 4.0 — Anschlusspunkte (2026-10-18, Regressions-Audit)
+
+Automatik ist grün (1115 Tests, E2E A–G2/G); diese Punkte bleiben Mensch:
+
+- [ ] **Massive-Grenze live:** Char mit vollem HP bekommt exakt max_hp
+      Schaden ⇒ sterbend (NICHT tot); erst Rest nach Fall ≥ max_hp ⇒ tot.
+      (Der alte Vermerk „20/20 stirbt bei exakt 20" ist überholt — D154.)
+- [ ] **G2-Gefühl:** DM-Browser mitten im Raid neu laden → Raum erneut
+      betreten → DM-/Game-/Inv-Tab: alle Griffe da? Kamera steht bewusst
+      nicht auf Tokens — stört das im Spielalltag?
+- [ ] **Regelentscheidung Kurze Rast (D155):** Sterbender Spieler macht
+      eigene kurze Rast mit Hit Dice ⇒ richtet sich auf. 2014-RAW würde
+      Bewusstsein verlangen. So lassen oder Regelarbeit beauftragen?
+- [ ] **Reload im Kampf:** offenes Sheet + laufende Initiative → Reload →
+      Re-Enter: Slot-Chips und Initiativ-Fenster korrekt?
+- [ ] **Floor-Adjazenz:** Stabilize von oben auf unten muss scheitern
+      („next to the patient"); gleiche Zelle, anderes Stockwerk zählt nicht.
+- [ ] **Trank-Verschwendung sichtbar:** ×3 bei vollem HP trinken ⇒ Chronik
+      zeigt Verbrauch pro Schluck, letzte Dosis verschwindet sichtbar.
+- [ ] Nicht automatisch prüfbar: Audio-Ausgabe, Mobile-Breite, echter
+      Netzabriss mit Reconnect, WebAuthn.

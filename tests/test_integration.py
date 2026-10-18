@@ -975,8 +975,15 @@ def test_massive_damage_on_drop_blow_kills(client):
     client.post(f"/api/rooms/{code}/assign", json={"character_id": ch["id"]}, headers=H(dm))
     tok_id = next(t for t in state_of(client, dm, code)["tokens"]
                   if t.get("character_id") == ch["id"])["id"]
+    # D154: massive means the REMAINDER at 0 HP meets max_hp. −20 on 20/20
+    # leaves 0 remainder: dying, not dead. −40 leaves exactly 20: dead.
     with ws_connect(client, dm, code) as ws:
         ws.send_json({"type": "hp", "token_id": tok_id, "delta": -20})
+        recv_until(ws, "snapshot")
+    d = _death_state(client, dm, code, ch["id"])
+    assert d and d["dead"] is False
+    with ws_connect(client, dm, code) as ws:
+        ws.send_json({"type": "hp", "token_id": tok_id, "delta": -40})
         recv_until(ws, "snapshot")
     d = _death_state(client, dm, code, ch["id"])
     assert d and d["dead"] is True

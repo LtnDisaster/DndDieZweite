@@ -3679,3 +3679,58 @@ lines name conditions by design (public table record, D90).
   kaputt — egal ob der Server recht hat.
 - **Konsequenzen:** test_d153_ui_refresh_closure.py pinnt alle vier Stellen;
   E2E A–G grün; Kanon 1093.
+
+## D154 — Massive Damage: Rest-Regel statt Rohschaden
+- **Status:** umgesetzt.
+- **Kontext:** health.py verglich den ROHEN (post-resistance) Schaden mit
+  max_hp: ein voller 20/20-Held starb bei exakt 20 Schaden (Rest 0!), und
+  Temp-HP-Absorption zählte mit in den Tötungs-Vergleich. Die Nacht-3-Doku
+  hatte die Abweichung als Regelentscheidung markiert; der Auftrag 4.0
+  entschied sie: 2024SRD — tödlich ist, was nach dem Fall auf 0 HP an
+  Schaden ÜBRIG bleibt und dabei min. max_hp erreicht.
+- **Entscheidung:** prev>0: dead iff (remaining - prev) >= max_hp.
+  prev<=0 (Schaden auf 0 HP): bleibt bei der bestehenden Regel — damage
+  >= max_hp => instant (und der übliche Fail + crit-double-Fail).
+  remaining = post-resistance, post-temp; hp = max(0, prev-remaining).
+  Der Integrations-Test, der -20 auf 20/20 als dead pinnte, wurde auf die
+  korrekte Grenze gesetzt (-20 => dying, -40 => dead) — Intention erhalten,
+  Zahl berichtigt, nicht abgeschwächt.
+- **Grund:** Eine Tötungsregel, die gesunden Helden bei Normal-Trefferwurf-
+  Maximum exekutiert, ist kein Hausrecht, sondern ein Zählfehler.
+- **Konsequenzen:** test_d154 (7 Fälle inkl. Temp-HP- und 0-HP-Grenzen).
+
+## D155 — Edge-Case-Sonden: Engine hielt; eine Abweichung sichtbar gemacht
+- **Status:** umgesetzt.
+- **Kontext:** Auftrag 4.0 verlangte einen systematischen Bruch-Versuch:
+  Ressourcen bei Refusal/Replay, Consumables, Heilung/Tod, Floor-Adjacenz,
+  Transfer-Races, Slot-Double-Send, CSV-Müll, NPC-Autorität.
+- **Entscheidung:** 12 deterministische Sonden (test_d155_edge_probes.py) —
+  alle grün, kein neuer Server-Bug. Zwei Ergebnisse werden pinnt statt
+  nur notiert: (1) Full-HP-Trank consumed trotzdem die Dosis (D152-Invari-
+  ante); (2) der bewusst pinnte Kurze-Rast-Pfad: ein Sterbender kann sich
+  mit Hit Dice selbst aufrichten — 2014-RAW verlangt Bewusstsein dafür.
+  Das ist bestehendes, seit D-Tagen getestetes Design (owner-or-DM,
+  hit-dice-basiert); es zu kippen wäre EINE NEUE Hausregel — daher
+  Doku + Manuell-Abnahme-Punkt, kein Autopilot-Wechsel.
+- **Grund:** Ein grüner Probe-Suite-Bestand ist ein Beweis, kein Nichts.
+- **Konsequenzen:** NPC-Angriff durch Spieler bleibt stilles Authz-Refusal
+  (kein Informationsleck); D145-Species-Grants sind bereits exactly-once
+  gepinnt; cross-floor Range/Adjacenz ist D114-versiegelt.
+
+## D156 — Hilfe-Wahrheits-Gate + G2 (DM-Reload) + Kamera-Erkenntnis
+- **Status:** umgesetzt.
+- **Kontext:** Die Hilfe (D149) nennt Buttons mit Klarnamen. Bislang gab es
+  kein Gate, das beim ersten Umbenennen eines Buttons rot würde. Dazu:
+  nach einem Reload sitzt die DM-Kamera nicht auf den Tokens — pixelgenaue
+  Klicks gehen ins Leere, bis der Nutzer panned.
+- **Entscheidung:** test_d156_help_ui_truth.py extrahiert jedes <b>-Label
+  der Hilfe und verlangt: im UI-Code ODER (bei zitierten Server-Absagen)
+  im Server-Code vorhanden. 55_diorama.js ist als claim-Ziel ausgenommen
+  (eingefroren). Neues E2E-Szenario G2: DM-Reload -> Re-Enter -> DM-/Game-/
+  Inv-Tab -> floor/init/grant-Handles sichtbar; Token-Selektion dort
+  synthetisch (renderSheet), da die Kamera nach Reload bewusst nicht
+  springt — der Canvas-Klick wird in C/D/E real gefahren.
+- **Grund:** Doku ohne Realitäts-Gate verrottet still; genau das war D149s
+  Vorgeschichte.
+- **Konsequenzen:** Hilfe-Drift kostet ab jetzt ein rotes Test-Item statt
+  einen verärgerten Spieler.

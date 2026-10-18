@@ -106,9 +106,17 @@ async def change_hp(room_id, tok, delta, *, crit=False, damage_type=None,
         if hp <= 0:
             if death is None or prev > 0 or (death.get("stable") and not death.get("dead")):
                 death = D.new()
-            if prev <= 0 and damage > 0:
-                death["f"] = min(3, death["f"] + (2 if crit else 1))
-            if damage >= max_hp:
+            if prev <= 0:
+                if damage > 0:
+                    death["f"] = min(3, death["f"] + (2 if crit else 1))
+                if remaining >= max_hp:
+                    death["dead"] = True
+                    death["f"] = 3
+            elif remaining - prev >= max_hp:
+                # D154 (2024 SRD): instant death needs the damage that REMAINS
+                # after the blow reaches 0 HP to meet max_hp. The old rule
+                # compared RAW damage (incl. temp-HP absorption) and killed a
+                # full-health hero at exactly max_hp damage.
                 death["dead"] = True
                 death["f"] = 3
             D.apply_thresholds(death)

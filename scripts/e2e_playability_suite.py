@@ -363,6 +363,27 @@ def main():
             log("F PASS — shared chat, reload persistence, presence shrink")
             shot(p1, "reload")
 
+            # ---- G2 (D156): the DM reloads — every surface must be back ----
+            dp.reload()
+            expect(dp.locator("#lobby-user")).to_contain_text(f"ns3_dm_{stamp}", timeout=10000)
+            enter_room(dp, code)
+            dp.wait_for_timeout(1500)
+            dp.wait_for_function("() => (state.tokens || []).length >= 2", timeout=20000)
+            dp.wait_for_timeout(700)          # let cam/snapshot settle before clicking
+            # after a fresh reload the DM camera is NOT token-centred, so a
+            # pixel click may aim off-screen; G2 tests the SURFACES, and the
+            # canvas-click path is exercised for real in C/D/E.
+            dp.evaluate("""tid => { const t = state.tokens.find(x => x.id === tid);
+                state.sel = t.id; renderSheet(t); }""", p1_tok)
+            dp.click("#side-tabs button[data-tab='dm']")
+            expect(dp.locator("#fl-new")).to_be_visible(timeout=8000)
+            dp.click("#side-tabs button[data-tab='game']")
+            expect(dp.locator("#btn-init-start")).to_be_visible(timeout=8000)
+            dp.click("#side-tabs button[data-tab='inv']")
+            expect(dp.locator("#inv-grant")).to_be_visible(timeout=8000)
+            log("G2 PASS — DM surfaces reachable after a fresh reload")
+            shot(dp, "dm-reload")
+
             # ---- G: the in-app help ----
             p1.keyboard.press("?")
             expect(p1.locator("#help-overlay")).to_be_visible()

@@ -905,3 +905,26 @@ nachgereicht. Details: `docs/RECOVERY_2026-10-17.md`.
   Module sauber. Manuelle Browser-Liste (9 Punkte, 30-60 min) priorisiert im
   Report; Regelentscheidung Massive-Damage-Exactness bewusst NICHT gefallen
   und als solche markiert.
+
+## Nachtschicht 4.0 — Regression & Edge-Case-Hunt (2026-10-18)
+
+- Auftrag: echte Fehler vor der manuellen Abnahme finden, keine Features.
+- Echter Bug gefangen und korrigiert (D154): Massive Damage verglich
+  ROHSCHADEN mit max_hp — voller 20/20-Held starb bei exakt 20. Jetzt
+  2024SRD-Restregel (prev>0: Rest >= max_hp; prev<=0 wie bisher). Der
+  alte Test pinnte den Fehler; auf die korrekte Grenze berichtigt
+  (-20 dying, -40 dead), Intention erhalten.
+- 12 deterministische Sonden (test_d155, D155): Ressourcen-Replay,
+  Consumables, Heilen-vs-Tod, Floor-Adjacenz, Transfer-Races,
+  Slot-Double-Send, clean_items-Muell, NPC-Autoritaet — alle gruen, kein
+  weiterer Server-Bug. Bewusste Abweichung sichtbar gepinnt: Kurze Rast
+  mit HD richtet Sterbenden auf (2014-RAW will Bewusstsein dafuer);
+  Kippen waere eine neue Hausregel -> Operator-Entscheidungspunkt.
+- Hilfe-Realitaets-Gate (test_d156, D156): jedes <b>-Label der Hilfe muss
+  in UI- oder Server-Code existieren; alle 53 existieren, Gate haelt
+  kuenftige Drift jetzt rot an. Neues E2E-Szenario G2: DM-Reload ->
+  Re-Enter -> DM-/Game-/Inv-Oberflaechen erreichbar. Nebenerkenntnis:
+  Kamera steht nach Reload nicht auf Tokens (absichtlich, Doku-Punkt).
+- Zahlen: Kanon 1093 -> 1115 (rc=0, 0 failed), node --check sauber, E2E
+  A/B/C/D/E/F/G2/G alle rc=0 gegen isolierte Instanz (ns4, 8010),
+  Teardown erledigt. Report: docs/REGRESSION_AUDIT_2026-10-18.md.
