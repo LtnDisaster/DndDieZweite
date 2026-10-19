@@ -46,9 +46,18 @@ def pc_token(code, ch):
                  (room_id(code), ch["id"]))
 
 
-def add_floor(client, dm, code, name):
+def add_floor(client, dm, code, name, ground=True):
     assert client.post(f"/api/rooms/{code}/floors", json={"name": name},
                        headers=H(dm)).status_code == 200
+    # D159: a named plane is open AIR by default; a lamp-bearing plane the DM
+    # stands a token on is authored as a real floor first.
+    if ground:
+        grid = client.get(f"/api/rooms/{code}/state?floor={name}",
+                          headers=H(dm)).json()["grid"]
+        grid["cells"] = [0] * len(grid["cells"])
+        with ws_connect(client, dm, code) as ws:
+            ws.send_json({"type": "map_edit", "map": grid, "floor": name})
+            recv_until(ws, "map_changed")
 
 
 def view_as(client, actor, code, cid):

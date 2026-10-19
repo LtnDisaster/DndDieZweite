@@ -72,12 +72,14 @@ def test_void_is_open_volume_for_a_30ft_body_across_three_open_planes(client):
 
 def test_solid_ceiling_still_blocks_cross_plane_body_projection(client):
     dm, _, code, _ = base_room(client)
-    add_floor(client, dm, code, "Upper1")
+    add_floor(client, dm, code, "Upper1")            # a laid floor = a solid slab
     r = rid(client, code)
     maps = vertical3d.maps_for(r)
     lm = vertical3d.level_map(r)
     tok = token_at(r, "", 16, 16, height_ft=30)
-    paint(maps["Upper1"], 16, 16, cells=5)
+    # (D159) the ceiling is the UPPER plane's own floor slab: a laid floor caps
+    # the column (an OPENING — air/void/openv — is what lets the body through).
+    paint(maps["Upper1"], 16, 16, cells=0)
     assert vertical3d.body_planes(r, tok, maps, lm) == {""}
 
 

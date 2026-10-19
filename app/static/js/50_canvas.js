@@ -266,6 +266,12 @@ function drawTactical(){
         ctx.strokeStyle = "#2b3145"; ctx.beginPath();
         ctx.moveTo(sx+3, sy+c-9); ctx.lineTo(sx+c-9, sy+3);
         ctx.stroke(); }
+      else if (ter === 6){                          // D159 air: open volume, no floor
+        ctx.fillStyle = "#12141d"; ctx.fillRect(sx, sy, c, c);
+        ctx.strokeStyle = "rgba(125,209,255,.28)"; ctx.setLineDash([3,3]);
+        ctx.strokeRect(sx+3.5, sy+3.5, c-7, c-7); ctx.setLineDash([]);
+        ctx.fillStyle = "rgba(125,209,255,.5)"; ctx.beginPath();
+        ctx.arc(sx+c/2, sy+c/2, Math.max(1.5, c*0.05), 0, 7); ctx.fill(); }
       // D103: a plain floor cell must READ as painted floor — the old flat
       // fill sat within two hex steps of the background, so the ⬜ brush
       // looked like a no-op. Quiet two-tone tiling, tokens still stand out.
@@ -448,6 +454,18 @@ function drawTactical(){
       ctx.fillText(`${vertE ? "↑" + vertE + "ft" : ""}${vertE && vertH ? " " : ""}${vertH ? "↕" + tokenHeightFt(t) + "ft" : ""}`,
                    tx, ty - ey - 18);
     }
+    // D159: cross-plane badge — an absolute floor tag (E0/E+2/E−1) with the
+    // delta to the plane in view, drawn only when the token is NOT on it.
+    const xplan = tokenPlaneLabel(t);
+    if (xplan){
+      const by = ty - ey - (vertE || vertH ? 30 : 18);
+      ctx.save(); ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center";
+      const bpw = ctx.measureText(xplan).width + 10;
+      ctx.fillStyle = "rgba(125,209,255,.95)";
+      ctx.fillRect(tx - bpw / 2, by - 10, bpw, 14);
+      ctx.fillStyle = "#0d0f14"; ctx.fillText(xplan, tx, by);
+      ctx.restore();
+    }
     const m = state.room.members.find(x => x.user_id === t.owner_user_id);
     if (m && m.char){
       const ch = m.char, pct = Math.max(0, ch.hp/ch.max_hp);
@@ -505,10 +523,30 @@ function viewerPlane(){
    may render/click exactly the rows delivered by the server — a second,
    client-side visibility engine must not be introduced. */
 function onPlane(t){
-  if (state.preview || !state.room || state.room.role !== "dm") return true;
-
+  if (state.preview || !state.room) return true;   // peek = exactly what was computed
+  // A player/preview renders exactly what the SERVER delivered — the delivery
+  // already applied every visibility/opening rule, so a second client filter
+  // must never hide a legitimate cross-plane observation.
+  if (state.room.role !== "dm") return true;
   const p = viewerPlane();
-  return p === null || (t.floor || "") === p;
+  if (p === null) return true;
+  // A DM browsing is plane-local by default (edit/paint safety: brushes always
+  // target the viewed plane, so hiding the rest is the honest default). "All
+  // visible floors" is an explicit, display-only reveal of other storeys.
+  if (viewFilterMode() === "all") return true;
+  return (t.floor || "") === p;
+}
+/* D159: a token a viewer sees on a plane OTHER than the one they stand on
+   (through an open column, or — for a DM browsing "all floors" — just another
+   storey). Pure presentation: it never gates what the server delivered. */
+function tokenPlaneLabel(t){
+  if (!state.room || state.preview) return null;
+  const vp = viewerPlane();
+  if (vp === null) return null;
+  const tf = t.floor || "";
+  if (tf === vp) return null;
+  const d = floorDelta(tf, vp);
+  return floorBadge(tf) + (d ? " " + d : "");
 }
 function tokenAt(x, y){
   const c = cellSize();
@@ -630,11 +668,15 @@ function paint(cx, cy){
   const b = state.brush;
   if (b === "wall") gm.cells[i] = 1;
   else if (b === "floor") gm.cells[i] = 0;
+  else if (b === "air") gm.cells[i] = 6;          // D159: open volume (no floor)
   else if (b === "void") gm.cells[i] = 5;          // D103: no floor (impassable)
   else if (b === "rough") gm.cells[i] = 2;
   else if (b === "barrier") gm.cells[i] = 3;
   else if (b === "low") gm.cells[i] = 4;
-  else if (b === "erase"){ gm.cells[i] = 0;
+  else if (b === "erase"){
+    // D159: erasing restores the plane's OWN default surface — floor(0) on the
+    // ground floor, open AIR(6) on a named plane (which is air until floored).
+    gm.cells[i] = ((state.viewFloor || "") === "") ? 0 : 6;
     if (gm.openv && gm.openv.length === gm.w * gm.h) gm.openv[i] = 0;
     gm.traps = gm.traps.filter(t => !(t.x===cx && t.y===cy));
     gm.loot = gm.loot.filter(l => !(l.x===cx && l.y===cy));
@@ -956,7 +998,7 @@ function onMove(e){
   const d = state.drag; if (!d) return;
   const p = evtPos(e);
   if (d.paint){ const { cx, cy } = toCell(p.x, p.y);
-    if (["wall","floor","void","rough","erase","reveal","refog"].includes(state.brush)) paint(cx, cy); return; }
+    if (["wall","floor","air","void","rough","erase","reveal","refog"].includes(state.brush)) paint(cx, cy); return; }
   const t = state.tokens.find(t => t.id === d.id);
   if (!t) return;
   const wx = p.x - state.cam.ox, wy = p.y - state.cam.oy;
@@ -1034,6 +1076,7 @@ window.addEventListener("keyup", e => state.keys.delete(e.key));
 function editorOpen(){
   state.editing = true; state.fogTouched = {};
   state.editMap = JSON.parse(JSON.stringify(state.grid));
+  state._editOrig = JSON.stringify(state.editMap);   // D158: unsaved-edits baseline
   document.querySelectorAll(".brush").forEach(b => b.classList.toggle("active", b.dataset.b === "wall"));
   state.brush = "wall";
   $("editor").classList.remove("hidden");
@@ -1041,8 +1084,20 @@ function editorOpen(){
   $("door-fields").classList.add("hidden");
   const of = $("obj-fields"); if (of) of.classList.add("hidden");
   $("ed-w").value = state.editMap.w; $("ed-h").value = state.editMap.h;
+  if (typeof renderFloorRail === "function") renderFloorRail();   // D158: elevator on the active floor
 }
-function editorClose(){ flushFogEdit(); state.editing = false; state.editMap = null; $("editor").classList.add("hidden"); }
+function editorClose(){ flushFogEdit(); state.editing = false; state.editMap = null; state._editOrig = null; $("editor").classList.add("hidden"); }
+// D158: after a floor-rail switch re-fetched the grid, point the edit buffer at
+// the newly viewed plane. Every brush then edits — and saves — exactly one floor.
+function rearmEditBuffer(){
+  if (!state.editing) return;
+  state.editMap = JSON.parse(JSON.stringify(state.grid));
+  state._editOrig = JSON.stringify(state.editMap);
+  state.fogTouched = {};
+  const w = $("ed-w"), h = $("ed-h");
+  if (w) w.value = state.editMap.w;
+  if (h) h.value = state.editMap.h;
+}
 function edResize(){
   const w = Math.max(8, Math.min(80, +$("ed-w").value || 40));
   const h = Math.max(6, Math.min(60, +$("ed-h").value || 26));

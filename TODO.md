@@ -10,6 +10,14 @@ docker compose run --rm test                     # CANONICAL: pinned py3.12 imag
 for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 ```
 
+## Done — D159: offene Volumen, signed Levels, freie 3D-Flugbewegung (2026-10-19)
+- [x] Terrain `air`(6): nie bearbeitete Nicht-Primary-Ebene = Luft, Ground (E0) = Boden; gespeicherte Zellen byte-identisch (D159)
+- [x] Massive Platte: gelegte Fläche deckelt Säule + blockiert Sicht/Vertikalbewegung; `openv`/`air`/`void` öffnen (`mapmodel.slab`, `vertical3d.boundary_open`)
+- [x] Signierte/below-Ebenen (Keller E−1/E−2) mit abwärtskompatiblem Speicher (`floors.level_map`/`order`, `FloorIn.below`)
+- [x] Freie 3D-Flugbewegung über die EINE Engine (`find_path_3d` + `vertical_path_clear`): Mehrgeschoss + diagonale Komposition, serverseitige Kollision/Budget/Größe
+- [x] Anzeige-Filter „All visible“/„This floor only“ (rein darstellend) + E-Tags (E0/E+1/E−1) + Cross-Etagen-Badge im Canvas
+- [x] Air-Pinsel + plane-abhängiger „erase“; `test_d159_open_volumes.py` + `test_d159_view_frontend.py`; Kanon 1137 passed; echter Chromium-E2E rc=0
+
 ## Done — features (context anchor)
 - [x] Accounts / characters / rooms / join codes / chat / initiative
 - [x] Server-authoritative dice, traps, loot, HP (D3, D6)

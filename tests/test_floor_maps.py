@@ -35,9 +35,16 @@ def state_floor(client, user, code, floor=""):
     return r.json()
 
 
-def add_floor(client, dm, code, name):
+def add_floor(client, dm, code, name, ground=True):
     r = client.post(f"/api/rooms/{code}/floors", json={"name": name}, headers=H(dm))
     assert r.status_code == 200, r.text
+    # D159: a never-edited non-primary plane is now open AIR, not a floor slab.
+    # These D88/D114 tests assert the plane behaves as a standable, solid plane
+    # (isolation, a solid ceiling, DM-hopped walkers), so the DM lays a floor by
+    # default. ground=False keeps it as open volume for the new-air geometry.
+    if ground:
+        set_floor_grid(client, dm, code, name,
+                       lambda g: g.update(cells=[0] * len(g["cells"])))
 
 
 def set_floor_grid(client, dm, code, floor, mutate):

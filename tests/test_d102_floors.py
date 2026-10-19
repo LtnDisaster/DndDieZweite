@@ -59,9 +59,18 @@ def pc_token(code, ch):
                  (room_id(code), ch["id"]))
 
 
-def add_floor(client, dm, code, name):
+def add_floor(client, dm, code, name, ground=True):
     r = client.post(f"/api/rooms/{code}/floors", json={"name": name}, headers=H(dm))
     assert r.status_code == 200, r.text
+    # D159: a never-edited non-primary plane is now open AIR, not a floor slab.
+    # A DM-hopped WALKER needs ground to stand on, so the DM lays a floor here —
+    # the faithful new-world setup (the tests below are about plane-scoped
+    # delivery/walk/trap/fog, never about the plane's default terrain). Pass
+    # ground=False to keep a plane as open volume (a flyer's atrium / a cellar
+    # shaft) and exercise the new geometry.
+    if ground:
+        set_floor_grid(client, dm, code, name,
+                       lambda g: g.update(cells=[0] * len(g["cells"])))
 
 
 def rename_floor(client, dm, code, old, name):

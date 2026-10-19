@@ -2,12 +2,20 @@
 
 Design (deliberately minimal foundation): every room has a PRIMARY floor
 (named "") that predates this feature — every existing token lives there
-without any data migration. A DM may add further named floors. Floors are
-INDEPENDENT planes: tokens on different floors never collide, never block
-pathfinding, and are not visible to viewers standing on another floor.
-Moving between floors is explicit, never a costed walk — D102 tightened it to
-two doors: the DM's token_floor operation, and the validated stair object the
-players walk to. Positioning within a floor stays the D80-D84 contract.
+without any data migration. A DM may add further named floors.
+
+D159 changed the *geometry* meaning (planes are joined through open volume, and
+a laid floor is a solid slab) but NOT the storage foundation: floors stay a
+single ordered stack on the canonical 10 ft scale (primary = level 0). D159
+also made levels genuinely signed — a DM can declare a cellar *below* the
+primary (levels -1, -2, …), and the declaration stack is read bottom→top::
+
+    below[-1] … below[0]   PRIMARY(0)   above[0] … above[+1]
+
+Storage is backward-compatible: with no below-floor the room keeps the legacy
+flat list (all above primary, exactly the pre-D159 shape); the object form
+``{"below": [...], "above": [...]}`` is written only once a below-floor exists.
+Every reader accepts both.
 """
 import json
 import re
@@ -19,14 +27,55 @@ NAME_MAX = 24
 _NAME_RE = re.compile(r"^[\w \-.'·—]{1,%d}$" % NAME_MAX, re.UNICODE)
 
 
-def parse(room) -> list:
-    """Floor names of a room row, primary first ('' always available)."""
+def _rows(room):
+    """Normalise a rooms.floors cell into (below, above): both ordered
+    primary-outward (below[0] is level -1, above[0] is level +1). Legacy flat
+    lists are all-above; the {"below","above"} object carries both."""
     try:
-        names = json.loads(room.get("floors") or "[]")
+        data = json.loads(room.get("floors") or "[]")
     except (ValueError, TypeError):
-        names = []
-    return [str(n) for n in names if isinstance(n, (str, int)) and str(n).strip()] \
-        if isinstance(names, list) else []
+        return [], []
+    if isinstance(data, dict):
+        below = [str(n) for n in (data.get("below") or []) if str(n).strip()]
+        above = [str(n) for n in (data.get("above") or []) if str(n).strip()]
+        return below, above
+    if isinstance(data, list):
+        return [], [str(n) for n in data if isinstance(n, (str, int)) and str(n).strip()]
+    return [], []
+
+
+def _dump(below, above):
+    """Store the smallest representation that round-trips: the legacy flat list
+    while there is nothing below the primary, the object form otherwise."""
+    if not below:
+        return json.dumps(above)
+    return json.dumps({"below": below, "above": above})
+
+
+def parse(room) -> list:
+    """Every NAMED floor (no primary), ordered bottom→top — the membership set.
+    Accepts the legacy flat list and the D159 object form."""
+    below, above = _rows(room)
+    return list(reversed(below)) + list(above)
+
+
+def order(room) -> list:
+    """The full vertical stack INCLUDING the primary "" in its true position,
+    ordered bottom→top (levels ascending). With no below-floor this is exactly
+    the legacy ``[""] + parse`` — the primary at the very bottom."""
+    below, above = _rows(room)
+    return list(reversed(below)) + [""] + list(above)
+
+
+def level_map(room) -> dict:
+    """name -> SIGNED vertical level (primary 0, above positive, below negative)."""
+    below, above = _rows(room)
+    lm = {"": 0}
+    for i, name in enumerate(below):
+        lm[name] = -(i + 1)
+    for i, name in enumerate(above):
+        lm[name] = i + 1
+    return lm
 
 
 def exists(room_id, name) -> bool:
@@ -41,22 +90,27 @@ def clean_name(value):
     return n if n and _NAME_RE.fullmatch(n) else None
 
 
-def add(room_id, value):
-    """-> (ok, floors_or_message). DM checked by the caller."""
+def add(room_id, value, below=False):
+    """Declare a new named plane (DM checked by the caller). ``below`` puts it
+    immediately under the primary stack (a cellar, level -1/-2/…); otherwise it
+    is added on top. -> (ok, ordered_named_floors_or_message)."""
     name = clean_name(value)
     if name is None:
         return False, "Floor name must be 1-24 plain characters"
     room = db.q1("SELECT floors FROM rooms WHERE id=?", (room_id,))
     if room is None:
         return False, "No such room"
-    floors = parse(room)
-    if name in floors:
+    b, a = _rows(room)
+    if name in b or name in a:
         return False, "That floor already exists"
-    if len(floors) >= MAX_FLOORS:
+    if len(b) + len(a) >= MAX_FLOORS:
         return False, f"At most {MAX_FLOORS} extra floors"
-    floors.append(name)
-    db.x("UPDATE rooms SET floors=? WHERE id=?", (json.dumps(floors), room_id))
-    return True, floors
+    if below:
+        b.append(name)                           # primary-outward: next cellar down
+    else:
+        a.append(name)                           # next storey up
+    db.x("UPDATE rooms SET floors=? WHERE id=?", (_dump(b, a), room_id))
+    return True, parse(room)
 
 
 def rename(room_id, old, value):
@@ -65,7 +119,7 @@ def rename(room_id, old, value):
     list. CROSS-PLANE REFERENCES (stair objects on other planes whose
     destination names this floor) are map contents — the caller rewrites those
     in the same breath, or every stair to the old name silently dangles.
-    -> (ok, floors_or_message). DM checked by the caller."""
+    -> (ok, ordered_named_floors_or_message). DM checked by the caller."""
     name = clean_name(value)
     if name is None:
         return False, "Floor name must be 1-24 plain characters"
@@ -79,13 +133,14 @@ def rename(room_id, old, value):
         return False, "That is its current name"
     if name in parse(room):
         return False, "That floor already exists"
-    floors = [name if f == old else f for f in parse(room)]
-    db.x("UPDATE rooms SET floors=? WHERE id=?", (json.dumps(floors), room_id))
+    b = [name if f == old else f for f in _rows(room)[0]]
+    a = [name if f == old else f for f in _rows(room)[1]]
+    db.x("UPDATE rooms SET floors=? WHERE id=?", (_dump(b, a), room_id))
     db.x("UPDATE floor_maps SET floor=? WHERE room_id=? AND floor=?",
          (name, room_id, old))
     db.x("UPDATE tokens SET floor=? WHERE room_id=? AND floor=?",
          (name, room_id, old))
-    return True, floors
+    return True, parse(room)
 
 
 def remove(room_id, value):
@@ -98,29 +153,32 @@ def remove(room_id, value):
     if db.q1("SELECT 1 AS hit FROM tokens WHERE room_id=? AND floor=? LIMIT 1",
              (room_id, name)) is not None:
         return False, "Tokens still stand on this floor"
-    floors = [f for f in parse(room) if f != name]
-    db.x("UPDATE rooms SET floors=? WHERE id=?", (json.dumps(floors), room_id))
+    b = [f for f in _rows(room)[0] if f != name]
+    a = [f for f in _rows(room)[1] if f != name]
+    db.x("UPDATE rooms SET floors=? WHERE id=?", (_dump(b, a), room_id))
     db.x("DELETE FROM floor_maps WHERE room_id=? AND floor=?", (room_id, name))  # D88
-    return True, floors
+    return True, parse(room)
 
 
 # ---------------------------------------------------------------------------
 # D113 Phase 7: the declared floor ORDER is the vertical stack, on the canonical
-# 10 ft scale (primary = 0). This is a GEOMETRY/REPORTING convention only —
-# planes stay collision/visibility independent (D86/D88): a token two floors up
-# is 20 ft higher, it does NOT collide or cast cover through the scale below.
+# 10 ft scale (primary = 0). This is a GEOMETRY/REPORTING convention only — planes
+# are joined by open volume, never by the scale below: a token two floors up is 20
+# ft higher, it does NOT collide or cast cover through the scale below (D86/D88).
+# D159: levels are signed — a below-floor is negative.
 # ---------------------------------------------------------------------------
 
 def level(room_id, name):
-    """Vertical level of a floor: the primary floor is 0; each further declared
-    floor sits one level (10 ft) above the previous, in declaration order."""
+    """Vertical level of a floor (signed): the primary floor is 0; each storey
+    declared above is +1 per step, each cellar below is -1 per step. Order is the
+    stack, so the level of an unknown/absent floor falls back to 0."""
     if not name:
         return 0
     room = db.q1("SELECT floors FROM rooms WHERE id=?", (room_id,))
     if room is None:
         return 0
-    names = parse(room)
-    return names.index(name) + 1 if name in names else 0
+    return level_map(room).get(name, 0)
+
 
 
 def absolute_height_ft(room_id, floor_name, elev_units=0):

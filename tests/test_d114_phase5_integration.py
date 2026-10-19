@@ -23,9 +23,14 @@ def client():
     return TestClient(main.app)
 
 
-def add_floor(client, dm, code, name):
+def add_floor(client, dm, code, name, ground=True):
     r = client.post(f"/api/rooms/{code}/floors", json={"name": name}, headers=H(dm))
     assert r.status_code == 200, r.text
+    # D159: a named plane is open AIR by default; these tests gate a solid
+    # ceiling on `openv`, so the DM lays the slab first (openv is the opening).
+    if ground:
+        set_floor_grid(client, dm, code, name,
+                       lambda g: g.update(cells=[0] * len(g["cells"])))
     return r.json()
 
 

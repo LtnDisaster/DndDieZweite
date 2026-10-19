@@ -61,9 +61,18 @@ def _room_of(code):
     return db.q1("SELECT id FROM rooms WHERE code=?", (code,))["id"]
 
 
-def _add_floor(client, dm, code, name):
+def _add_floor(client, dm, code, name, ground=True):
     assert client.post(f"/api/rooms/{code}/floors", json={"name": name},
                        headers=H(dm)).status_code == 200
+    # D159: a fresh named plane is open AIR. These tests stage PC/owned tokens
+    # and templates ON the named plane, which needs a real standable slab — so
+    # the DM lays a floor, exactly as a DM authoring a walkable deck/crypt would.
+    if ground:
+        from app.room import net
+        rid = _room_of(code)
+        mp = net.get_map(rid, name)
+        mp["cells"] = [0] * (mp["w"] * mp["h"])
+        net.set_map(rid, mp, name)
 
 
 def _pc_token(code, ch):

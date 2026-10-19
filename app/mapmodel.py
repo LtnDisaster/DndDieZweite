@@ -27,6 +27,15 @@ AUTO_GROW = os.environ.get("DNDTABLE_AUTO_GROW", "0") == "1"
 # 5 void (D103) — NO FLOOR: impassable and not climbable, sight passes over it
 #                (a pit is not a wall). Never migrates old maps: nothing stored
 #                uses 5 until a DM paints it; terrain(None) stays floor (fog).
+# 6 air (D159) — OPEN VOLUME, no floor: the DEFAULT material of every non-primary
+#                plane. Not walkable (a walker has nothing to stand on), does not
+#                block movement (a flyer passes), does not block vision or light,
+#                and is NOT a slab: a floor between two storeys blocks sight and
+#                vertical movement through its surface, air and void do not.
+#                Distinct from void on purpose — void is a pit in a floor (a
+#                hazard a walker must not fall into); air is simply the empty
+#                volume of a storey with no floor laid. Neither is ever the
+#                default of the primary plane (0 stays floor: backward-compat).
 # app/wall.py exposes the same facts as cell/edge queries; path, los, movecost and
 # footprint all consult this registry — never a hard-coded cell value again.
 TERRAIN = {
@@ -42,7 +51,11 @@ TERRAIN = {
         "blocks_movement": False, "blocks_vision": False, "height": 0, "climbable": True},
     5: {"name": "void",         "walk": False, "difficult": False,
         "blocks_movement": True,  "blocks_vision": False, "height": 0, "climbable": False},
+    6: {"name": "air",          "walk": False, "difficult": False,
+        "blocks_movement": False, "blocks_vision": False, "height": 0, "climbable": False},
 }
+AIR = 6
+VOID = 5
 TERRAIN_MAX = max(TERRAIN)
 
 
@@ -73,9 +86,32 @@ def blocks_vision(v):
 def body_open(v):
     """D114: is there free VOLUME in this cell for a vertical body / flying
     creature? Void is deliberately open space (a pit is empty air), while wall
-    and barrier remain physical obstructions."""
+    and barrier remain physical obstructions. D159: `air` is free volume too —
+    it blocks neither movement nor sight (a flyer passes, light and sight
+    carry through)."""
     t = terrain(v)
-    return not t["blocks_movement"] or t["name"] == "void"
+    return not t["blocks_movement"] or t["name"] in ("void", "air")
+
+
+def slab(v):
+    """D159: is this cell a solid horizontal SURFACE that caps the volume below
+    it? A laid floor (or rough ground / knee-high undergrowth) and a wall are
+    slabs: they carry a walker, and they block sight and vertical movement
+    through their surface. `air` (open volume) and `void` (a hole in the floor)
+    are NOT slabs — they are openings. Barrier is a 1-ft knee obstacle that
+    neither caps a storey nor blocks sight, so it is not a slab either."""
+    t = terrain(v)
+    return t["walk"] or t["name"] == "wall"
+
+
+def is_open_volume(v):
+    """D159 3D-ray / flight predicate: can a body (or a ray of sight/light)
+    occupy this cell? Free volume `air`/`void` and every walkable surface are
+    open; only wall and barrier physically obstruct a body. Vision-blocking is
+    handled separately via ``blocks_vision`` — a floor is open volume but is a
+    slab, so it still caps the column vertically (see ``slab``)."""
+    t = terrain(v)
+    return t["walk"] or t["name"] in ("void", "air")
 
 
 # ---------- world <-> storage coordinates (D72) ----------
@@ -206,6 +242,28 @@ def default_map(w=DEFAULT_W, h=DEFAULT_H):
             "openv": [0] * (w * h),
             "explored": [0] * (w * h), "traps": [], "loot": [], "doors": [], "pins": [],
             "objects": []}
+
+
+def blank_map(base, fill=0):
+    """A never-edited plane's default map (D88/D159): the primary's DIMENSIONS and
+    world anchor, but its OWN default terrain. The primary plane fills floor(0)
+    (backward-compat); every other plane fills ``fill`` (air, D159) — an empty
+    storey is open volume, not a solid slab, and carries no floor. Nothing is a
+    copy of the plane below; explicit stored maps are never routed through here."""
+    mp = dict(base)
+    size = base["w"] * base["h"]
+    mp["cells"] = [fill] * size
+    mp["elev"] = [0] * size
+    mp["openv"] = [0] * size
+    mp["explored"] = [0] * size
+    mp["traps"] = []
+    mp["loot"] = []
+    mp["doors"] = []
+    mp["pins"] = []
+    mp["objects"] = []
+    mp["fog_off"] = False
+    mp["dark"] = False
+    return mp
 
 
 def fit(mp, base):

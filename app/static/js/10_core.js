@@ -16,9 +16,31 @@ const state = { me:null, room:null, roomDeleted:false, ws:null, online:new Set()
                  sounds:[],
                  notes:[], encounters:[], creatures:[], encRows:[], encId:null, noteId:null,
                   cam:{ox:0, oy:0}, camT:{ox:0, oy:0}, camD:{ox:0, oy:0},
-                  keys:new Set(), tickOn:false,
-                  viewMode:"tactical" };
+                   keys:new Set(), tickOn:false,
+                   viewMode:"tactical", viewFilter:"current", floor_levels:null };
 const VISION_R = 6;
+/* D159 — shared signed-floor labels. Loaded before 30_room/50_canvas so both
+   the DOM panels and the canvas renderer read ONE source of truth: the server's
+   floor_levels (name -> signed level, primary 0). Degrades to a stack index if
+   an older payload omits floor_levels, so a label is never a hard blank. */
+function floorLabelOf(name){ return name === "" ? "Ground" : name; }
+function _floorLevelsMap(){
+  const lm = (typeof state !== "undefined") && state.floor_levels;
+  if (lm && typeof lm === "object") return lm;
+  const map = {};
+  ((typeof state !== "undefined" && state.floors) || [""]).forEach((f, i) => { map[f] = i; });
+  return map;
+}
+function floorLevelOf(name){ const lm = _floorLevelsMap(); return (name in lm) ? lm[name] : 0; }
+function floorBadge(name){ const L = floorLevelOf(name);
+  return L < 0 ? "E\u2212" + (-L) : (L > 0 ? "E+" + L : "E0"); }
+function floorDelta(name, viewed){ const d = floorLevelOf(name) - floorLevelOf(viewed);
+  return d === 0 ? "" : (d > 0 ? "\u25B2+" + d : "\u25BC\u2212" + (-d)); }
+function floorTag(name){ return floorBadge(name) + " · " + floorLabelOf(name); }
+function floorStack(){
+  return ((typeof state !== "undefined" && state.floors) || [""]).slice()
+    .sort((a, b) => floorLevelOf(a) - floorLevelOf(b)); }
+function viewFilterMode(){ return state.viewFilter === "current" ? "current" : "all"; }
 const SIZE_FOOTPRINT = { Tiny:1, Small:1, Medium:1, Large:2, Huge:3, Gargantuan:4 };
 /* D81/D83: THE client footprint derivation — server fw/fh win, category is
    the square fallback, and the token's facing ORIENTS the box (rot 90/270

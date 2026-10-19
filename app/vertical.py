@@ -108,11 +108,11 @@ def top_ft(base, height):
 
 
 def levels_between(base, top):
-    """Floor LEVELS (primary 0 and up) whose 10 ft band [L*10,(L+1)*10) overlaps
-    the vertical segment [base, top). A negative base (a pit cell) clamps to the
-    primary level — there is no level below 0, and volume never INVENTS a plane;
-    whether the volume actually reaches a level is gated by openings (Phase 4/5)."""
-    lo = base if base > 0 else 0
-    if top <= lo:
-        return {0}
-    return set(range(max(0, lo // FLOOR_FT), max(0, (top - 1) // FLOOR_FT) + 1))
+    """Floor LEVELS (primary 0; D159 allows negative storeys) whose 10 ft band
+    [L*10,(L+1)*10) overlaps the vertical segment [base, top). Floor division
+    handles a negative base (a cellar) directly: a body sitting 10 ft below the
+    primary spans level -1. Whether the volume actually reaches a level is still
+    gated by openings / slabs (see vertical3d) — this only reports the band."""
+    if top <= base:
+        return {base // FLOOR_FT}
+    return set(range(base // FLOOR_FT, (top - 1) // FLOOR_FT + 1))

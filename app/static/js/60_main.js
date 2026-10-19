@@ -286,6 +286,10 @@ function wire(){
     if (!state.editMap) return;
     wsSend({ type:"map_edit", map: state.editMap, reset_fog: $("ed-fog").checked,
              floor: state.viewFloor || "" });                  // D88: edits land on the viewed plane
+    // D158: a published buffer is no longer "unsaved" — clearing the baseline
+    // keeps a later floor-rail switch from warning about edits that are already
+    // on the server (and stops a dismissed confirm from stranding the editor).
+    state._editOrig = JSON.stringify(state.editMap);
     toast("Map saved");
   };
   $("btn-ed-cancel").onclick = editorClose;

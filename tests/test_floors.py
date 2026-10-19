@@ -23,9 +23,22 @@ def client():
     return TestClient(main.app)
 
 
-def _add_floor(client, dm, code, name):
+def _paint_plane_floor(client, dm, code, floor):
+    """D159: a named plane is open AIR by default; a DM authoring tokens or
+    proving a SOLID (fail-closed) plane lays a floor slab first."""
+    url = f"/api/rooms/{code}/state?floor={floor}"
+    grid = client.get(url, headers=H(dm)).json()["grid"]
+    grid["cells"] = [0] * len(grid["cells"])
+    with ws_connect(client, dm, code) as ws:
+        ws.send_json({"type": "map_edit", "map": grid, "floor": floor})
+        recv_until(ws, "map_changed")
+
+
+def _add_floor(client, dm, code, name, ground=True):
     r = client.post(f"/api/rooms/{code}/floors", json={"name": name}, headers=H(dm))
     assert r.status_code == 200, r.text
+    if ground:
+        _paint_plane_floor(client, dm, code, name)
     return r.json()["floors"]
 
 
@@ -134,6 +147,7 @@ def test_floor_list_governance(client):
                        headers=H(dm)).status_code == 200
     assert client.post(f"/api/rooms/{code}/floors", json={"name": "crypt"},
                        headers=H(dm)).status_code == 400        # duplicate
+    _paint_plane_floor(client, dm, code, "crypt")               # D159: standable slab
     st = state_of(client, player, code)
     assert st["floors"] == ["", "crypt"]
     # cannot delete the primary, cannot delete a floor with tokens on it

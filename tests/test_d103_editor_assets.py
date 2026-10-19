@@ -58,9 +58,14 @@ def void_column(grid, x):
         grid["cells"][y * grid["w"] + x] = 5
 
 
-def add_floor(client, dm, code, name):
+def add_floor(client, dm, code, name, ground=True):
     assert client.post(f"/api/rooms/{code}/floors", json={"name": name},
                        headers=H(dm)).status_code == 200
+    # D159: a named plane is open AIR by default; these tests author a standable
+    # plane (then paint specific features), so lay a floor slab first.
+    if ground:
+        set_floor_grid(client, dm, code, name,
+                       lambda g: g.update(cells=[0] * len(g["cells"])))
 
 
 def state_floor(client, user, code, floor=""):
@@ -195,15 +200,29 @@ def test_void_and_floor_edits_are_plane_local(client):
 # ---------- C: sanitize & legacy compatibility ----------
 
 def test_registry_and_sanitize_semantics():
-    assert mapmodel.TERRAIN_MAX == 5
+    # D159 added `air` (6): the open-volume default of every non-primary plane.
+    assert mapmodel.TERRAIN_MAX == 6
     assert mapmodel.walkable(5) is False
     assert mapmodel.blocks_movement(5) is True
     assert mapmodel.blocks_vision(5) is False
+    # air: open volume, no floor — not walkable, never blocks movement/vision/slab
+    assert mapmodel.TERRAIN[6]["name"] == "air"
+    assert mapmodel.walkable(6) is False
+    assert mapmodel.blocks_movement(6) is False
+    assert mapmodel.blocks_vision(6) is False
+    assert mapmodel.body_open(6) is True
+    assert mapmodel.is_open_volume(6) is True
+    assert mapmodel.slab(6) is False
+    assert mapmodel.slab(5) is False          # void is a hole, not a slab
+    assert mapmodel.slab(0) is True           # a laid floor caps the storey
+    assert mapmodel.slab(1) is True           # a wall caps it too
     assert mapmodel.terrain(None)["name"] == "floor", "fog default unchanged"
     mp = mapmodel.sanitize(_mini_map([0] * 47 + [5]))
     assert mp is not None and mp["cells"][47] == 5
-    mp = mapmodel.sanitize(_mini_map([6] * 48))                   # clamp, not reject
-    assert mp["cells"] == [5] * 48
+    mp = mapmodel.sanitize(_mini_map([6] * 48))                   # air is now valid
+    assert mp["cells"] == [6] * 48
+    mp = mapmodel.sanitize(_mini_map([7] * 48))                   # clamp, not reject
+    assert mp["cells"] == [6] * 48
     assert mapmodel.sanitize(_mini_map([0] * 47 + [None])) is None, \
         "a map carrying fog nulls stays rejected (the editor must send numbers)"
     legacy = _mini_map([i % 5 for i in range(48)])                # all pre-D103 values
@@ -272,6 +291,9 @@ def test_client_draws_the_server_canonical_url(client):
     src = _static("js", "50_canvas.js")
     assert "img.src = t.image" in src
     assert 'else if (b === "void") gm.cells[i] = 5;' in src
-    assert '"wall","floor","void","rough","erase","reveal","refog"' in src
+    # D159 added the `air` brush: it must be paintable AND drag-paintable.
+    assert 'else if (b === "air") gm.cells[i] = 6;' in src
+    assert '"wall","floor","air","void","rough","erase","reveal","refog"' in src
     html = _static("index.html")
     assert 'data-b="void"' in html
+    assert 'data-b="air"' in html

@@ -227,6 +227,14 @@ window.addEventListener("unhandledrejection", function(ev){
         <button id="pv-refresh" class="ghost" title="Re-fetch what this character sees right now">↻ Refresh</button>
         <button id="pv-exit" class="ghost" title="Back to the full DM view">✕ Exit preview</button>
       </div>
+      <div id="viewfilter" class="viewfilter hidden" role="group"
+           title="D159: which floors the map shows you. This is a personal DISPLAY filter only — it never hides anything from your real vision or moves anyone.">
+        <span class="vf-lbl">Floors:</span>
+        <button id="vf-all" class="ghost" type="button" aria-pressed="false"
+                title="Show every floor your view can legitimately reach, badged with its floor tag">All visible</button>
+        <button id="vf-current" class="primary" type="button" aria-pressed="true"
+                title="Show only the floor you are on">This floor only</button>
+      </div>
       <canvas id="map"></canvas>
       <div id="toast"></div>
       <div id="narrative-overlay" class="narrative-overlay" aria-live="polite" data-style="overlay">
@@ -464,8 +472,10 @@ window.addEventListener("unhandledrejection", function(ev){
         <div class="row">
           <input id="floor-new" placeholder="New floor name" maxlength="24">
           <button id="btn-floor-add" class="primary" title="Add another occupancy plane to this room">＋ Add</button>
+          <label title="Declare this plane UNDER the ground floor (a cellar: E−1, E−2…)"
+                 style="white-space:nowrap"><input id="floor-below" type="checkbox"> below</label>
         </div>
-        <div class="row"><small class="meta" style="opacity:.6">Planes are independent: own map, own fog, own tokens. Players change planes at a stair object; only the DM moves tokens between floors.</small></div>
+        <div class="row"><small class="meta" style="opacity:.6">Planes are independent: own map, own fog, own tokens. A new plane is open AIR until you lay a floor (D159) — the ground floor (E0) starts floored. Players change planes at a stair object; only the DM moves tokens between floors. Floors below E0 are cellars (E−1, E−2…).</small></div>
       </div>
       <div class="panel hidden" id="lightpanel" data-tab="dm">
         <h2>Lights</h2>
@@ -498,10 +508,6 @@ window.addEventListener("unhandledrejection", function(ev){
           <button id="btn-edit-map">🛠 Edit map</button>
           <button id="btn-long-rest" title="Restore HP, spell slots, hit dice and long-rest resources">🛌 Long rest</button>
           <label title="Do not clear arbitrary conditions unless checked"><input id="long-rest-conds" type="checkbox"> clear conditions</label>
-        </div>
-        <div class="row hidden" id="view-floor-row" title="D88: browse another plane's map WITHOUT moving anyone. Your brushes, edits and dark toggle apply to the plane you view.">
-          <small class="meta" style="opacity:.6">Viewing plane</small>
-          <select id="view-floor"></select>
         </div>
         <details class="group" open>
           <summary>Narration</summary>
@@ -616,10 +622,17 @@ window.addEventListener("unhandledrejection", function(ev){
         </details>
         <div id="editor" class="hidden">
 
+          <!-- D158: the elevator. A vertical floor stack — highest level at the
+               top, ground (primary) at the bottom, like a building. One click
+               picks the floor the brushes edit; names/levels come straight from
+               the room's floor model (no hardcoded floors). Tools never touch a
+               floor you are not standing on. -->
+          <div id="floor-rail" class="floor-rail" title="Choose the floor to edit. Every brush — walls, terrain, doors, light, openings — changes only this floor."></div>
           <div class="row brushes">
             <button class="brush" data-b="wall" title="Wall (blocks path)">🧱</button>
             <button class="brush" data-b="floor" title="Floor (walkable)">⬜</button>
             <button class="brush" data-b="void" title="No floor — impassable pit/edge; sight passes over it">🕳️</button>
+            <button class="brush" data-b="air" title="Open air (D159): no floor, but free volume a flyer/thing passes through — the default of any plane above E0">🎈</button>
             <button class="brush" data-b="rough" title="Difficult terrain (2× walk)">🌿</button>
             <button class="brush" data-b="barrier" title="Barrier (blocks movement, not sight; climbable)">🚧</button>
             <button class="brush" data-b="low" title="Low obstacle (passable, 2× cost; climbable)">🪨</button>
@@ -634,7 +647,7 @@ window.addEventListener("unhandledrejection", function(ev){
             <button class="brush" data-b="doorrm" title="Remove a door">🚫</button>
             <button class="brush" data-b="pin" title="Place map pin">📍</button>
             <button class="brush" data-b="pinrm" title="Remove map pin">📌✕</button>
-            <button class="brush" data-b="erase" title="Erase cell">🧹</button>
+            <button class="brush" data-b="erase" title="Erase cell → back to this plane's default surface (floor on E0, open air on a named plane)">🧹</button>
             <button class="brush" data-b="reveal" title="Reveal explored fog">👁</button>
             <button class="brush" data-b="refog" title="Hide explored fog">🌫</button>
             <button class="brush" id="btn-fog-toggle" title="Show all terrain to every player. Hidden foes still need line of sight.">💡</button>
@@ -717,6 +730,30 @@ window.addEventListener("unhandledrejection", function(ev){
       that matters, so what you see is what really happened.</p>
   </div>
 </div>
+
+<!-- D157: deliberate room-deletion confirmation. Top-level (like the help
+     overlay) so a lobby re-render cannot unmount it mid-dialog. The destructive
+     button stays disabled until the DM types the room's exact CODE — a stray
+     click can never wipe a table. The server still re-checks DM ownership. -->
+<dialog id="del-room-dlg">
+  <div class="panel" style="max-width:340px">
+    <h2 style="margin:0 0 6px">Delete this room?</h2>
+    <p style="margin:0 0 4px">You are about to permanently delete
+      <b id="del-room-name">room</b>.</p>
+    <p class="meta" style="margin:0 0 10px">Room code: <b id="del-room-code"></b> —
+      everything in it (map, floors, tokens, chat, notes, items) is removed for good.
+      This cannot be undone.</p>
+    <label class="meta" style="display:block;margin-bottom:6px">Type the room code
+      <b id="del-room-code-hint"></b> to confirm:</label>
+    <input id="del-room-input" autocomplete="off" spellcheck="false"
+           style="width:100%;box-sizing:border-box" placeholder="room code">
+    <p id="del-room-err" class="err" style="min-height:1.2em;margin:6px 0 0"></p>
+    <div class="row" style="justify-content:flex-end;margin-top:8px">
+      <button id="del-room-cancel" class="ghost">Cancel</button>
+      <button id="del-room-confirm" class="primary" disabled>Delete permanently</button>
+    </div>
+  </div>
+</dialog>
 
 <script src="/static/js/10_core.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/20_lobby.js?v=__BUILDTOKEN__"></script>

@@ -27,10 +27,31 @@ def rid(client, code):
     return db.q1("SELECT id FROM rooms WHERE code=?", (code,))["id"]
 
 
-def add_floor(client, dm, code, name):
+def add_floor(client, dm, code, name, ground=True):
     r = client.post(f"/api/rooms/{code}/floors", json={"name": name}, headers=H(dm))
     assert r.status_code == 200, r.text
+    # D159: a never-edited non-primary plane is now open AIR. These D114 tests
+    # verify that a body only reaches a plane THROUGH an opening — which needs a
+    # real slab (solid ceiling) to block first, so the DM lays a floor by default
+    # (ground=False keeps the plane open volume for the new-air tests).
+    if ground:
+        set_plane_floor(client, dm, code, name)
     return r.json()
+
+
+def _state_floor(client, dm, code, floor):
+    r = client.get(f"/api/rooms/{code}/state?floor={floor}", headers=H(dm))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def set_plane_floor(client, dm, code, floor):
+    """Lay a solid floor across a whole named plane (a real slab / ceiling)."""
+    grid = _state_floor(client, dm, code, floor)["grid"]
+    grid["cells"] = [0] * len(grid["cells"])
+    with ws_connect(client, dm, code) as ws:
+        ws.send_json({"type": "map_edit", "map": grid, "floor": floor})
+        recv_until(ws, "map_changed")
 
 
 def ptoken(client, player, code):

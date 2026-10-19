@@ -167,9 +167,9 @@ def get_map(room_id, floor="") -> dict:
     row = db.q1("SELECT map_json FROM floor_maps WHERE room_id=? AND floor=?",
                 (room_id, str(floor)))
     if row is None:
-        blank = mapmodel.load(None)
-        blank["fog_off"] = False                    # room-wide flag lives on primary
-        return mapmodel.fit(blank, base)
+        # D159: a never-edited non-primary plane is open VOLUME (air), not a
+        # fresh floor slab. The primary still returns the floor-filled base.
+        return mapmodel.blank_map(base, mapmodel.AIR)
     mp = mapmodel.fit(mapmodel.load(row["map_json"]), base)
     mp["fog_off"] = bool(base.get("fog_off"))     # room-wide flag lives on primary
     return mp

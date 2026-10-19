@@ -3734,3 +3734,113 @@ lines name conditions by design (public table record, D90).
   Vorgeschichte.
 - **Konsequenzen:** Hilfe-Drift kostet ab jetzt ein rotes Test-Item statt
   einen verärgerten Spieler.
+
+## D157 — Raum-Löschung: vollständige Kaskade + bewusste Bestätigung
+- **Status:** umgesetzt.
+- **Kontext:** Manuelle Abnahme: „Delete … permanently“ ließ sich nicht
+  bestätigen. Der Lösch-Cascade (D76) kannte nur tokens/messages/room_state/
+  notes/quests/room_members. `item_defs` und `containers` referenzieren aber
+  rooms(id) OHNE `ON DELETE CASCADE`, und `foreign_keys=ON` ist aktiv. Ein Raum
+  mit Loot-Truhe, Custom-Item oder importiertem CSV-Item ließ `DELETE FROM rooms`
+  aufschlagen -> `db.tx()` rollte alles zurück -> HTTP 500, als einziges Feedback
+  ein 2,5-Sekunden-Toast „Internal server error“ („bestätigen tut nichts“). Die
+  UI war zudem ein Inline-Bewaffnen-mit-6s-Auto-Disarm — Fehlklick- und
+  No-op-Falle. Die bestehenden Delete-Tests erzeugten jene Zeilen nie und
+  blieben grün.
+- **Entscheidung:** (1) Backend: `ROOM_DELETE_CHILD_TABLES` als eine Wahrheit
+  (tokens … item_defs, containers, content, inv_ops); rooms zuletzt. Bewusst
+  KEINE Schema-Migration (Constraint-Anbau wäre destruktiv) — nur App-Kaskade.
+  (2) Frontend: statisches <dialog id="del-room-dlg">; der Löschknopf wird erst
+  scharf, wenn der exakte Raum-CODE getippt ist; Fehler erscheinen dauerhaft im
+  Dialog, nicht als Wegwerf-Toast; kein Auto-Disarm. Server-Autorität
+  (DM-owner-Check) bleibt alleinige Wahrheit. (3) Gate:
+  test_room_delete_all_tables.py verlangt 200+0-Waisen über JEDE room-scoped
+  Tabelle und prüft strukturell (PRAGMA foreign_key_list), dass jede
+  Nicht-CASCADE-Fremdschlüssel-Tabelle in der Löschliste steht — neue Tabellen
+  kosten ab sofort ein rotes Test-Item statt eines stillen 500.
+- **Grund:** Ein „grüner“ Löschtest, der die schuldigen Zeilen nie anlegt, ist
+  kein Beweis. Die Freigabe-Eingabe ist Bedienungssicherheit, kein Misstrauen
+  gegen den Server.
+- **Konsequenzen:** test_room_delete_all_tables (2), test_room_delete_client
+  (2, echter Client-Code + Live-Server inkl. 500-Pfad-Gegenprobe),
+  Browser-E2E-Szenario H. Hilfe-Eintrag „Deleting a room“ (EN). Bestehende
+  test_room_delete.py bleibt unverändert.
+
+## D158 — Etagen-Aufzug im Karten-Editor statt Ebenen-Dropdown
+- **Status:** umgesetzt.
+- **Kontext:** Der Karten-Editor hatte keine intuitive Etagenwahl; das
+  Bestecken einer bestimmten Etage erforderte ein verstreutes Dropdown +
+  Seitentab-Browsen. Der Nutzer wollte einen sofort verständlichen, vertikalen
+  Etagenwähler (Keller/Erdgeschoss/…/Dach als Beispiel), ohne feste
+  Ebenen-Obergrenze und ohne zweite Etagen-Engine.
+- **Entscheidung:** Der bestehende Edit-Ebenen-SSOT `state.viewFloor` wird
+  weiterverwendet; KEIN neues Modell. Im Editor (#editor) eine vertikale
+  Floor-Rail (`renderFloorRail`): höchste deklarierte Ebene oben, Primary/Ground
+  unten, aktive eindeutig markiert; Namen/Ebenennummern direkt aus
+  `[""]+FLOOR.parse`/`floors.level` (beliebig viele, frei benannt). Ein Klick
+  = `gotoEditFloor`: setzt viewFloor, `refreshRoom()` holt die Ebene vom Server,
+  `rearmEditBuffer()` zeigt den Edit-Puffer auf die neue Ebene — so treffen
+  Pinsel ausschließlich die gewählte Etage (Server schreibt pro Ebene nach
+  `floor_maps`). Das Ebenen-Dropdown (#view-floor) entfällt; Browsen ohne Edit
+  bleibt über #floorpanel. Spieler-Sicht bleibt strikt getrennt: Okklusion ist
+  bereits fail-closed über `openv` (vertical3d), 55_diorama.js bleibt unberührt;
+  `onPlane` spiegelt die Ebenenwahl nur im Editor.
+- **Grund:** Ein Fahrstuhl ist eine Darstellungsaufgabe, kein zweiter
+  Geometrie-Kern. Die Server-Geometrie war bereits richtig; sie fehlte nur als
+  klares Bedienelement.
+- **Konsequenzen:** test_floor_editor_active_plane (3: nur aktive Ebene,
+  Reload/Persistenz, kein Cross-Kontamination, Spieler/Unbekannt-Ebene refused),
+  test_floor_visibility_levels (3: Boden/OG/Dach massive Decke vs. Schacht
+  symmetrisch, DM-Edit-Ebene verschiebt Spieler-Perspektive nicht,
+  Canvas `onPlane`). Hilfe-Eintrag „Floors“ um Rail ergänzt (EN, Truth-Gate).
+
+## D159 — Offene Volumen: Nicht-Primary-Ebenen sind Luft, Levels signed, freie 3D-Flugbewegung
+- **Status:** umgesetzt.
+- **Kontext:** Bislang war eine unbenannte/nie bearbeitete Etage still eine
+  unsichtbare Kopie der Primary (Ground), und Ebenen waren nur positive Stapel
+  über dem Ground. Das erzeugte widersprüchliche Defaults: eine frisch
+  angelegte Etage war „massiv“, obwohl der DM sie als Luftraum/Dachboden
+  gemeint hatte; ein Keller unter dem Ground war nicht darstellbar; und eine
+  geflogene Kreatur konnte nicht frei durch durchgehenden Luftraum über mehrere
+  Geschosse steigen. Der Nutzer verlangte: Ground (E0) als Standard-Boden, alle
+  anderen nie bearbeiteten Ebenen als echte Luft, echte signed/negative Level,
+  massive gelegte Bodenflächen als deckungswirksame Platte, freie 3D-Flugbewegung
+  durch die bestehende Engine, Etagen-Kennzeichnungen und einen reinen
+  Anzeige-Filter — ohne Git, ohne Eingriff in 55_diorama.js, ohne zweite Engine.
+- **Entscheidung:** Ein viertes Terrain `air`(6): nicht begehbar, blockiert
+  weder Bewegung noch Sicht, ist „body_open“/offenes Volumen, aber KEINE Platte
+  (`slab`). Nie bearbeitete Nicht-Primary-Ebenen liefern über
+  `net.get_map()` ein `blank_map(base, AIR)`; die Primary bleibt Standard-Boden;
+  gespeicherte Kartenzellen bleiben byte-identisch (keine Neu-Interpretation).
+  Eine gelegte Fläche (walkable oder wall) ist `slab` und deckelt ihre Säule:
+  `boundary_open(lower,upper)= openv(lower) ODER NOT slab(upper)`;
+  `column_open`/`vertical_path_clear`/`body_planes`/`cross_plane_sight` arbeiten
+  über signierte, benachbarte Level und schlagen bei Lücken fail-closed fehl.
+  Etagen-Speicher abwärtskompatibel: flache Legacy-Liste = alles über Primary;
+  erst ein Below-Floor schreibt `{"below":[...],"above":[...]}`;
+  `floors.order` liefert den Stack bottom→top inkl. Primary,
+  `floors.level_map` signierte Level (Primary 0, above positiv, below negativ).
+  Freie 3D-Flugbewegung nutzt DIE EINE `path.find_path_3d`/`_move3d` und
+  `vertical3d.vertical_path_clear` — Mehrstöckiger Flug ist eine Kette benachbarter
+  offener Grenzen, diagonaler Flug die Komposition aus Horizontal+Vertikal;
+  Kollision/Budget/Größe/Berechtigung bleiben serverseitig. Frontend:
+  `state.floor_levels`, `floorBadge` (E0/E+1/E−1), Etagen-Rail/Panel mit
+  signierten Tags, Below-Add, Air-Pinsel, „All visible“/„This floor only“ als
+  reinen Anzeige-Filter (`onPlane`), Cross-Plane-Token mit Floor-Badge/Delta.
+- **Grund:** Defaults waren widersprüchlich; Luft ist das natürliche Nichts
+  über dem Ground. Die Geometrie war bereits openv-zentriert — es fehlte nur
+  ein ehrliches Default-Volumen, signed Levels und die Anzeige. Kein zweiter
+  Geometrie-Kern, keine Migrationslast.
+- **Konsequenzen:** Neue Tests `tests/test_d159_open_volumes.py` (Air-Default,
+  Air-Semantik, signed/below Levels, Platte vs. openv, Air-Stapel = ein
+  Volumen, Mehrgeschoss-Flug-Route, diagonale Flug-Komposition,
+  server-autoritäre Air-Aszension + verweigerte Platten-Decke,
+  Stored-Data-Roundtrip) und `tests/test_d159_view_frontend.py`
+  (Anzeige-Filter/Labels/Badge display-only auf echter Client-API).
+  Bestehende D114/D86/D102/D103/D158-Suiten auf die neue Wahrheit umgestellt:
+  frisch-Ebene==Air, Clamp-Max 6, massive-Decken-Fixtures legen jetzt Platte,
+  L4-Occupancy/Rider/Lamp/AoE/Ping-Suiten legen Zielfläche. Hilfe „Floors“/
+  „Seeing across floors“/Brushes (EN, Truth-Gate). VERTIKAL-Geometrie-Doku +
+  Feature-Matrix + Arbeitslog aktualisiert. `ray_clear_3d` bleibt als primitives
+  Werkzeug; die Sight-Lieferung bleibt bei offener-Säule+Pro-Ebene-LOS
+  (leckfrei), ein integrierter Diagonal-Ray bleibt optionale Folgearbeit.

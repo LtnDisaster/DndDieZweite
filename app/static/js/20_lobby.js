@@ -29,26 +29,15 @@ async function loadLobby(){
     d.innerHTML = `<span><b>${esc(r.name)}</b> <small>${esc(r.code)}</small></span>
                    <span class='badge'>${esc(r.role)}</span>`;
     if (r.role === "dm"){
-      // D76 room deletion — deliberately TWO actions: first click arms with the
-      // room name spelled out, second click confirms. Server re-checks that the
-      // caller is the room's creator-DM; a player crafting the request gets 403.
+      // D76/D157 room deletion — a plain "Delete" button opens an explicit
+      // confirmation dialog (#del-room-dlg) where the DM must type the room's
+      // exact CODE before the destructive button enables. This replaces the old
+      // inline arm→re-click with a 6-second silent auto-disarm (a misclick and a
+      // no-op trap). The server still re-checks DM ownership; a player crafting
+      // the request gets 403.
       const del = document.createElement("button");
       del.className = "ghost"; del.textContent = "Delete"; del.style.marginLeft = "10px";
-      const disarm = () => { if (!del.isConnected || !del.dataset.armed) return;
-        delete del.dataset.armed; del.classList.add("ghost"); del.textContent = "Delete"; };
-      del.onclick = async (e) => {
-        e.stopPropagation();
-        if (del.dataset.armed){
-          delete del.dataset.armed; del.disabled = true;
-          try { await api(`/rooms/${encodeURIComponent(r.code)}`, "DELETE");
-                toast(`Room "${r.name}" deleted`); await loadLobby(); }
-          catch(err){ toast(err.message); del.disabled = false; disarm(); }
-          return;
-        }
-        del.dataset.armed = "1"; del.classList.remove("ghost");
-        del.textContent = `Delete "${r.name}" permanently?`;
-        setTimeout(disarm, 6000);
-      };
+      del.onclick = (e) => { e.stopPropagation(); openDeleteRoom(r); };
       d.appendChild(del);
     }
     d.onclick = () => openPrep(r.code);   // D101: rooms open on the preparation screen
@@ -56,6 +45,46 @@ async function loadLobby(){
   }
   show("lobby");
 }
+
+/* D157 — the single room-deletion confirmation. The dialog is a static
+   top-level element (#del-room-dlg, index.html); the destructive button is
+   gated on typing the room's exact CODE, so no stray click can delete a table.
+   Handlers are wired once on first open; each open re-primes the fields, so a
+   reused dialog never leaks a previous room's name/code. Server is authority:
+   ownership is re-checked there, and a rejected request only shows an inline
+   error here — it never closes on the DM's face. */
+function openDeleteRoom(r){
+  const dlg = $("del-room-dlg"); if (!dlg) return;
+  $("del-room-name").textContent = r.name;
+  $("del-room-code").textContent = r.code;
+  $("del-room-code-hint").textContent = r.code;
+  const inp = $("del-room-input"), err = $("del-room-err"), btn = $("del-room-confirm");
+  inp.value = ""; err.textContent = ""; btn.disabled = true; btn.dataset.busy = "";
+  if (!dlg._wired){
+    dlg._wired = true;
+    const gate = () => { btn.disabled = btn.dataset.busy === "1"
+      || inp.value.trim() !== $("del-room-code").textContent; };
+    inp.oninput = gate;
+    $("del-room-cancel").onclick = () => dlg.close();
+    btn.onclick = async () => {
+      if (btn.disabled || btn.dataset.busy === "1") return;
+      btn.dataset.busy = "1"; gate();
+      try {
+        await api(`/rooms/${encodeURIComponent($("del-room-code").textContent)}`, "DELETE");
+        const nm = $("del-room-name").textContent;
+        btn.dataset.busy = ""; dlg.close();
+        toast(`Room "${nm}" deleted`); await loadLobby();
+      } catch(e){
+        btn.dataset.busy = "";
+        err.textContent = (e && e.message) || "The room could not be deleted.";
+        inp.value = ""; gate();                 // force a fresh confirmation retype
+      }
+    };
+  }
+  dlg.showModal();
+  if (typeof setTimeout === "function") setTimeout(() => inp.focus(), 0);
+}
+
 function renderChars(){
   const cl = $("char-list"); cl.innerHTML = "";
   if (!state.chars.length) cl.innerHTML = "<p class='err' style='opacity:.6'>No characters yet.</p>";

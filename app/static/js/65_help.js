@@ -31,6 +31,8 @@ const HELP = [
     h:"Click a door next to your token to open or close it. Locked doors need the key — or the DM. <i>It won't budge.</i> means the DM locked that door for players entirely. Secret passages show up on the DM's map only." },
   { c:"start", t:"Fog of war & revealed terrain", k:"fog explored darkness reveal light brush",
     h:"Explored terrain stays explored. The DM's 💡 brush toggles room-wide terrain reveal; hidden creatures still need line of sight either way. The DM can also <i>Hide explored fog</i> to re-shroud the room." },
+  { c:"start", t:"Deleting a room", k:"delete remove room permanently code confirm owner creator",
+    h:"In the lobby the room's DM sees <b>Delete</b> beside their own room. To stop a stray click, a dialog appears and asks you to type the room's code; only once you type it exactly does <b>Delete permanently</b> unlock. Only the room's creator-DM can delete it (the server refuses anyone else), and it removes everything inside for good — map, floors, tokens, chat, notes and items." },
 
   /* ---- characters ---- */
   { c:"chars", t:"Bring a character to the table", k:"character create join assign seat bring",
@@ -75,14 +77,16 @@ const HELP = [
     h:"Players cast from their sheet; the DM can also <i>Cast an area/point spell from the tactical map</i>. Only one concentration at a time — starting a new one ends the old." },
 
   /* ---- maps & floors ---- */
-  { c:"maps", t:"Floors", k:"floor level story downstairs add delete switch",
-    h:"A room can hold several floors — the DM adds them (<i>Add a floor to this room</i>) and tokens live on one at a time. <b>No floor</b> cells are impassable pits whose space sight still passes over. Deleting a floor is refused while tokens still stand on it." },
+  { c:"maps", t:"Floors", k:"floor level story downstairs add delete switch elevator rail cellar air",
+    h:"A room can hold several floors — the DM adds them (<i>Add a floor to this room</i>) and tokens live on one at a time. While editing, a vertical floor rail on the left (highest floor at the top, ground at the bottom) picks the storey every brush affects, so a wall, terrain, door, light or opening never lands on the wrong level; the floor names and signed level tags come from the room itself. A brand-new plane is open AIR until you lay a floor: the ground floor (E0) starts floored, every storey above is air by default, and ticking the <i>below</i> box declares a cellar under the ground (E−1, E−2…). <b>No floor</b> cells are impassable pits whose space sight still passes over. Deleting a floor is refused while tokens still stand on it." },
+  { c:"maps", t:"Seeing across floors", k:"all floors this floor only filter cross-plane badge tag display",
+    h:"The map can show <b>All visible</b> — every floor your sight legitimately reaches, each cross-floor token badged with its signed floor tag (E0, E+1, E−1…) and the height difference from where you stand — or <b>This floor only</b> to reduce the view to the plane you are on. This is a personal display filter: it never changes what you can actually see, never hides anything from your real vision, and never moves anyone." },
   { c:"maps", t:"Height & openings", k:"elevation height raise lower open flight vertical opening",
-    h:"On a floor, cells can carry elevation: <i>Raise elevation +1 (step = 1 unit)</i> and <i>Lower elevation −1</i> sculpt steps; a token's own height and elevation matter for sight and reach. Vertical sight and movement between floors only exist through <b>openings</b> — without one, the floor keeps its secrets (fail-closed)." },
+    h:"On a floor, cells can carry elevation: <i>Raise elevation +1 (step = 1 unit)</i> and <i>Lower elevation −1</i> sculpt steps; a token's own height and elevation matter for sight and reach. A laid floor is a solid slab: it caps its column and blocks sight and vertical movement through the surface. Vertical sight and movement between floors only exist through <b>openings</b> — an opening punched in the ceiling, or a cell that is already open AIR or void — without one, the floor keeps its secrets (fail-closed)." },
   { c:"maps", t:"Light & darkness", k:"light lamp torch darkvision glow radius",
     h:"Light is a map object: <i>Place a new lamp (bright 5)</i> puts a bright-5 light at the centre of the view; the bright radius is measured in cells and walls block the glow. In the DM's darkness, only sources and darkvision (from gear or species) reach." },
   { c:"maps", t:"The map editor & brushes", k:"edit map wall obstacle difficult terrain barrier editor save",
-    h:"The DM's editor paints: walls, <b>Floor (walkable)</b>, <b>Low obstacle (passable, 2× cost)</b>, <b>Barrier (blocks movement, not sight)</b>, <b>Difficult terrain (2× walk)</b> and <b>No floor</b>; the door brush adds a door to a cell edge. <b>Save</b> publishes the change to everyone in the room." },
+    h:"The DM's editor paints: walls, <b>Floor (walkable)</b>, <b>Low obstacle (passable, 2× cost)</b>, <b>Barrier (blocks movement, not sight)</b>, <b>Difficult terrain (2× walk)</b>, <b>No floor</b> and <b>Open air</b> (no floor, but free volume a flyer passes through); the door brush adds a door to a cell edge. <b>Save</b> publishes the change to everyone in the room." },
   { c:"maps", t:"Traps", k:"trap search disarm hidden spring DC",
     h:"DMs hide traps with the <b>Hidden trap</b> brush (disarm DC 0 means it cannot be disarmed). Players discover and disable with <b>🔍 Search</b> and <b>🔧 Disarm</b> for the cell their token stands on — tripping something hurts before it gets removed." },
   { c:"maps", t:"Objects, pins & measuring", k:"pin ruler measure distance ping world object",

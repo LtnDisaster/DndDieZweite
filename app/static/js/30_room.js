@@ -10,6 +10,7 @@ async function openRoom(code){
   state.viewFloor = s.view_floor || "";
   state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || [];
   state.floors = s.floors || [""];
+  state.floor_levels = s.floor_levels || null;   // D159: signed level per plane
   state.grid = s.grid; state.editing = false; state.editMap = null; state.sel = null;
   state.preview = null; state.lightMoveId = null;   // D104: no preview survives a room switch
   state.plan = null; state.planRequest = null; state.moving = new Set();
@@ -69,21 +70,85 @@ function applySideTab(){
 }
 
 function renderViewFloor(){
-  // D88: the selector only earns its place once the room has planes to browse
-  const row = $("view-floor-row"), sel = $("view-floor");
-  if (row && sel){
-    const many = state.room && state.room.role === "dm" && (state.floors || [""]).length > 1;
-    row.classList.toggle("hidden", !many);
-    if (many){
-      const cur = state.viewFloor || "";
-      sel.innerHTML = (state.floors || [""]).map(f =>
-        `<option value="${f.replace(/"/g,"&quot;")}" ${f===cur?"selected":""}>${f===""?"⬛ primary":f}</option>`).join("");
-      sel.onchange = () => { state.viewFloor = sel.value; refreshRoom(); };
-    }
-  }
+  // D158: the plane switcher now lives inside the map editor as a vertical
+  // floor rail (the elevator); the old out-of-panel dropdown is gone. The DM
+  // side panel (#floorpanel) keeps out-of-editor "browse this plane" browsing.
+  renderFloorRail();
   if (typeof renderFloorPanel === "function") renderFloorPanel();   // D102
   if (typeof renderLightsPanel === "function") renderLightsPanel(); // D104: lamps of the VIEWED plane
+  renderViewFilter();                                               // D159
 }
+/* D159 — the personal floor DISPLAY filter. It only changes which delivered
+   planes the canvas draws; it never touches vision, delivery or movement. */
+function renderViewFilter(){
+  const el = $("viewfilter"); if (!el) return;
+  const many = (state.floors && state.floors.length > 1);
+  // D159: the filter only governs a DM's plane-local browsing; a player always
+  // sees exactly what the server delivered, so the control is DM-only.
+  const dm = state.room && state.room.role === "dm";
+  const show = dm && many && !state.preview;
+  el.classList.toggle("hidden", !show);
+  if (!show) return;
+  const mode = viewFilterMode();
+  const a = $("vf-all"), c = $("vf-current");
+  if (a){ a.className = mode === "all" ? "primary" : "ghost";
+          a.setAttribute("aria-pressed", mode === "all"); a.onclick = () => setViewFilter("all"); }
+  if (c){ c.className = mode === "current" ? "primary" : "ghost";
+          c.setAttribute("aria-pressed", mode === "current"); c.onclick = () => setViewFilter("current"); }
+}
+function setViewFilter(m){
+  if (state.viewFilter === m) return;
+  state.viewFilter = m; renderViewFilter();
+  if (typeof draw === "function") draw();
+}
+
+/* D159 — floor labels/levels/badges live in 10_core.js (shared with the canvas
+   renderer). renderFloorRail/renderFloorPanel read floorStack()/floorBadge/floorTag. */
+
+function renderFloorRail(){
+  const rail = $("floor-rail");
+  if (!rail) return;                                    // not the room view / no editor mounted
+  const floors = state.floors || [""];
+  const cur = state.viewFloor || "";
+  // Vertical stack ordered by SIGNED level (D159): highest storey on TOP, the
+  // deepest cellar at the BOTTOM, primary/ground in its true place. Levels come
+  // from the server's floor_levels so a cellar reads E−1, not a stack index.
+  const rows = floorStack().reverse();
+  let html = rows.map(name => {
+    const L = floorLevelOf(name), active = name === cur;
+    return `<button class="fl-rail${active ? " active" : ""}" data-f="${esc(name)}"`
+      + ` aria-pressed="${active}" title="Edit ${esc(floorTag(name))}">`
+      + `<span class="lvl">${floorBadge(name)}</span><span class="nm">${esc(floorLabelOf(name))}</span>`
+      + (active ? `<span class="on">\u270E editing</span>` : "") + `</button>`;
+  }).join("");
+  if (floors.length < 2)
+    html += `<small class="meta" style="opacity:.6">One floor. Add more on the 🎲 DM tab.</small>`;
+  rail.innerHTML = html;
+  rail.classList.toggle("hidden", !(state.editing || floors.length > 1));
+  for (const b of rail.querySelectorAll(".fl-rail"))
+    b.onclick = () => gotoEditFloor(b.dataset.f);
+}
+
+function editHasUnsaved(){
+  return !!(state.editing && state.editMap && state._editOrig
+    && JSON.stringify(state.editMap) !== state._editOrig);
+}
+
+// The one plane switcher for every floor change (rail click + floorpanel
+// browse). While editing, the edit buffer is re-armed from the freshly fetched
+// plane so a brush can never write to a floor the DM did not select.
+function gotoEditFloor(name){
+  if ((state.viewFloor || "") === name) return;
+  if (editHasUnsaved() && !confirm(
+        `You have unsaved edits on "${floorLabelOf(state.viewFloor)}". Switch floors and discard them?`))
+    return;
+  state.viewFloor = name;
+  Promise.resolve(refreshRoom()).then(() => {
+    if (state.editing && typeof rearmEditBuffer === "function") rearmEditBuffer();
+    renderFloorRail();
+  });
+}
+
 
 /* ---------- D102 floor manager (DM side panel) ---------- */
 function renderFloorPanel(){
@@ -91,33 +156,38 @@ function renderFloorPanel(){
   if (!panel || !list) return;
   if (!(state.room && state.room.role === "dm")) return;
   const cur = state.viewFloor || "";
-  list.innerHTML = (state.floors || [""]).map(f => {
+  list.innerHTML = floorStack().reverse().map(f => {
     const act = f === cur;
+    const tag = `<span class="fl-lvl" title="Signed level">${floorBadge(f)}</span> `;
     const label = f === "" ? "⬛ Ground (primary)" : esc(f);
     const tools = f === ""
       ? `<span class="tiny" title="The primary floor always exists — it cannot be removed or renamed">fixed</span>`
       : `<button class="ghost fl-ren" data-f="${esc(f)}" title="Rename floor">✏️</button>`
         + `<button class="ghost fl-del" data-f="${esc(f)}" title="Delete floor (refused while tokens stand on it)">🗑</button>`;
     return `<div class="row"${act ? ' style="background:rgba(241,196,15,.10)"' : ""}>`
-      + `<button class="ghost fl-view" data-f="${esc(f)}" title="Browse this plane — nobody is moved">${label}${act ? " ← viewing" : ""}</button>`
+      + `<button class="ghost fl-view" data-f="${esc(f)}" title="Browse this plane — nobody is moved">${tag}${label}${act ? " ← viewing" : ""}</button>`
       + tools + `</div>`;
   }).join("");
   for (const b of list.querySelectorAll(".fl-view"))
-    b.onclick = () => { state.viewFloor = b.dataset.f; refreshRoom(); };
+    b.onclick = () => gotoEditFloor(b.dataset.f);   // D158: one plane switcher
   for (const b of list.querySelectorAll(".fl-del"))
     b.onclick = () => editFloor("DELETE", b.dataset.f, null);
   for (const b of list.querySelectorAll(".fl-ren"))
     b.onclick = () => startFloorRename(b.dataset.f, b);
-  const add = $("btn-floor-add"), inp = $("floor-new");
+  const add = $("btn-floor-add"), inp = $("floor-new"), below = $("floor-below");
   if (add && inp) add.onclick = () => {
     const name = inp.value.trim(); if (!name) return;
     fetch(`/api/rooms/${encodeURIComponent(state.room.code)}/floors`,
           { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name }) })
+            // D159: a checked box declares the plane UNDER the primary (a cellar).
+            body: JSON.stringify({ name, below: !!(below && below.checked) }) })
       .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
         .then(j => { throw new Error((j && j.detail) || "Cannot add floor"); }))
-      .then(j => { inp.value = ""; state.floors = j.floors || state.floors;
+      .then(j => { inp.value = "";
+                   state.floor_levels = j.floor_levels || state.floor_levels;
+                   state.floors = j.floors || state.floors;
                    renderFloorPanel(); renderViewFloor();
+                   if (below) below.checked = false;
                    // D153: the ws floors_changed broadcast goes to the OTHER
                    // clients — the actor's own open sheet kept stale options.
                    if (state.sel && !$("sheet").classList.contains("hidden")) {
@@ -153,6 +223,7 @@ function editFloor(method, old, newName){
     .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
       .then(j => { throw new Error((j && j.detail) || "Floor operation failed"); }))
     .then(j => { state.floors = j.floors || state.floors;
+                 state.floor_levels = j.floor_levels || state.floor_levels;
                  renderFloorPanel(); renderViewFloor(); refreshRoom(); })
     .catch(err => { toast(err.message || "Floor operation failed");
                     state.viewFloor = prev;
@@ -256,6 +327,7 @@ async function refreshRoom(){
                       + (state.viewFloor ? `?floor=${encodeURIComponent(state.viewFloor)}` : ""));
   state.room = s; state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || []; state.grid = s.grid;
   state.floors = s.floors || [""];
+  state.floor_levels = s.floor_levels || null;   // D159: signed level per plane
   state.viewFloor = s.view_floor || ""; renderViewFloor();   // D88: server is the view SSOT
   if (typeof renderFogToggle === "function") renderFogToggle();
   if (state.plan && !state.tokens.find(t => t.id === state.plan.token_id)) state.plan = null;

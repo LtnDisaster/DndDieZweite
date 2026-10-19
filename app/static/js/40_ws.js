@@ -118,8 +118,11 @@ function connectWS(code){
        case "token_darkvision": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t) t.darkvision = p.radius | 0; } break;   // D89: owner-only sense
       case "floors_changed": { state.floors = p.floors || [""];  // D86: DM curated floor list
-                     if (typeof renderViewFloor === "function") renderViewFloor();
-                     if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel)); } break;
+                      if (p.floor_levels) state.floor_levels = p.floor_levels; // D159 signed levels
+                      if (typeof renderViewFloor === "function") renderViewFloor();
+                      if (typeof renderFloorRail === "function") renderFloorRail();
+                      if (typeof renderFloorPanel === "function") renderFloorPanel();
+                      if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel)); } break;
       case "token_image": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.image = p.image || "";           // D85: server-made /assets/ ref
                        if (state.sel === p.token_id) renderSheet(t); } break; }

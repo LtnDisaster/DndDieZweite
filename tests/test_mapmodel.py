@@ -40,11 +40,11 @@ def test_sanitize_rejects_wrong_cells_length():
 
 
 def test_sanitize_clamps_cells_to_the_terrain_vocabulary():
-    # D69: the cell vocabulary is 0..4; D103 extends it with 5 (void).
-    # 5 is now a legitimate value; only 6+ clamp down to it.
+    # D69: vocabulary 0..4; D103 added 5 (void); D159 added 6 (air). 5 and 6 are
+    # legitimate; negatives clamp up to 0 and values above 6 clamp down to 6.
     cells = [5, -3, 9, 1, 0, 4] + [0] * (80 - 6)
     out = mm.sanitize(mk(cells=cells))
-    assert out["cells"][:6] == [5, 0, 5, 1, 0, 4]
+    assert out["cells"][:6] == [5, 0, 6, 1, 0, 4]
 
 
 def test_sanitize_clamps_up_undersized_grid():

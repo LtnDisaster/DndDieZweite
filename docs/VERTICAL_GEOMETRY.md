@@ -16,6 +16,45 @@ einem Stapel verbunden werden. Dabei entscheiden drei Fragen getrennt:
 
 Diese Fragen werden bewusst nicht mit einem einzigen `floor`-Vergleich beantwortet.
 
+## 1A. D159 — offene Volumen als Standard, signed Levels, massive Platten
+
+D159 präzisiert die Defaults, ohne die openv-Geometrie von oben anzufassen.
+
+- **Terrain `air`(6):** neues, registriertes Terrain. Es ist NICHT begehbar
+  (`walkable=False`), blockiert weder Bewegung noch Sicht
+  (`blocks_movement=False`, `blocks_vision=False`), ist `body_open`/offenes
+  Volumen, aber keine Platte (`slab=False`). Es unterscheidet sich von `void`(5)
+  (Loch/Abgrund) dadurch, dass Luft frei durchflogen werden kann.
+- **Default je Ebene:** die Primary (E0) bleibt Standard-Boden. Eine nie
+  bearbeitete, nicht-Primary-Ebene liefert `net.get_map()` als
+  `blank_map(base, AIR)` — also durchgehend Luft, NICHT mehr eine unsichtbare
+  Kopie der Primary. Bereits gespeicherte Zellen bleiben byte-identisch;
+  D159 interpretiert nichts um.
+- **Massive Platte (`slab`):** eine gelegte Fläche (walkbar oder wall) ist eine
+  Platte und deckelt ihre Säule. Die gemeinsame Grenze zweier benachbarter
+  Level ist offen, wenn unten `openv=1` steht ODER die obere Zelle keine Platte
+  ist (also `air`/`void`/`barrier`):
+  `boundary_open(lower,upper,cell) = openv(lower,cell) OR NOT slab(terrain(upper,cell))`.
+  `column_open`, `vertical_path_clear`, `body_planes`, `cross_plane_sight`
+  arbeiten über signierte, benachbarte Level und schlagen bei einer Lücke ohne
+  registrierte Ebene fail-closed fehl.
+- **Signed Levels:** `floors.level_map` liefert vorzeichenbehaftete Level
+  (Primary 0, darüber positiv, darunter negativ). Ein Keller ist eine echte
+  Etage `below` (E−1, E−2 …). Speicher abwärtskompatibel: flache Legacy-Liste =
+  alles über Primary; erst der erste Below-Floor schreibt
+  `{"below":[…],"above":[…]}`. `floors.order` liefert den Stapel bottom→top
+  inklusive Primary an ihrer true-Position.
+- **Freie 3D-Flugbewegung:** es gibt weiterhin GENAU EINE Engine
+  (`path.find_path_3d` + `_move3d` + `vertical3d.vertical_path_clear`). Ein
+  mehrgeschossiger Flug ist die Kette benachbarter offener Grenzen; diagonaler
+  Flug die Komposition aus Horizontal- und Vertikalschritten.
+  Kollision/Budget/Kreaturengröße/Berechtigung bleiben serverseitig autoritativ.
+- **Frontend (rein darstellend):** `state.floor_levels`, `floorBadge`
+  (`E0`/`E+1`/`E−1`), Etagen-Rail und -Panel mit signierten Tags, Below-Add,
+  Air-Pinsel, sowie der Anzeige-Filter „All visible“ / „This floor only“
+  (`onPlane`). Cross-Plane-Token tragen ein Floor-Badge mit Delta. Der Filter
+  verändert niemals Sicht, Zustellung oder Position — er ist rein visuell.
+
 ## 2. Tokenkörper
 
 Ein Token trägt:
@@ -238,3 +277,24 @@ Diese Punkte sind bewusst nicht als unterstützt zu behandeln:
 - `app/static/js/50_canvas.js`: `openv`-Pinsel, Renderer und plane-lokale
   DM-Browsing-Logik.
 - `app/static/index.html`: `openv`-Brush.
+
+### D159-Ergänzung (Dateien)
+- `app/mapmodel.py`: Terrain `air`(6), `slab()`, `is_open_volume()`,
+  `blank_map(base, AIR)`, Clamp-Max 6.
+- `app/floors.py`: signierte `level_map`, `order` (bottom→top inkl. Primary),
+  Below-Speicher `{"below","above"}`, `add(below=…)`.
+- `app/room/vertical3d.py`: `boundary_open`/`column_open` über signierte
+  Level, `slab`-Platte, `ray_clear_3d` (Primitiv).
+- `app/room/net.py`: nie bearbeitete Nicht-Primary-Ebene → `blank_map(AIR)`.
+- `app/rooms.py`: `/state` + Floor-Routes liefern `floor_levels`;
+  `FloorIn.below`.
+- `app/static/js/10_core.js`: `floor_levels`, `floorBadge`/`floorDelta`/
+  `floorStack`, `viewFilterMode`, State-Felder `viewFilter`/`floor_levels`.
+- `app/static/js/30_room.js`: Rail/Panel mit signierten Tags, Below-Add,
+  `renderViewFilter`/`setViewFilter`.
+- `app/static/js/40_ws.js`: `floors_changed` trägt `floor_levels`.
+- `app/static/js/50_canvas.js`: Air-Renderer, Air-Pinsel, plane-abhängiger
+  „erase“, Cross-Plane-Badge, Anzeige-Filter in `onPlane`.
+- `app/static/index.html`: `floor-below`-Checkbox, `air`-Brush,
+  `#viewfilter` (All visible / This floor only).
+- `tests/test_d159_open_volumes.py`, `tests/test_d159_view_frontend.py`.

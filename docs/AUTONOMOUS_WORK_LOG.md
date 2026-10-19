@@ -928,3 +928,89 @@ nachgereicht. Details: `docs/RECOVERY_2026-10-17.md`.
 - Zahlen: Kanon 1093 -> 1115 (rc=0, 0 failed), node --check sauber, E2E
   A/B/C/D/E/F/G2/G alle rc=0 gegen isolierte Instanz (ns4, 8010),
   Teardown erledigt. Report: docs/REGRESSION_AUDIT_2026-10-18.md.
+
+## Manuelle Abnahme 2026-10-19 — Raum-Löschung + Etagen-Aufzug (D157/D158)
+
+- Zwei von Hand getestete Defekte repariert; CSV-Dropdowns bestätigten sich als
+  in Ordnung (kein Befund).
+- D157 Raum-Löschung: Grund war die unvollständige Kaskade — `item_defs` und
+  `containers` referenzieren rooms(id) OHNE `ON DELETE CASCADE`; bei
+  `foreign_keys=ON` schlug `DELETE FROM rooms` bei jedem Raum mit Loot/Truhe/
+  Custom-Item fehl und `db.tx()` rollierte komplett zurück -> HTTP 500, nur ein
+  2,5s-Toast als Feedback („bestätigen tut nichts“). UI war ein
+  Inline-Bewaffnen-mit-6s-Auto-Disarm. Fix: `ROOM_DELETE_CHILD_TABLES` deckt
+  jetzt jede room-scoped Tabelle ab (keine Schema-Migration); statisches
+  Bestätigungs-Dialog verlangt das Tippen des Raum-CODES, Fehler erscheinen
+  dauerhaft im Dialog. Server bleibt DM-owner-authoritativ.
+- D158 Etagen-Aufzug: das verstreute Ebenen-Dropdown (#view-floor) ersetzt durch
+  eine vertikale Floor-Rail im Karten-Editor (höchste Ebene oben, Ground unten),
+  genährt aus `state.floors`, eine Klick-Kette `gotoEditFloor` -> `refreshRoom`
+  -> `rearmEditBuffer` (Pinsel treffen nur die gewählte Ebene; Speichern setzt
+  den Dirty-Baseline zurück). Keine zweite Etagen-Engine, 55_diorama.js
+  unberührt. Spieler-Sicht bleibt fail-closed über `openv`.
+- Tests neu (ohne bestehende zu ändern): test_room_delete_all_tables (2, inkl.
+  strukturellem Fremdschlüssel-Gate), test_room_delete_client (2, echter
+  Client-Dialog + Live-Server gegen den alten 500-Pfad),
+  test_floor_editor_active_plane (3, nur aktive Ebene / Reload / refused),
+  test_floor_visibility_levels (3, Boden/OG/Dach massive Decke vs. Schacht,
+  Spieler-Perspektive unverändert, Canvas `onPlane`). Kanon 1115 -> 1125 passed,
+  0 failed (rc=0), node --check über alle Module sauber.
+- Hilfe (EN, Truth-Gates grün): „Floors“ um die Editor-Rail ergänzt, neuer
+  Eintrag „Deleting a room“.
+- Echter Browser-E2E (scripts/e2e_rooms_floors.py, Szenario H + I) gegen eine
+  isolierte Instanz (Loopback 8013, Wegwerf-Container + Playwright-Image):
+  H bewaffnet-Löschen-sperrt-bis-Code, echter Raumfall + Liste weg, Spieler ohne
+  Delete-Button; I hebt die aktive Ebene hervor, Pinsel ändern nur diese Etage,
+  übersteht Reload, Boden unberührt. rc=0. Belege: ./e2e-evidence/*.png.
+  Teardown: Container + Volume entfernt, kein Port außer 8013 belegt.
+
+## Marathon 4.0 — D159 Offene Volumen, signed Levels, freie 3D-Flugbewegung (2026-10-19)
+
+- Anforderung: Ground (E0) bleibt Standard-Boden, jede nie bearbeitete
+  Nicht-Primary-Ebene ist echtes `air`(6) statt unsichtbarer Primary-Kopie,
+  Levels werden vorzeichenbehaftet (Keller E−1/E−2), eine gelegte Fläche ist eine
+  massive Platte, die Säule + Sicht + Vertikalbewegung deckelt, freie
+  3D-Flugbewegung durch die EINE bestehende Engine, Etagen-Tags + reiner
+  Anzeige-Filter. Ohne Git, ohne 55_diorama.js, ohne zweite Engine.
+- Backend: `mapmodel` Terrain `air`(6) + `slab`/`is_open_volume`/`blank_map`,
+  Clamp-Max 6; `floors` signierte `level_map`/`order` + Below-Speicher
+  `{"below","above"}`; `vertical3d.boundary_open = openv(lower) OR NOT slab(upper)`
+  über signierte benachbarte Level, `column_open`/`vertical_path_clear`/
+  `body_planes`/`cross_plane_sight` fail-closed bei Lücken; `net.get_map` liefert
+  nie bearbeitete Nicht-Primary-Ebene als `blank_map(AIR)` (gespeicherte Zellen
+  byte-identisch); `rooms` `/state` + Floor-Routes senden `floor_levels`,
+  `FloorIn.below`; `ray_clear_3d` als Primitiv ergänzt. Freier 3D-Flug bleibt
+  `find_path_3d` + `vertical3d.vertical_path_clear` (Mehrgeschoss = Kette
+  benachbarter offener Grenzen; Diagonale = Horizontal+Vertikal komponiert).
+- Frontend: `10_core` teile `floor_levels`/`floorBadge`/`floorDelta`/`floorStack`/
+  `viewFilterMode`; `30_room` Rail/Panel mit E-Tags + Bottom-up-Sortierung,
+  Below-Checkbox, `renderViewFilter`; `40_ws` `floors_changed` trägt
+  `floor_levels`; `50_canvas` Air-Renderer + Air-Pinsel, plane-abhängiger
+  „erase“, Cross-Plane-Badge, Anzeige-Filter in `onPlane` (DM only, Spieler
+  sieht stets die Server-Zustellung); `index.html` `#viewfilter`,
+  `floor-below`, `air`-Brush; `style.css` Filter/Badge-Stile. Hilfe (EN,
+  Truth-Gate grün): „Floors“/„Seeing across floors“/Brushes um D159 ergänzt.
+- Tests neu: `test_d159_open_volumes.py` (11: Air-Default, Air-Semantik,
+  signed/below, Platte vs. openv, Air-Stapel = ein Volumen, Mehrgeschoss-Flug,
+  diagonale Komposition, server-autoritäre Air-Aszension + verweigerte Decke,
+  Stored-Data-Roundtrip) und `test_d159_view_frontend.py` (echter Client im
+  Node-vm: Filter/Label/Badge display-only). Bestehende D114/D86/D102/D103/D158-
+  Suiten auf die neue Wahrheit umgestellt (Frisch-Ebene==Air, Clamp-Max 6,
+  massive-Decken-Fixtures legen Platte, L4-Occupancy/Rider/Lamp/AoE/Ping legen
+  Zielfläche; ein Hänger in `test_sprint19_audit` L4 durch Ziel-Boden behoben;
+  `test_d103`-Registry/-Clamp, `test_mapmodel`/`test_terrain` Clamp-Target 6).
+  Ein laufender Hänger (~51 % im Voll-Lauf) war genau diese L4-Occupancy-
+  Erwartung gegen eine Luft-Zielebene.
+- Kanon: 1125 -> 1137 passed, 0 skipped, 0 failed (rc=0); `node --check` über
+  alle Module sauber.
+- Echter Browser-E2E (`scripts/e2e_d159_open_volumes.mjs`, Chromium-Image gegen
+  Wegwerf-Instanz auf Loopback 8013, Build aus dem aktuellen Baum): K1 signed
+  Levels + Below + E-Tags in vertikaler Reihenfolge; K2 frisch-Ebene AIR(6) vs.
+  Boden floor(0), Rail-Reihenfolge top→bottom, Air-Pinsel/erase; K3
+  Anzeige-Filter wechselt `state.viewFilter`, ohne die betrachtete Ebene zu
+  verschieben; K4 Cross-Etagen-Token trägt `E+1 ▲+1` und ist nur in „All
+  visible“ zeichenbar. rc=0. Belege: ./e2e-evidence/e2e-d159-*.png. Teardown:
+  Container + Volume entfernt, kein Port (8013/8000) belegt.
+- Bewusst offen (D159 nicht verlangt): integrierter Diagonal-Sicht-Ray statt
+  offener-Säule+Pro-Ebene-LOS (`ray_clear_3d` bleibt Primitiv), Springen/Fallen,
+  vertikales Klettern/Schwimmen.

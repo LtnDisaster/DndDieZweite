@@ -325,16 +325,14 @@ async def send_token_event(room_id, token, kind="token_add", extra=None):
                 # guarantee (Sprint 19/20/21) holds by construction.
                 visible = False
                 for P in planes:
-                    obs = vertical3d.observable_cells(room_id, token, P, vmaps, vlm)
-                    if not obs:
-                        continue
                     key = (uid, P)
                     if key not in seen_cache:
                         seen_cache[key] = viewer_visible_cells(room_id, uid,
                                             get_map(room_id, P), floor=P)
                     mp_p = vmaps.get(P) or get_map(room_id, P)
-                    if any((i := mapmodel.flat_idx(mp_p, x, y)) is not None
-                           and i in seen_cache[key] for (x, y) in obs):
+                    obs = vertical3d.observable_cells(room_id, token, P, vmaps, vlm)
+                    if obs and any((i := mapmodel.flat_idx(mp_p, x, y)) is not None
+                                   and i in seen_cache[key] for (x, y) in obs):
                         visible = True
                         break
         if uid not in _last_seen.get(room_id, {}):

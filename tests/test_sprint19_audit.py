@@ -149,9 +149,16 @@ def test_first_sight_token_add_and_ghost_carry_no_hidden_properties(client):
 # ---------- L4 (+ mount plane guard) ----------
 
 def test_floor_change_rejects_occupied_destination_and_cross_plane_mount(client):
+    from app.room import net
     dm, player, code, _ = base_room(client)
     r = client.post(f"/api/rooms/{code}/floors", json={"name": "crypt"}, headers=H(dm))
     assert r.status_code == 200, r.text
+    # D159: a fresh named plane is open AIR; the L4 occupancy race needs a real
+    # standable destination floor, so the DM lays one before staging the overlap.
+    rid = db.q1("SELECT id FROM rooms WHERE code=?", (code,))["id"]
+    mp = net.get_map(rid, "crypt")
+    mp["cells"] = [0] * (mp["w"] * mp["h"])
+    net.set_map(rid, mp, "crypt")
     mine = [t for t in state_of(client, player, code)["tokens"]
             if t.get("owner_user_id") is not None][0]
     cx, cy = int(mine["x"] // 50), int(mine["y"] // 50)

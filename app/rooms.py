@@ -601,16 +601,34 @@ def join_room(body: JoinIn, user=Depends(require_user)):
     return {"code": room["code"], "name": room["name"]}
 
 
+# Every room-scoped table delete_room must clear before removing the room
+# itself. `floor_maps` is deliberately absent: its FK is `ON DELETE CASCADE`,
+# so the schema removes it for us. The others (notably item_defs + containers,
+# D157) reference rooms(id) WITHOUT a cascade, so under `foreign_keys=ON` they
+# block `DELETE FROM rooms` unless listed here. tests/
+# test_room_delete_all_tables.py keeps this tuple and the schema in lockstep.
+ROOM_DELETE_CHILD_TABLES = ("tokens", "messages", "room_state", "notes", "quests",
+                            "room_members", "item_defs", "containers", "content",
+                            "inv_ops")
+
+
 @router.delete("/rooms/{code}")
 def delete_room(code: str, request: Request):
     """Delete a room permanently (D76). Only the room's DM (creator-equivalent
     membership role) may do this — a player crafting the HTTP request gets 403,
     a stranger gets 403/404 via room_of(); repeated calls 404 (idempotent-safe).
 
-    Cascades exactly this room's persistent rows, removes the room's own
-    background upload (never shared assets), and purges every in-memory trace
-    (clients, map locks, ghost memory, walks) with a final room_deleted event
-    so sockets land in the lobby instead of zombie-reconnecting."""
+    Cascades exactly this room's persistent rows (ROOM_DELETE_CHILD_TABLES +
+    the schema-cascaded floor_maps), removes the room's own background upload
+    (never shared assets), and purges every in-memory trace (clients, map
+    locks, ghost memory, walks) with a final room_deleted event so sockets land
+    in the lobby instead of zombie-reconnecting.
+
+    D157: the cascade list once omitted item_defs and containers — two room
+    child tables whose FK carries no ON DELETE CASCADE. With foreign_keys=ON a
+    room that ever held loot/custom items made `DELETE FROM rooms` raise, so
+    the whole transaction rolled back and the delete silently 500'd. A room is
+    now cleared of every child row, not only the ones D76 anticipated."""
     user, room = room_of(request, code)
     if room["_role"] != "dm" or user["id"] != room["dm_id"]:
         raise HTTPException(403, "Only the room's DM can delete the room")
@@ -618,8 +636,7 @@ def delete_room(code: str, request: Request):
     tok_ids = [t["id"] for t in db.q("SELECT id FROM tokens WHERE room_id=?", (room_id,))]
     image = room.get("map_image") or ""
     with db.tx() as c:
-        for table in ("tokens", "messages", "room_state", "notes", "quests",
-                      "room_members"):
+        for table in ROOM_DELETE_CHILD_TABLES:
             c.execute(f"DELETE FROM {table} WHERE room_id=?", (room_id,))
         c.execute("DELETE FROM rooms WHERE id=?", (room_id,))
     if image.startswith("/uploads/"):
@@ -761,9 +778,11 @@ def room_state(code: str, request: Request):
     for m in msgs:
         m["meta"] = db.j(m.get("meta"), {})
     chat_msgs = chat.chat_history_for_viewer(room["id"], user["id"], room["_role"] == "dm", 200)
+    _fl = FLOOR.order(room)                        # D159: true bottom→top stack
+    _lm = FLOOR.level_map(room)                    # name -> signed level
     return {
         "code": room["code"], "name": room["name"], "map": room["map_image"],
-        "role": room["_role"], "me": user["id"], "floors": [""] + FLOOR.parse(room),
+        "role": room["_role"], "me": user["id"], "floors": _fl, "floor_levels": _lm,
         "members": members, "tokens": tokens, "ghosts": ghosts, "messages": msgs,
         "chat": chat_msgs,
         "audio": audio.load_state(st.get("audio_json")),
@@ -829,16 +848,27 @@ def room_view_as(code: str, cid: int, request: Request):
 
 class FloorIn(BaseModel):
     name: str = Field(min_length=1, max_length=24)
+    below: bool = False          # D159: declare the plane UNDER the primary stack
+
+
+def _floors_payload(room_id):
+    """The floor stack the client shows: names in true bottom→top order (signed
+    levels, D159) plus the name->level map that renders `E+3` / `E-1` labels."""
+    room = db.q1("SELECT floors FROM rooms WHERE id=?", (room_id,)) or {"floors": "[]"}
+    lm = FLOOR.level_map(room)
+    order = FLOOR.order(room)
+    return {"floors": order, "floor_levels": lm}
 
 
 @router.post("/rooms/{code}/floors")
 async def add_floor_route(code: str, body: FloorIn, request: Request):
     user, room = _room_dm(request, code)
-    ok, res = FLOOR.add(room["id"], body.name)
+    ok, res = FLOOR.add(room["id"], body.name, below=body.below)
     if not ok:
         raise HTTPException(400, res)
-    await room_net.broadcast(room["id"], "floors_changed", {"floors": [""] + res})
-    return {"floors": [""] + res}
+    payload = _floors_payload(room["id"])
+    await room_net.broadcast(room["id"], "floors_changed", payload)
+    return payload
 
 
 @router.delete("/rooms/{code}/floors/{name}")
@@ -847,8 +877,9 @@ async def remove_floor_route(code: str, name: str, request: Request):
     ok, res = FLOOR.remove(room["id"], name)
     if not ok:
         raise HTTPException(400, res)
-    await room_net.broadcast(room["id"], "floors_changed", {"floors": [""] + res})
-    return {"floors": [""] + res}
+    payload = _floors_payload(room["id"])
+    await room_net.broadcast(room["id"], "floors_changed", payload)
+    return payload
 
 
 @router.patch("/rooms/{code}/floors/{name}")
@@ -862,7 +893,7 @@ async def rename_floor_route(code: str, name: str, body: FloorIn, request: Reque
     ok, res = FLOOR.rename(room["id"], name, body.name)
     if not ok:
         raise HTTPException(400, res)
-    for fl in [""] + res:
+    for fl in [""] + list(res):                 # every named plane plus the primary
         mp = room_net.get_map(room["id"], fl)
         hits = False
         for o in (mp.get("objects") or []):
@@ -872,9 +903,10 @@ async def rename_floor_route(code: str, name: str, body: FloorIn, request: Reque
                 hits = True
         if hits:
             room_net.set_map(room["id"], mp, fl)
-    await room_net.broadcast(room["id"], "floors_changed", {"floors": [""] + res})
+    payload = _floors_payload(room["id"])
+    await room_net.broadcast(room["id"], "floors_changed", payload)
     await room_net.broadcast(room["id"], "map_changed", None)
-    return {"floors": [""] + res}
+    return payload
 
 
 @router.post("/rooms/{code}/assign")
