@@ -3841,6 +3841,37 @@ lines name conditions by design (public table record, D90).
   frisch-Ebene==Air, Clamp-Max 6, massive-Decken-Fixtures legen jetzt Platte,
   L4-Occupancy/Rider/Lamp/AoE/Ping-Suiten legen Zielfläche. Hilfe „Floors“/
   „Seeing across floors“/Brushes (EN, Truth-Gate). VERTIKAL-Geometrie-Doku +
-  Feature-Matrix + Arbeitslog aktualisiert. `ray_clear_3d` bleibt als primitives
-  Werkzeug; die Sight-Lieferung bleibt bei offener-Säule+Pro-Ebene-LOS
-  (leckfrei), ein integrierter Diagonal-Ray bleibt optionale Folgearbeit.
+   Feature-Matrix + Arbeitslog aktualisiert. `ray_clear_3d` bleibt als primitives
+   Werkzeug; die Sight-Lieferung bleibt bei offener-Säule+Pro-Ebene-LOS
+   (leckfrei), ein integrierter Diagonal-Ray bleibt optionale Folgearbeit.
+
+## D160 — Qualitäts-/Regressionstore DnDTable (vertikale 3D + Etagen)
+
+- **Status:** bestanden. Kein neues Feature; adversariale Prüfung des Systems aus
+  D114/D158/D159 über echte Server- und Browser-Pfade (Dual-Chromium), dokumentiert
+  in `docs/QUALITY_GATE_D160.md`.
+- **Beschluss:** Shaft-/Säulensicht bleibt Senkrechtprojektion + 2D-LOS je Ebene
+  (`ray_clear_3d` nur Primitives, kein Zustellpfad). Etagen-Löschen ist
+  **topologisch**: nur die äußerste Ebene je Seite; sonst `400` + verständlicher
+  Grund in der UI (Toast) statt stiller Ablehnung — denn ein Löschen der mittleren
+  Ebene würde sonst die Karten der darüberliegenden Ebenen still den falschen
+  Etagen zuordnen (Datenintegrität).
+- **Behoben (Bug Q2):** `app/floors.py` erlaubt Entfernen nur der äußersten Ebene;
+  `30_room.js` zeigt den Server-Grund. Fail-before/pass-after in
+  `test_d160_floors.py` (Stack, Level, Tokenposition, gespeicherte Karten bleiben
+  unverändert).
+- **Bewusst offengelegtes, korrektes Verhalten (nicht behoben, nur dokumentiert):**
+  Spielervisus = fester 6-Felder-Radius in nicht-dunkler Karte, Darkvision nur in
+  dunkler Karte, Sichtquelle ist besitzerbezogen (Kontrolle ≠ Besitz); eine
+  bearbeitete Ebene legt eine massive Platte und deckt damit eine Säule
+  (Shaft braucht offene Zwischenzelle); ein cross-plane Token, der durch einen
+  Karten-Edit sichtbar wird, erscheint sofort im maßgeblichen Pro-Viewer-`/state`,
+  der inkrementelle Live-WS kann ihn erst nach einem Client-Refresh nachschieben
+  (UX-Nachzieher am Live-Pfad, kein Sicht-/Sicherheitsfehler). Ruhender Flieger
+  wird nachträglicher Kartenänderung nicht revalidiert (Grenze, durch Test
+  dokumentiert).
+- **Konsequenzen:** Neue Tests `test_d160_floors.py` (3), `test_d160_geometry.py`
+  (20), `test_d160_authority.py` (8), `test_d160_perf.py` (1) = 32; echter Browser-
+  E2E `scripts/e2e_d160.mjs` (A–H) rc=0, Belege `e2e-evidence/e2e-d160-*.png`.
+  Kanon 1137 → **1169 passed, 0 skipped, 0 failed (rc=0)** (Zahl zweifach bestätigt:
+  Fortschritts-Marks + Collect). Feature-Matrix/Arbeitslog nachgezogen.

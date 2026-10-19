@@ -163,7 +163,7 @@ function renderFloorPanel(){
     const tools = f === ""
       ? `<span class="tiny" title="The primary floor always exists — it cannot be removed or renamed">fixed</span>`
       : `<button class="ghost fl-ren" data-f="${esc(f)}" title="Rename floor">✏️</button>`
-        + `<button class="ghost fl-del" data-f="${esc(f)}" title="Delete floor (refused while tokens stand on it)">🗑</button>`;
+        + `<button class="ghost fl-del" data-f="${esc(f)}" title="Delete floor — refused while tokens stand on it, or while a floor sits further out (remove outer floors first so the rest keep their height)">🗑</button>`;
     return `<div class="row"${act ? ' style="background:rgba(241,196,15,.10)"' : ""}>`
       + `<button class="ghost fl-view" data-f="${esc(f)}" title="Browse this plane — nobody is moved">${tag}${label}${act ? " ← viewing" : ""}</button>`
       + tools + `</div>`;

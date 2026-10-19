@@ -183,6 +183,11 @@ Ohne `openv=1`:
 - Token delivery, Präsenzereignisse, plane-scoped Events und Snapshot nutzen
   dieselbe Körperpräsenz-Regel.
 - `token_height` und Änderung von `openv` lösen sofortige Sichtneuberechnung aus.
+- Etagenübergreifende SICHT ist eine Senkrechtprojektion: ein Token auf einer
+  anderen Ebene ist genau dort beobachtbar, wo seine offene Säule (`observable_
+  cells`) auf eine vom Betrachter einsehbare Ebene trifft; anschließend
+  entscheidet die zweidimensionale LOS dieser Ebene. `ray_clear_3d` ist ein
+  internes Primitiv und liegt NICHT auf dem Zustellpfad.
 
 ## 7. Flug und vertikale Bewegung
 
@@ -249,6 +254,9 @@ Diese Punkte sind bewusst nicht als unterstützt zu behandeln:
 - keine Bewegung großer Footprints durch eine einzellige Öffnung;
 - keine automatische Erkennung von Treppen, Schächten oder Räumen aus Terrain;
 - Stufen bleiben die bestehende geprüfte zweidimensionale Etagenverbindung;
+- etagenübergreifende SICHT ist nur die Senkrechtprojektion durch offene Säulen
+  plus 2D-LOS je Ebene — diagonale Sicht über versetzte Ebenen oder Sicht durch
+  mehrere versetzte Öffnungen existiert nicht (`ray_clear_3d` bleibt ungenutzt);
 - Thieves'-Tools-Proficiency bleibt weiterhin nicht modelliert;
 - die Akzeptanzstrecke ist ein echter Node-JS-Harness, aber kein echter Browser
   mit Chromium/Playwright.

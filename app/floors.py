@@ -153,8 +153,22 @@ def remove(room_id, value):
     if db.q1("SELECT 1 AS hit FROM tokens WHERE room_id=? AND floor=? LIMIT 1",
              (room_id, name)) is not None:
         return False, "Tokens still stand on this floor"
-    b = [f for f in _rows(room)[0] if f != name]
-    a = [f for f in _rows(room)[1] if f != name]
+    # D160 — levels are positional (see level_map), so removing a MIDDLE storey
+    # would silently renumber every plane beyond it and could newly-JOIN planes
+    # that a now-removed slab used to separate. Refuse unless it is the
+    # outermost plane on its side, so survivors never move or re-join; the DM
+    # removes top-down / bottom-up instead. Maps and tokens are name-keyed, so
+    # an outside-in removal leaves their levels, positions and maps untouched.
+    below, above = _rows(room)
+    side, lst = ("below", below) if name in below else ("above", above)
+    if lst and name != lst[-1]:
+        return False, (f"'{name}' has another floor "
+                       f"{'below' if side == 'below' else 'above'} it "
+                       f"('{lst[-1]}') — remove the outer floors first "
+                       f"({'bottom-up' if side == 'below' else 'top-down'}) so the "
+                       f"remaining floors keep their height and stored maps.")
+    b = [f for f in below if f != name]
+    a = [f for f in above if f != name]
     db.x("UPDATE rooms SET floors=? WHERE id=?", (_dump(b, a), room_id))
     db.x("DELETE FROM floor_maps WHERE room_id=? AND floor=?", (room_id, name))  # D88
     return True, parse(room)

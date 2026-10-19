@@ -1014,3 +1014,39 @@ nachgereicht. Details: `docs/RECOVERY_2026-10-17.md`.
 - Bewusst offen (D159 nicht verlangt): integrierter Diagonal-Sicht-Ray statt
   offener-Säule+Pro-Ebene-LOS (`ray_clear_3d` bleibt Primitiv), Springen/Fallen,
   vertikales Klettern/Schwimmen.
+
+## D160 — Qualitäts-/Regressionstore DnDTable (vertikale 3D + Etagen)
+
+- Ziel: kein Feature, sondern adversariale Prüfung des D114/D158/D159-Systems über
+  echte Server- und Browser-Pfade; Bericht `docs/QUALITY_GATE_D160.md`.
+- Behobener Bug (Datenintegrität, Q2): Löschen einer mittleren Etage ordnete die
+  Karten der darüberliegenden Ebenen still den falschen Etagen zu. `app/floors.py`
+  erlaubt Entfernen nur der äußersten Ebene je Seite, sonst `400` + Grund;
+  `30_room.js` zeigt den Grund per Toast. `test_d160_floors.py` belegt
+  fail-before/pass-after; Stack, Level, Tokenposition und gespeicherte Karten
+  bleiben unverändert.
+- Neue Tests (32): `test_d160_floors.py` (3), `test_d160_geometry.py` (20,
+  Shaft-Projektion statt 3D-Ray, level-gap fail-closed, slab vs. offenes Volumen,
+  wandgesperrtes Zwischenlevel, OOB, Groß-Token-Säule, Flug ≥3, Reload/2-Client,
+  ruhender Flieger = dokumentierte Grenze), `test_d160_authority.py` (8,
+  Fremd-/cross-floor-Move, Etagen-/Teleport-Autorität, versiegeltes-Etage-Token nie
+  im Spieler-`/state`), `test_d160_perf.py` (1).
+- Perf gemessen: `maps_for(9)` ≈ 6.27 ms; `observable_cells`/Token ≈ 0.02–0.12 ms
+  (1..200). Keine persistente Sicht-Cache; pro Event neu berechnet.
+- Echter Dual-Chromium-E2E `scripts/e2e_d160.mjs` (Wegwerf-Instanz auf Loopback
+  8013, Build aus aktuellem Baum), rc=0: A Raum-Löschung + `403` für Spieler;
+  B signed Stack + plane-B-Wand über Reload persistiert; C E+3-Token + Badge `E+3`
+  und vom Spieler über offene Säule gesehen; D Säule versiegeln→Sicht weg,
+  öffnen→wieder da (Server-Gate); E Anzeige-filter bewegt Ebene nicht, dem
+  Spieler verborgen; F versiegeltes-Etage-Token DM-only; G `init_start` → 5 in
+  Reihenfolge; H Reload im Edit = Zustand intakt. Belege:
+  ./e2e-evidence/e2e-d160-*.png. Teardown: Container + Volume entfernt, 8013 frei.
+- Diagnostiziert (korrektes Verhalten, nicht behoben): Spielervisus = 6-Felder-
+  Radius in nicht-dunkler Karte, Darkvision nur bei `mp.dark`, Sichtquelle
+  besitzerbezogen (Kontrolle≠Besitz); bearbeitete Ebene legt Platte und deckt
+  Säule (Shaft braucht offene Zwischenzelle); cross-plane-Sicht ist sofort im
+  maßgeblichen Pro-Viewer-`/state`, Live-WS kann nach Karten-Edit erst nach
+  Refresh nachschieben (UX-Nachzieher, kein Sicherheitsfehler).
+- Kanon: 1137 → **1169 passed, 0 skipped, 0 failed (rc=0)**; Zahl zweifach
+  bestätigt (Fortschritts-Marks + Collect, da Image bei Pipe keine `passed`-Zeile
+  druckt). Feature-Matrix + DECISIONS (D160) + Quality-Gate-Doku ergänzt.
