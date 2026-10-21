@@ -25,6 +25,20 @@ class InvError(Exception):
     """Rejected mutation — the transaction rolls back, nothing is written."""
 
 
+def claimed(op_id, room_id, kind, ns=None):
+    """D131: NON-destructive replay probe — True when this op_id (same
+    namespace) was already claimed. Lets the casting-time gate answer a
+    double-fired cast silently BEFORE the turn/action checks, so a replay
+    never surfaces as 'No action left this turn'. Checks the namespaced key
+    and the legacy raw row exactly like _claim does."""
+    if not op_id:
+        return False
+    keys = [f"{ns}|{op_id}", op_id] if ns is not None else [op_id]
+    return db.q1("SELECT 1 AS ok FROM inv_ops WHERE room_id=? AND kind=? "
+                 "AND op_id IN (%s)" % ",".join("?" * len(keys)),
+                 (room_id, kind, *keys)) is not None
+
+
 def _claim(c, op_id, room_id, kind, ns=None):
     """Claim an op_id inside the caller's transaction. False = already claimed.
     D94: client-chosen op_ids are claimed under a server-side namespace
@@ -58,6 +72,7 @@ def entry_from_def(d, qty):
     return gear.clean_items([{
         "name": d["name"], "kind": d.get("kind", "other"),
         "desc": d.get("desc", ""), "weight": d.get("weight", 0),
+        "value": d.get("value", 0),
         "stackable": bool(d.get("stackable")), "def_id": d["id"],
         "props": db.j(d.get("props"), {}) or {}, "qty": qty,
     }])[0]
@@ -76,11 +91,16 @@ def clean_def(d):
         weight = max(0.0, min(9999.0, round(float(d.get("weight", 0)), 1)))
     except (TypeError, ValueError):
         weight = 0.0
+    try:
+        value = max(0.0, min(999999.0, round(float(d.get("value", 0)), 2)))
+    except (TypeError, ValueError):
+        value = 0.0
     did = str(d.get("id", "")).strip()[:24]
     if did and not did.replace("_", "").isalnum():
         return None
     return {"id": did, "name": name, "desc": str(d.get("desc", ""))[:200],
-            "kind": kind, "weight": weight, "stackable": 1 if d.get("stackable") else 0,
+            "kind": kind, "weight": weight, "value": value,
+            "stackable": 1 if d.get("stackable") else 0,
             "props": gear.clean_props(d.get("props"))}
 
 
@@ -89,11 +109,18 @@ def clean_def(d):
 def _stack_key(it):
     """Two entries may share a stack iff: the SAME DM definition, both
     stackable, and instance truth matches (charges, identified). Attunable
-    items never stack — attunement is instance truth."""
+    items never stack — attunement is instance truth. D106: a cursed instance
+    never stacks either — a curse belongs to EXACTLY one item, and merging a
+    cursed copy into an ordinary stack (or vice versa) would silently dilute
+    or duplicate that truth."""
     if not it.get("stackable") or not it.get("def_id"):
         return None
     if it.get("attunable") or it.get("attuned"):
         return None
+    if it.get("curse"):
+        return None
+    if it.get("pick"):        # D112: a DM-flagged stealable instance is its own
+        return None           # truth — never dilute it by merging with a normal stack
     return (it["def_id"], it.get("charges", -1), bool(it.get("identified", True)),
             it.get("heal", ""))
 
@@ -148,6 +175,18 @@ def strip_slots(equip, items):
     return equip
 
 
+def _ownership_moves(entry):
+    """D106: an instance that CHANGES HANDS keeps its curse — but `revealed`
+    is knowledge of the FORMER owner, and knowledge does not travel. Only the
+    moving copy is reset (never the source entry, which may still exist as the
+    remainder of a stack); a plain mutation (equip/use/rest) never calls this.
+    The curse itself is untouchable here — an owner change can never clear it."""
+    c = entry.get("curse")
+    if isinstance(c, dict) and c.get("revealed"):
+        entry["curse"] = dict(c, revealed=False)
+    return entry
+
+
 # ---------- character mutations (each one tx, replay-guarded) ----------
 
 def _char(c, char_id):
@@ -158,7 +197,9 @@ def _char(c, char_id):
 
 
 def _load(c, row):
-    items = gear.clean_items(db.j(row.get("items"), []))
+    # D106: this is the engine's trusted read — it round-trips the secret curse
+    # field through every mutation. Client-facing paths never use _load.
+    items = gear.clean_items(db.j(row.get("items"), []), keep_curse=True)
     equip = gear.clean_equipment(db.j(row.get("equipment"), {}), items)
     return items, equip
 
@@ -212,6 +253,10 @@ def adjust(room_id, char_id, action, item_id, other_id=None, qty=1, op_id=None):
         if action == "split":
             if not it.get("stackable"):
                 raise InvError("Not stackable")
+            if it.get("curse"):
+                # D106: a split copies the entry — copying a curse would mint a
+                # SECOND cursed instance. Cursed instances are always qty=1.
+                raise InvError("A cursed item cannot be split")
             try:
                 q = int(qty)
             except (TypeError, ValueError):
@@ -249,22 +294,47 @@ def equip_slot(room_id, char_id, slot, item_id, op_id=None):
 
     def fn(items, equip):
         if item_id is None:
+            prev = equip.get(slot)
             equip[slot] = None
-            return {"slot": slot, "item": None}
+            # D111: carry the vacated id out of the mutation so the caller can
+            # fire the item's unequip trigger — nothing else reads 'prev'.
+            return {"slot": slot, "item": None, "prev": prev}
         it = find(items, item_id)
         if it is None:
             raise InvError("Item not found")
         if not gear.can_equip(it, slot, equip, items):
             raise InvError(f"{it['name']} does not fit the {slot.replace('_', ' ')}")
-        if (it.get("props") or {}).get("two_handed") and slot == "main_hand":
-            equip["off_hand"] = None            # two-handed: the off hand is free
+        if gear.wields_two_handed(it) and slot == "main_hand":
+            equip["off_hand"] = None            # two-hander / versatile gripped two: off hand frees
         if slot == "off_hand":
             held = find(items, equip.get("main_hand"))
-            if held and (held.get("props") or {}).get("two_handed"):
+            if held and gear.wields_two_handed(held):
                 raise InvError(f"{it['name']} does not fit the off hand")
         equip[slot] = it["id"]
         return {"slot": slot, "item": it["name"]}
     return mutate_char(room_id, char_id, fn, op_id, "equip")
+
+
+def set_grip(room_id, char_id, item_id, grip, op_id=None):
+    """D98: choose how a VERSATILE weapon currently wielded in the MAIN hand is
+    gripped — one-handed (base dice, off hand free) or two-handed (the two-handed
+    dice, off hand cleared so a shield returns to the pack). The whole decision —
+    including the hand/shield conflict — is resolved atomically in one claim."""
+    grip = "two" if str(grip).lower() in ("two", "2h", "two-handed", "2") else "one"
+
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        if equip.get("main_hand") != it["id"]:
+            raise InvError("Equip it in the main hand first")
+        if not (it.get("props") or {}).get("versatile"):
+            raise InvError(f"{it['name']} is not a versatile weapon")
+        it["grip"] = grip
+        if grip == "two":
+            equip["off_hand"] = None
+        return {"item": it["name"], "grip": grip}
+    return mutate_char(room_id, char_id, fn, op_id, f"grip:{grip}")
 
 
 # ---------- transfers (both sides in ONE transaction) ----------
@@ -289,7 +359,8 @@ def transfer(room_id, from_char, to_char, item_id, qty, op_id=None):
         it, q = _take(items_s, item_id, qty)
         copy = dict(it)
         copy["qty"] = q
-        got, _ = stack_add(items_d, copy)       # full target → InvError → ROLLBACK
+        _ownership_moves(copy)                    # D106: revealed never travels
+        got, _ = stack_add(items_d, copy)         # full target → InvError → ROLLBACK
         strip_slots(equip_s, items_s)
         _store(c, from_char, items_s, equip_s)
         _store(c, to_char, items_d, equip_d)
@@ -301,14 +372,17 @@ def transfer(room_id, from_char, to_char, item_id, qty, op_id=None):
 def container_load(c, room_id, object_id):
     row = c.execute("SELECT items FROM containers WHERE room_id=? AND object_id=?",
                     (room_id, object_id)).fetchone()
-    return gear.clean_items(db.j(row["items"], []) if row else [])
+    # trusted in-transaction read (D106: curses survive fill/remove/move round-trips)
+    return gear.clean_items(db.j(row["items"], []) if row else [], keep_curse=True)
 
 
-def container_peek(room_id, object_id):
-    """Read-only view (inspect answers from this — never a /state payload)."""
+def container_peek(room_id, object_id, curse=False):
+    """Read-only view (inspect answers from this — never a /state payload).
+    D106: curse=True is the DM-only reply variant; every player-facing inspect
+    keeps the default (secrets stripped by clean_items)."""
     row = db.q1("SELECT items FROM containers WHERE room_id=? AND object_id=?",
                 (room_id, object_id))
-    return gear.clean_items(db.j(row["items"], []) if row else [])
+    return gear.clean_items(db.j(row["items"], []) if row else [], keep_curse=curse)
 
 
 def _container_store(c, room_id, object_id, items):
@@ -373,15 +447,435 @@ def container_move(room_id, object_id, char_id, item_id, qty, op_id=None):
             it, q = _take(items_s, item_id, qty)
             copy = dict(it)
             copy["qty"] = q
+            _ownership_moves(copy)                # D106: pack leaving its owner
             got, _ = stack_add(cont, copy)
             direction, name = "into", it["name"]
         else:                                     # take: container → character
             cit, q = _take(cont, item_id, qty)
             copy = dict(cit)
             copy["qty"] = q
+            _ownership_moves(copy)                # D106: fresh instance for a new owner
             got, _ = stack_add(items_s, copy)     # full inventory → ROLLBACK
             direction, name = "from", cit["name"]
         _container_store(c, room_id, object_id, cont)
         strip_slots(equip_s, items_s)
         _store(c, char_id, items_s, equip_s)
     return {"name": name, "qty": q, "direction": direction, "item_id": got["id"]}
+
+
+# ---------- D99: currency (integer copper pieces) ----------
+# A purse is ONE non-negative integer of copper pieces (see gear.py). Amounts
+# ALWAYS arrive as (integer, denomination) and convert through gear.to_cp — a
+# client can never send a copper total that would mint money. Every mutation is
+# transactional (BEGIN IMMEDIATE), replay-guarded by an op_id namespaced to the
+# character/object it acts on, and can NEVER drive a balance negative: a
+# shortfall raises BEFORE any store, so the whole transaction rolls back.
+
+def wallet_of(row):
+    return gear.clean_wallet(row.get("wallet", 0) if isinstance(row, dict) else 0)
+
+
+def _wallet_store(c, char_id, cp):
+    c.execute("UPDATE characters SET wallet=? WHERE id=?",
+              (gear.clean_wallet(cp), char_id))
+
+
+def _wallet_read(c, char_id):
+    r = c.execute("SELECT wallet FROM characters WHERE id=?", (char_id,)).fetchone()
+    if r is None:
+        raise InvError("No such character")
+    return gear.clean_wallet(r["wallet"])
+
+
+def mutate_wallet(room_id, char_id, fn, op_id=None, kind="coins"):
+    """fn(copper)->(new_copper, result). The read happens INSIDE the tx, so two
+    operations on one purse serialise on the DB, never a lost update."""
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, kind, char_id):
+            return "replay"
+        new_cp, res = fn(_wallet_read(c, char_id))
+        new_cp = gear.clean_wallet(new_cp)
+        if new_cp < 0:
+            raise InvError("Not enough coin")
+        _wallet_store(c, char_id, new_cp)
+    return res
+
+
+def grant_coins(room_id, char_id, cp, op_id=None):
+    """DM adds coin to a purse."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    return mutate_wallet(room_id, char_id,
+                         lambda cur: (cur + cp, {"cp": cp}), op_id, "coins_grant")
+
+
+def remove_coins(room_id, char_id, cp, op_id=None):
+    """DM withdraws coin; a shortfall refuses the whole op."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    def fn(cur):
+        if cur < cp:
+            raise InvError("Not enough coin")
+        return (cur - cp, {"cp": cp})
+    return mutate_wallet(room_id, char_id, fn, op_id, "coins_remove")
+
+
+def transfer_coins(room_id, from_char, to_char, cp, op_id=None):
+    """Player→player hand-off. Both characters are members of THIS room (checked
+    by _validate_parties); the debit and the credit commit together or not at all."""
+    _validate_parties(room_id, from_char, to_char)
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "coins_transfer", from_char):
+            return "replay"
+        src = _wallet_read(c, from_char)
+        dst = _wallet_read(c, to_char)
+        if src < cp:
+            raise InvError("Not enough coin")
+        if dst + cp > gear.WALLET_MAX:
+            raise InvError("Recipient purse is full")
+        _wallet_store(c, from_char, src - cp)
+        _wallet_store(c, to_char, dst + cp)
+    return {"cp": cp, "to": to_char}
+
+
+# ---------- D99: container coin (loot a character can scoop out) ----------
+
+def container_coins_peek(room_id, object_id):
+    row = db.q1("SELECT coins FROM containers WHERE room_id=? AND object_id=?",
+                (room_id, object_id))
+    return gear.clean_wallet(row["coins"]) if row else 0
+
+
+def _container_coins_read(c, room_id, object_id):
+    r = c.execute("SELECT coins FROM containers WHERE room_id=? AND object_id=?",
+                  (room_id, object_id)).fetchone()
+    return gear.clean_wallet(r["coins"]) if r else 0
+
+
+def _container_coins_store(c, room_id, object_id, cp):
+    # UPSERT touching ONLY coins + updated_at; the items column is left untouched
+    # (on a fresh row it keeps its '{}' default) so coin and item paths can't
+    # clobber each other regardless of which runs first.
+    c.execute("INSERT INTO containers(room_id,object_id,coins,updated_at) "
+              "VALUES(?,?,?,datetime('now')) ON CONFLICT(room_id,object_id) "
+              "DO UPDATE SET coins=excluded.coins, updated_at=excluded.updated_at",
+              (room_id, object_id, gear.clean_wallet(cp)))
+
+
+def container_fill_coins(room_id, object_id, cp, op_id=None):
+    """DM fills (or a player drops) coin into a container."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_coins_fill", object_id):
+            return "replay"
+        cur = _container_coins_read(c, room_id, object_id)
+        if cur + cp > gear.WALLET_MAX:
+            raise InvError("Hoard too large")
+        _container_coins_store(c, room_id, object_id, cur + cp)
+    return {"cp": cp}
+
+
+def container_take_coins(room_id, char_id, object_id, cp, op_id=None):
+    """A character moves coin OUT of a container into their purse — one tx, one
+    op_id claim namespaced to the object, so a double-click cannot duplicate it."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_coins_take", object_id):
+            return "replay"
+        hoard = _container_coins_read(c, room_id, object_id)
+        if hoard < cp:
+            raise InvError("Not enough coin in the container")
+        purse = _wallet_read(c, char_id)
+        if purse + cp > gear.WALLET_MAX:
+            raise InvError("Your purse is full")
+        _container_coins_store(c, room_id, object_id, hoard - cp)
+        _wallet_store(c, char_id, purse + cp)
+    return {"cp": cp}
+
+
+# ---------- D105: forced take-out + DM-side coin removal (NPC carcasses) ----------
+
+def container_give(room_id, object_id, char_id, item_id, qty, op_id=None):
+    """FORCED container→character move (looting). container_move decides its
+    direction by where the item is — a character who already carries a stack of
+    the same definition would silently PUT INTO the corpse instead of taking.
+    Loot can only ever run one way: out of the container. One transaction, one
+    op_id claim namespaced to the character, so a replay after a reconnect
+    answers 'replay' instead of duplicating (D105)."""
+    try:
+        qty = int(qty)
+    except (TypeError, ValueError):
+        raise InvError("Quantity must be a whole number")
+    if qty <= 0:
+        raise InvError("Quantity must be positive")
+    if db.q1("SELECT 1 AS hit FROM room_members WHERE room_id=? AND character_id=?",
+             (room_id, char_id)) is None:
+        raise InvError("Not a character of this room")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_give", char_id):
+            return "replay"
+        src = _char(c, char_id)
+        items_s, equip_s = _load(c, src)
+        cont = container_load(c, room_id, object_id)
+        cit, q = _take(cont, item_id, qty)          # missing/too-few -> InvError
+        copy = dict(cit)
+        copy["qty"] = q
+        _ownership_moves(copy)                      # D106: loot is an owner change
+        got, _ = stack_add(items_s, copy)
+        _container_store(c, room_id, object_id, cont)
+        strip_slots(equip_s, items_s)
+        _store(c, char_id, items_s, equip_s)
+    return {"name": cit["name"], "qty": q, "item_id": got["id"]}
+
+
+def container_remove_coins(room_id, object_id, cp, op_id=None):
+    """DM-side removal of coin from a container WITHOUT a receiving purse (the
+    DM decides where the gold went; world items vanish the same way). Mirrors
+    container_take_coins' shortfall rule: it raises BEFORE storing, so nothing
+    is written and the transaction rolls back; negative balances are impossible."""
+    cp = gear.clean_wallet(cp)
+    if cp <= 0:
+        raise InvError("Amount must be positive")
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_coins_remove", object_id):
+            return "replay"
+        hoard = _container_coins_read(c, room_id, object_id)
+        if hoard < cp:
+            raise InvError("Not enough coin in the container")
+        _container_coins_store(c, room_id, object_id, hoard - cp)
+    return {"cp": cp}
+
+
+# ---------- D112: DM authorization of "pickable" (stealable) instances ----------
+# The `pick` flag is DATA a DM sets on a specific instance to authorize that a
+# thief may attempt to lift exactly that item and, on a clean steal, be shown
+# its name. It is the ONLY way an item becomes stealable at all (the pickpocket
+# handler refuses any unflagged item), which is what keeps a successful steal
+# from ever leaking an unauthorised inventory. Additive to the item entry.
+
+def set_pick_char(room_id, char_id, item_id, value, op_id=None):
+    """DM toggles the stealable flag on one of a CHARACTER's items."""
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        it["pick"] = bool(value)
+        return {"item_id": it["id"], "name": it["name"], "pick": bool(value)}
+    return mutate_char(room_id, char_id, fn, op_id, f"pick:{bool(value)}")
+
+
+def container_set_pick(room_id, object_id, item_id, value, op_id=None):
+    """DM toggles the stealable flag on one item inside a container (incl. an
+    NPC's ``tok:<id>`` gear) — a living NPC's gear, which looting never opens."""
+    def fn(items):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        it["pick"] = bool(value)
+        return {"item_id": it["id"], "name": it["name"], "pick": bool(value)}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_pick", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res
+
+
+# ---------- D106: secret per-instance curses (DM metadata, storage side) ----------
+# THE single mutation site for the curse field — handlers authorise, these
+# write. Everything here runs inside the same tx/op_id machinery as every other
+# inventory mutation: a curse change can neither duplicate an item, half-apply,
+# nor survive a replayed op_id.
+
+def _curse_target(items, item_id):
+    """Resolve the cursed instance in `items`, carving a stack first: marking
+    a qty>1 stack curses EXACTLY ONE piece (an atomic qty-1 carve-out; the
+    rest of the stack stays ordinary). A cursed entry is always qty=1 — a
+    hand-corrupted cursed stack is refused, never split (that would mint a
+    second cursed instance)."""
+    it = find(items, item_id)
+    if it is None:
+        raise InvError("Item not found")
+    try:
+        qty = int(it.get("qty", 1))
+    except (TypeError, ValueError):
+        qty = 1
+    if qty > 1:
+        if it.get("curse"):
+            raise InvError("Corrupt cursed stack — clear the curse first")
+        if len(items) >= 40:                      # gear.clean_items entry cap —
+            raise InvError("Inventory is full")   # a carve-out must not overflow it
+        it["qty"] = qty - 1
+        single = dict(it)
+        single["id"] = new_item_id(items)
+        single["qty"] = 1
+        items.append(single)
+        it = single
+    return it
+
+
+def _curse_store(it, curse, revealed=None):
+    """Author metadata on the resolved entry. The authored dict overrides ONLY
+    the keys it carries; anything else the entry already had (D113 trigger /
+    effects / active) is PRESERVED, so editing the secret text never silently
+    dis-arms a curse and re-arming never rewrites the text. revealed=None keeps
+    the current disclosure flag (editing the text does not un-disclose it)."""
+    if curse is None:
+        it.pop("curse", None)
+        return None
+    prev = it.get("curse") or {}
+    merged = dict(prev)
+    merged.update(curse)
+    rev = bool(prev.get("revealed")) if revealed is None else bool(revealed)
+    stored = gear.clean_curse(dict(merged, revealed=rev))
+    if stored:
+        it["curse"] = stored
+    else:
+        it.pop("curse", None)
+    return stored
+
+
+def curse_set(room_id, char_id, item_id, curse, op_id=None):
+    """DM creates/updates the secret curse on one character-carried instance."""
+    def fn(items, equip):
+        it = _curse_target(items, item_id)
+        stored = _curse_store(it, curse)
+        return {"name": it["name"], "item_id": it["id"], "curse": stored}
+    return mutate_char(room_id, char_id, fn, op_id, "curse_set")
+
+
+def curse_clear(room_id, char_id, item_id, op_id=None):
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        it.pop("curse", None)
+        return {"name": it["name"], "item_id": it["id"]}
+    return mutate_char(room_id, char_id, fn, op_id, "curse_clear")
+
+
+def curse_reveal(room_id, char_id, item_id, revealed, op_id=None):
+    """Flip the disclosure flag for the CURRENT owner. The DM handler pairs
+    True with a private whisper of the released fields. NEVER touches the D113
+    activation trio — knowing a curse's text and having it fire are independent
+    states (a curse can fire while unknown, or be revealed yet dormant)."""
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        curse = gear.clean_curse(it.get("curse"))
+        if curse is None:
+            raise InvError("That item carries no curse to reveal")
+        curse["revealed"] = bool(revealed)
+        it["curse"] = curse
+        return {"name": it["name"], "item_id": it["id"], "curse": curse}
+    return mutate_char(room_id, char_id, fn, op_id, f"curse_reveal:{int(bool(revealed))}")
+
+
+def curse_arm(room_id, char_id, item_id, trigger, effects, op_id=None):
+    """D113 DM-author: choose WHICH event an active curse fires and the
+    effect-grammar cell it runs. The cell is validated by the caller BEFORE
+    this is reached; here it is stored verbatim (re-validated at fire time).
+    Preserves the secret text and the current activation flag."""
+    def fn(items, equip):
+        it = _curse_target(items, item_id)
+        stored = _curse_store(it, {"trigger": trigger, "effects": effects})
+        if stored is None:
+            raise InvError("Arming needs a trigger and an effect")
+        return {"name": it["name"], "item_id": it["id"], "curse": stored}
+    return mutate_char(room_id, char_id, fn, op_id, "curse_arm")
+
+
+def curse_active(room_id, char_id, item_id, active, op_id=None):
+    """D113 DM-author: switch an armed curse on/off. This is the ONLY thing that
+    changes activation, and it changes nothing else (text, trigger, effects and
+    the disclosure flag all survive). An unarmed curse stays inert even here."""
+    def fn(items, equip):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        curse = gear.clean_curse(it.get("curse"))
+        if curse is None:
+            raise InvError("That item carries no curse")
+        if not (curse.get("trigger") and curse.get("effects")):
+            raise InvError("Nothing is armed on that curse yet")
+        it["curse"] = gear.clean_curse(dict(curse, active=bool(active)))
+        return {"name": it["name"], "item_id": it["id"], "curse": it["curse"]}
+    return mutate_char(room_id, char_id, fn, op_id, f"curse_active:{int(bool(active))}")
+
+
+def container_curse_set(room_id, object_id, item_id, curse, op_id=None):
+    def fn(items):
+        it = _curse_target(items, item_id)
+        stored = _curse_store(it, curse)
+        return {"name": it["name"], "item_id": it["id"], "curse": stored}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_curse_set", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res
+
+
+def container_curse_clear(room_id, object_id, item_id, op_id=None):
+    def fn(items):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        it.pop("curse", None)
+        return {"name": it["name"], "item_id": it["id"]}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_curse_clear", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res
+
+
+def container_curse_arm(room_id, object_id, item_id, trigger, effects, op_id=None):
+    def fn(items):
+        it = _curse_target(items, item_id)
+        stored = _curse_store(it, {"trigger": trigger, "effects": effects})
+        if stored is None:
+            raise InvError("Arming needs a trigger and an effect")
+        return {"name": it["name"], "item_id": it["id"], "curse": stored}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_curse_arm", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res
+
+
+def container_curse_active(room_id, object_id, item_id, active, op_id=None):
+    def fn(items):
+        it = find(items, item_id)
+        if it is None:
+            raise InvError("Item not found")
+        curse = gear.clean_curse(it.get("curse"))
+        if curse is None:
+            raise InvError("That item carries no curse")
+        if not (curse.get("trigger") and curse.get("effects")):
+            raise InvError("Nothing is armed on that curse yet")
+        it["curse"] = gear.clean_curse(dict(curse, active=bool(active)))
+        return {"name": it["name"], "item_id": it["id"], "curse": it["curse"]}
+    with db.tx() as c:
+        if not _claim(c, op_id, room_id, "container_curse_active", object_id):
+            return "replay"
+        items = container_load(c, room_id, object_id)
+        res = fn(items)
+        _container_store(c, room_id, object_id, items)
+    return res

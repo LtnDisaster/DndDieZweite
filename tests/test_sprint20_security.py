@@ -61,9 +61,18 @@ def _room_of(code):
     return db.q1("SELECT id FROM rooms WHERE code=?", (code,))["id"]
 
 
-def _add_floor(client, dm, code, name):
+def _add_floor(client, dm, code, name, ground=True):
     assert client.post(f"/api/rooms/{code}/floors", json={"name": name},
                        headers=H(dm)).status_code == 200
+    # D159: a fresh named plane is open AIR. These tests stage PC/owned tokens
+    # and templates ON the named plane, which needs a real standable slab — so
+    # the DM lays a floor, exactly as a DM authoring a walkable deck/crypt would.
+    if ground:
+        from app.room import net
+        rid = _room_of(code)
+        mp = net.get_map(rid, name)
+        mp["cells"] = [0] * (mp["w"] * mp["h"])
+        net.set_map(rid, mp, name)
 
 
 def _pc_token(code, ch):
@@ -339,22 +348,30 @@ def test_foreign_and_missing_floor_transitions_refuse_in_place(client):
     with ws_connect(client, dm, code) as wsd:
         npc = add_named(wsd, "Keeper", 16, 14)
     ptok = _pc_token(code, ch)
+    # D102: the token_floor channel is DM-only — a player cannot hop planes at
+    # will, whatever the target floor's validity or token ownership. The stair
+    # object remains the players' validated route (tested in test_stairs...).
     with ws_connect(client, player, code) as wsp:
         wsp.send_json({"type": "token_floor", "token_id": ptok["id"],
-                       "floor": "nowhere"})
-        assert "No such floor" in recv_until(wsp, "error",
-                                             fail_on_error=False)["payload"]["msg"]
+                       "floor": "crypt"})
+        assert "Only the DM" in recv_until(wsp, "error",
+                                           fail_on_error=False)["payload"]["msg"]
         wsp.send_json({"type": "token_floor", "token_id": npc, "floor": "crypt"})
-        assert recv_until(wsp, "error", fail_on_error=False)["payload"]["msg"] \
-            == "Not your token"
+        assert "Only the DM" in recv_until(wsp, "error",
+                                           fail_on_error=False)["payload"]["msg"]
     assert db.q1("SELECT floor FROM tokens WHERE id=?", (ptok["id"],))["floor"] == ""
     assert db.q1("SELECT floor FROM tokens WHERE id=?", (npc,))["floor"] == ""
-    # control: a legal own-token transition still works both directions
-    with ws_connect(client, player, code) as wsp:
-        wsp.send_json({"type": "token_floor", "token_id": ptok["id"], "floor": "crypt"})
-        assert recv_until(wsp, "token_floor")["payload"]["floor"] == "crypt"
-        wsp.send_json({"type": "token_floor", "token_id": ptok["id"], "floor": ""})
-        assert recv_until(wsp, "token_floor")["payload"]["floor"] == ""
+    # control: the DM's legal transitions work both directions and refuse
+    # unknown floors
+    with ws_connect(client, dm, code) as wsd:
+        wsd.send_json({"type": "token_floor", "token_id": ptok["id"],
+                       "floor": "nowhere"})
+        assert "No such floor" in recv_until(wsd, "error",
+                                             fail_on_error=False)["payload"]["msg"]
+        wsd.send_json({"type": "token_floor", "token_id": ptok["id"], "floor": "crypt"})
+        assert recv_until(wsd, "token_floor")["payload"]["floor"] == "crypt"
+        wsd.send_json({"type": "token_floor", "token_id": ptok["id"], "floor": ""})
+        assert recv_until(wsd, "token_floor")["payload"]["floor"] == ""
 
 
 def test_rider_cannot_change_floors_alone_and_pair_lands_together(client):

@@ -29,6 +29,7 @@ function connectWS(code){
       case "quests_changed": refreshRoom(); break;
       case "inv_changed": refreshRoom(); break;         // D92: inventory/equipment refetch
       case "inv_contents": showInvContents(p); break;   // D92: authorised container view (requester only)
+      case "curse_updated": applyCurseUpdate(p); break; // D106: DM-only authoritative curse patch
       case "whisper": appendGameLogMessage({ type:"whisper", body:p.text }); break;
       case "ambience": applyAudioState(p); break;
       case "sound": playSoundEvent(p); break;
@@ -47,7 +48,9 @@ function connectWS(code){
       }
       case "fog_changed": {
         const g = state.grid;
-        if (g){
+        // D102 plane guard: a fog brush stroke lands on ITS plane — painting it
+        // into a different plane's grid would invent terrain and fog memory.
+        if (g && String(p.floor || "") === String(state.viewFloor || "")){
           for (const idx in p.cells){ const i = +idx;
             g.explored[i] = p.cells[idx];
             if (p.terrain && p.terrain[idx] !== undefined) g.cells[i] = p.terrain[idx];
@@ -57,12 +60,17 @@ function connectWS(code){
         break;
       }
       case "initiative": state.init = p; renderInit(); break;
-      case "presence": state.online.add(p.username); renderOnline();
+      case "presence": {   // D153: offline was only announced in the log — the
+                          // roster set never shrank, so ghosts stayed online
+        if (p.online) state.online.add(p.username); else state.online.delete(p.username);
+        renderOnline();
         appendGameLogMessage({ type:"system", body: `${p.username} ${p.online ? "connected" : "disconnected"}` });
-        break;
+      } break;
       case "explored": { const g = state.grid;
-        if (g && p.cells) for (const i of p.cells){ g.explored[i] = 1;
-          if (p.terrain && p.terrain[i] !== undefined) g.cells[i] = p.terrain[i]; }
+        // D102 plane guard: reveals belong to the plane that was walked.
+        if (g && p.cells && String(p.floor || "") === String(state.viewFloor || ""))
+          for (const i of p.cells){ g.explored[i] = 1;
+            if (p.terrain && p.terrain[i] !== undefined) g.cells[i] = p.terrain[i]; }
         break; }
       case "map_changed": refreshRoom(); break;
       case "map_expanded": {
@@ -103,11 +111,18 @@ function connectWS(code){
                        if (state.room && state.room.role === "dm" && typeof renderViewFloor === "function") renderViewFloor();
                        if (t.owner_user_id === state.me.id) refreshRoom();  // D88: view follows your token
                        if (state.sel === p.token_id) renderSheet(t); } break; }
-      case "token_darkvision": { const t = state.tokens.find(t => t.id === p.token_id);
+       case "token_height": { const t = state.tokens.find(t => t.id === p.token_id);
+                      if (t){ t.height_ft = p.height_ft === undefined ? null : p.height_ft;
+                              t.elevation_ft = p.elevation_ft | 0;
+                              if (state.sel === p.token_id) renderSheet(t); } break; }
+       case "token_darkvision": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t) t.darkvision = p.radius | 0; } break;   // D89: owner-only sense
       case "floors_changed": { state.floors = p.floors || [""];  // D86: DM curated floor list
-                     if (typeof renderViewFloor === "function") renderViewFloor();
-                     if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel)); } break;
+                      if (p.floor_levels) state.floor_levels = p.floor_levels; // D159 signed levels
+                      if (typeof renderViewFloor === "function") renderViewFloor();
+                      if (typeof renderFloorRail === "function") renderFloorRail();
+                      if (typeof renderFloorPanel === "function") renderFloorPanel();
+                      if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel)); } break;
       case "token_image": { const t = state.tokens.find(t => t.id === p.token_id);
                      if (t){ t.image = p.image || "";           // D85: server-made /assets/ ref
                        if (state.sel === p.token_id) renderSheet(t); } break; }
@@ -155,7 +170,9 @@ function upsertToken(p){
   state.ghosts = state.ghosts.filter(g => g.id !== p.id);
   const t = state.tokens.find(t => t.id === p.id);
   if (t){ Object.assign(t, {label:p.label, color:p.color, owner_user_id:p.owner_user_id,
-                            character_id:p.character_id}); t.atx = p.x; t.aty = p.y;
+                            character_id:p.character_id, floor:p.floor || "",
+                            height_ft:p.height_ft === undefined ? null : p.height_ft,
+                            elevation_ft:p.elevation_ft | 0}); t.atx = p.x; t.aty = p.y;
           if (Math.abs(t.x - p.x) > cellSize()*3){ t.x = p.x; t.y = p.y; } }
   else state.tokens.push({...p, atx:null, aty:null});
 }

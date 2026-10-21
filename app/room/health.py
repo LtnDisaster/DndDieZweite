@@ -38,11 +38,16 @@ def _death_note(death):
     return f" — dying ({death['s']}✓/{death['f']}✗)"
 
 
-async def change_hp(room_id, tok, delta, *, crit=False, damage_type=None, broadcast_change=True):
+async def change_hp(room_id, tok, delta, *, crit=False, damage_type=None,
+                    broadcast_change=True, from_trigger_depth=0):
     """Apply a signed HP change to a PC token or NPC block.
 
     Negative values are damage. ``damage_type`` makes defensive reduction explicit;
     when it is omitted, existing generic/manual HP behavior is preserved.
+    ``from_trigger_depth`` (D113): a damage that itself came from inside an
+    ``effectops`` trigger chain (> 0) must NOT re-open the ``on_damaged`` seam —
+    that is the recursion kill-switch for cursed "on equip → damage the wearer"
+    loops. The CONCENTRATION response is independent of it and always runs.
     """
     if tok is None:
         return None
@@ -69,6 +74,9 @@ async def change_hp(room_id, tok, delta, *, crit=False, damage_type=None, broadc
             hp = prev
         block["hp"] = hp
         db.x("UPDATE tokens SET npc=? WHERE id=?", (db.json_dumps(block), tok["id"]))
+        if delta < 0 and damage > 0:
+            from .concentration import on_damage as _conc_npc
+            await _conc_npc(room_id, tok, max(0, prev - hp), downed=(hp <= 0))
         if broadcast_change and hp != prev:
             await broadcast(room_id, "snapshot", None)
         return {"kind": "npc", "name": tok.get("label", "NPC"), "hp": hp, "max_hp": max_hp,
@@ -98,9 +106,17 @@ async def change_hp(room_id, tok, delta, *, crit=False, damage_type=None, broadc
         if hp <= 0:
             if death is None or prev > 0 or (death.get("stable") and not death.get("dead")):
                 death = D.new()
-            if prev <= 0 and damage > 0:
-                death["f"] = min(3, death["f"] + (2 if crit else 1))
-            if damage >= max_hp:
+            if prev <= 0:
+                if damage > 0:
+                    death["f"] = min(3, death["f"] + (2 if crit else 1))
+                if remaining >= max_hp:
+                    death["dead"] = True
+                    death["f"] = 3
+            elif remaining - prev >= max_hp:
+                # D154 (2024 SRD): instant death needs the damage that REMAINS
+                # after the blow reaches 0 HP to meet max_hp. The old rule
+                # compared RAW damage (incl. temp-HP absorption) and killed a
+                # full-health hero at exactly max_hp damage.
                 death["dead"] = True
                 death["f"] = 3
             D.apply_thresholds(death)
@@ -110,6 +126,30 @@ async def change_hp(room_id, tok, delta, *, crit=False, damage_type=None, broadc
             death = None
             db.x("UPDATE tokens SET death=NULL WHERE id=?", (tok["id"],))
             changed = True
+
+        if damage > 0 and changed:
+            # D113: the 2024 concentration response — a CON save as the ACTUAL HP
+            # lost (post-resistance, post-temp-HP) lands, or concentration snaps
+            # outright when the hit drops the caster. Runs regardless of trigger
+            # depth (losing concentration never chains into another trigger).
+            from .concentration import on_damage as _conc
+            await _conc(room_id, tok, max(0, prev - hp), downed=(hp <= 0))
+
+        if damage > 0 and changed and not from_trigger_depth:
+            # D111: the on_damaged seam — AFTER the authoritative write, the
+            # victim's worn items with that trigger fire through the shared
+            # effect core (guarded: no chain, claimed per hit, budgeted).
+            # D113: SUPPRESSED when this damage came from inside a trigger chain
+            # (from_trigger_depth > 0) — the recursion kill-switch.
+            from .. import effectops
+            equip = db.j(ch.get("equipment"), {}) or {}
+            worn = {v for v in equip.values() if v}
+            worn_items = [i for i in gear.clean_items(db.j(ch.get("items"), []),
+                                                      keep_curse=True)
+                          if i["id"] in worn]
+            if worn_items:
+                await effectops.fire(room_id, "on_damaged", token=tok,
+                                     caster=None, items=worn_items, round_uid="")
 
         if broadcast_change and changed:
             await broadcast(room_id, "snapshot", None)

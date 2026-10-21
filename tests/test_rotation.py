@@ -198,7 +198,7 @@ def test_tactical_rotates_body_but_not_text():
     and RESTORES it before the upright label/bar text (mirrors 15B-style
     loop-scope pins)."""
     src = (ROOT / "app/static/js/50_canvas.js").read_text()
-    loop = src[src.index("for (const t of state.tokens){"):src.index("function evtPos")]
+    loop = src[src.index("for (const t of viewTokens()){"):src.index("function evtPos")]
     rot_at = loop.index("ctx.rotate(")
     restore_at = loop.index("ctx.restore()", rot_at)
     label_at = loop.index("ctx.fillText(t.label,")
@@ -217,7 +217,8 @@ def test_hittest_follows_the_rotated_artwork():
     core = (ROOT / "app/static/js/10_core.js").read_text()
     canvas = (ROOT / "app/static/js/50_canvas.js").read_text()
     vis = core[core.index("const SIZE_FOOTPRINT"):core.index("\n}", core.index("function visualSpan")) + 2]
-    hit = canvas[canvas.index("function tokenAt"):canvas.index("function ownToken")]
+    # D102: tokenAt filters by onPlane — the plane helpers ride along.
+    hit = canvas[canvas.index("function viewerPlane"):canvas.index("function ownToken")]
     c = 50
     tok = {"id": 7, "x": 12.5 * c, "y": 12.5 * c, "size": "Medium",
            "fw": None, "fh": None, "vw": 3, "vh": 7, "rot": 90}

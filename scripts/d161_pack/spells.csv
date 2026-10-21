@@ -1,0 +1,15 @@
+id,name,level,school,casting_ability,targeting,shape,size_ft,range_ft,casting_time,duration,concentration,resolution,save,on_save,damage_dice,damage_type,heal_dice,upcast_step,upcast_scaling,scale_tiers,class_list,scaling_note,effects,manual
+tok_fire,Spark of Ash,0,evocation,int,single,,,120,1 action,instant,,attack,,,1d8,fire,,,,5:+1d8;11:+1d8;17:+1d8,wizard,,,
+ray_frost,Ray of Frost,0,evocation,int,single,,,120,1 action,instant,,attack,,,1d8,cold,,,,,wizard,,,
+ghost_touch,Ghost Touch,0,necromancy,int,single,,,120,1 action,instant,,attack,,,1d6,necrotic,,,,,wizard,,,
+sacred_flame,Sacred Flame,0,evocation,wis,single,,,60,1 action,instant,,save,dex,half,1d8,radiant,,,,5:+1d8;11:+1d8;17:+1d8,cleric,,,
+kindle_light,Kindle Light,0,evocation,wis,single,,,5,1 action,instant,,auto,,,,,1d4,,,,cleric,,,Touch-range mending light; DM narrates detail.
+force_dart,Force Dart,1,evocation,int,single,,,120,1 action,instant,,auto,,,2d4+2,force,,+1d4,1,,wizard,,,Auto-hit dart; +1d4 per slot level above 1st.
+fire_burst,Ashen Burst,1,evocation,int,area,circle,15,60,1 action,instant,,save,dex,half,3d8,fire,,+1d8,1,,wizard,,,
+arcane_ward2,Arcane Ward,1,abjuration,int,self,,,5,1 action,1 hour,1,auto,,,,,,,,,wizard,,"{""v"":1,""ops"":[{""op"":""temp_hp"",""expr"":""2d4"",""target"":""self""}]}",2d4 temporary hit points on cast.
+mend_pain,Mend Pain,1,necromancy,wis,single,,,5,1 action,instant,,auto,,,,,3d8,+3d8,1,,cleric,,,+3d8 per slot level above 1st. Caster modifier NOT added (engine limit — documented).
+spare_light,Spare the Light,1,necromancy,wis,single,,,5,1 bonus action,instant,,auto,,,,,1d4,,,,cleric,,,"Restore 1d4 HP, bonus action."
+shield_faith,Shield of Faith,1,abjuration,wis,self,,,5,1 bonus action,1 minute,1,auto,,,,,,,,,cleric,,"{""v"":1,""ops"":[{""op"":""temp_hp"",""expr"":""2d4+2"",""target"":""self""}]}",2d4+2 temp HP on cast; concentration flag set (flat ongoing bonus DM-adjudicated).
+sanctuary_ward,Sanctuary Ward,1,abjuration,wis,self,,,5,1 reaction,1 minute,1,auto,,,,,,,,,cleric,,"{""v"":1,""ops"":[{""op"":""temp_hp"",""expr"":""1d8"",""target"":""self""}]}",Casting time 'reaction' recorded; reaction not enforced by engine (documented limit). 1d8 temp HP.
+bane_word,Bane,1,enchantment,wis,area,circle,30,30,1 action,1 minute,1,save,wis,negate,,,,,,,cleric,,"{""v"":1,""ops"":[{""op"":""condition"",""key"":""shaken"",""rounds"":1,""target"":""target""}]}",Failed WIS save: shaken (disadvantage attacks/checks) 1 round.
+snare_web,Snaring Web,2,conjuration,int,area,circle,20,60,1 action,instant,,save,str,negate,,,,,,,wizard,,"{""v"":1,""ops"":[{""op"":""condition"",""key"":""restrained"",""rounds"":3,""target"":""target""}]}",Failed STR save: restrained 3 rounds (no auto concentration clock — documented limit).

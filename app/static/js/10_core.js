@@ -16,9 +16,31 @@ const state = { me:null, room:null, roomDeleted:false, ws:null, online:new Set()
                  sounds:[],
                  notes:[], encounters:[], creatures:[], encRows:[], encId:null, noteId:null,
                   cam:{ox:0, oy:0}, camT:{ox:0, oy:0}, camD:{ox:0, oy:0},
-                  keys:new Set(), tickOn:false,
-                  viewMode:"tactical" };
+                   keys:new Set(), tickOn:false,
+                   viewMode:"tactical", viewFilter:"current", floor_levels:null };
 const VISION_R = 6;
+/* D159 — shared signed-floor labels. Loaded before 30_room/50_canvas so both
+   the DOM panels and the canvas renderer read ONE source of truth: the server's
+   floor_levels (name -> signed level, primary 0). Degrades to a stack index if
+   an older payload omits floor_levels, so a label is never a hard blank. */
+function floorLabelOf(name){ return name === "" ? "Ground" : name; }
+function _floorLevelsMap(){
+  const lm = (typeof state !== "undefined") && state.floor_levels;
+  if (lm && typeof lm === "object") return lm;
+  const map = {};
+  ((typeof state !== "undefined" && state.floors) || [""]).forEach((f, i) => { map[f] = i; });
+  return map;
+}
+function floorLevelOf(name){ const lm = _floorLevelsMap(); return (name in lm) ? lm[name] : 0; }
+function floorBadge(name){ const L = floorLevelOf(name);
+  return L < 0 ? "E\u2212" + (-L) : (L > 0 ? "E+" + L : "E0"); }
+function floorDelta(name, viewed){ const d = floorLevelOf(name) - floorLevelOf(viewed);
+  return d === 0 ? "" : (d > 0 ? "\u25B2+" + d : "\u25BC\u2212" + (-d)); }
+function floorTag(name){ return floorBadge(name) + " · " + floorLabelOf(name); }
+function floorStack(){
+  return ((typeof state !== "undefined" && state.floors) || [""]).slice()
+    .sort((a, b) => floorLevelOf(a) - floorLevelOf(b)); }
+function viewFilterMode(){ return state.viewFilter === "current" ? "current" : "all"; }
 const SIZE_FOOTPRINT = { Tiny:1, Small:1, Medium:1, Large:2, Huge:3, Gargantuan:4 };
 /* D81/D83: THE client footprint derivation — server fw/fh win, category is
    the square fallback, and the token's facing ORIENTS the box (rot 90/270
@@ -52,6 +74,18 @@ function tokenSpeeds(t){
   const walk = +n.speed || (m && m.char && +m.char.speed) || 30;
   return { walk: walk, fly: +n.fly || 0, swim: +n.swim || 0, climb: +n.climb || 0 };
 }
+/* D114: vertical token volume — presentation mirrors of app/vertical.py only.
+   The server owns all cross-plane geometry; these helpers never derive occupancy. */
+const SIZE_HEIGHT_FT = { Tiny:5, Small:5, Medium:5, Large:10, Huge:15, Gargantuan:20 };
+function tokenDefaultHeightFt(t){
+  return SIZE_HEIGHT_FT[((t && t.size) || "Medium").replace(/^\w/, c => c.toUpperCase())] || 5;
+}
+function tokenHeightFt(t){
+  const h = t && t.height_ft;
+  return h === null || h === undefined ? tokenDefaultHeightFt(t) : Math.max(0, Math.min(200, +h || 0));
+}
+function tokenElevationFt(t){ return Math.max(0, Math.min(200, +((t && t.elevation_ft) || 0) || 0)); }
+
 /* D82: VISUAL bounds ≠ MECHANICAL OCCUPANCY. tokenSpan() stays the gameplay
    truth (client mirror of footprint.token_span); visualSpan() is THE single
    presentation derivation — explicit vw/vh win per axis, otherwise the base
@@ -86,9 +120,13 @@ const CONDITIONS = {
   invisible:["Invisible","#5dade2"], paralyzed:["Paralyzed","#2980b9"], petrified:["Petrified","#95a5a6"],
   poisoned:["Poisoned","#27ae60"], prone:["Prone","#d35400"], restrained:["Restrained","#34495e"],
   stunned:["Stunned","#f1c40f"], unconscious:["Unconscious","#7f8c8d"], concentrating:["Concentrating","#d4a017"],
+  sapped:["Sapped","#a1887f"], slowed:["Slowed","#90a4ae"], vexed:["Vexed","#7e57c2"],
 };
-const condLabel = k => (CONDITIONS[k] ? CONDITIONS[k][0] : String(k).slice(0, 24));
-const condColor = k => (CONDITIONS[k] ? CONDITIONS[k][1] : "#7f8c8d");
+/* D111: the server ships state.cond_catalog (built-in + conditions.csv merged,
+   presentation fields only) — it wins over this mirror wherever present. */
+const _cat = k => (typeof st !== "undefined" && st && st.cond_catalog && st.cond_catalog[k]) ? st.cond_catalog[k] : null;
+const condLabel = k => { const d = _cat(k); return d ? d.n : (CONDITIONS[k] ? CONDITIONS[k][0] : String(k).slice(0, 24)); };
+const condColor = k => { const d = _cat(k); return d ? d.c : (CONDITIONS[k] ? CONDITIONS[k][1] : "#7f8c8d"); };
 
 /* ---------- world <-> storage coordinates (D72) ----------
    Everything on the wire (tokens, pins, doors, traps, preview cells) lives in
@@ -148,7 +186,7 @@ async function api(path, method="GET", body) {
   return d;
 }
 function esc(s){ const d=document.createElement("div"); d.textContent = s==null?"":String(s); return d.innerHTML; }
-function show(view){ for (const v of ["auth","lobby","room"]) $("view-"+v).classList.toggle("hidden", v!==view); }
+function show(view){ for (const v of ["auth","lobby","prep","room"]) $("view-"+v).classList.toggle("hidden", v!==view); }
 function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show");
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"), 2500); }
 function err(id, e){ $(id).textContent = e.message || String(e); }
@@ -186,6 +224,10 @@ function saveViewMode(){
 }
 function setViewMode(mode){
   const next = normalizeViewMode(mode);
+  // D104: the preview is a TACTICAL-only, data-swapped render — the diorama
+  // renderer reads the live DM state, so switching to it mid-preview would
+  // show everything the preview must hide.
+  if (state.preview && next === "diorama"){ toast("Preview is tactical-view only"); return; }
   if (next === state.viewMode) return;
   // Each renderer frames its own camera; the shared state.cam must be saved
   // into the outgoing mode's slot and restored from the incoming one, or a

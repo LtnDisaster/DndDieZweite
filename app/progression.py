@@ -83,14 +83,19 @@ def format_classes(char) -> str:
     return " / ".join(f"{e['class_id'].title()} {e['level']}" for e in load(char))
 
 
-def set_class_levels(char_id, raw) -> bool:
+def set_class_levels(char_id, raw, c=None) -> bool:
     """Validate + persist class levels; keeps the legacy ``level`` column in
     sync so existing consumers (hit dice, slots, sheet math) see the derived
-    total without re-deriving it. Returns False on invalid input."""
+    total without re-deriving it. Returns False on invalid input.
+    D109: ``c`` runs the UPDATE on a caller-owned db.tx() cursor (no early
+    commit) so charbuild.apply can persist all its statements atomically."""
     entries = clean_class_levels(raw)
     if entries is None:
         return False
     total = sum(e["level"] for e in entries)
-    db.x("UPDATE characters SET class_levels=?, level=? WHERE id=?",
-         (db.json_dumps(entries), total, int(char_id)))
+    sql_args = (db.json_dumps(entries), total, int(char_id))
+    if c is not None:
+        c.execute("UPDATE characters SET class_levels=?, level=? WHERE id=?", sql_args)
+    else:
+        db.x("UPDATE characters SET class_levels=?, level=? WHERE id=?", sql_args)
     return True

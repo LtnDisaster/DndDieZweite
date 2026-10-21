@@ -82,6 +82,10 @@ async function addSound(){
 }
 function triggerAmbience(kind, extra={}){ wsSend({ type:kind, ...extra }); }
 function updateMoveControls(){
+  // D113 Phase 5: a trap control on the token's own cell, for whoever controls
+  // a token (the DM may still target any adjacent cell over the trap channel).
+  const th = $("traphud");
+  if (th) th.classList.toggle("hidden", !(state.room && ownToken()));
   const b = $("btn-stop-move"); if (!b) return;
   b.classList.toggle("hidden", !(state.room && state.room.role === "dm" && state.sel && state.moving.has(state.sel)));
 }
@@ -173,19 +177,17 @@ function wire(){
   };
   const summ = document.querySelector("#char-editor summary");
   if (summ) summ.onclick = () => { if (!$("char-editor").open) setTimeout(() => openCharForm(null), 0); };
+  // D101: create/join lands on the room PREPARATION screen, not directly at the
+  // table — the table itself stays exactly where it was (⚙ / "Open the table").
   $("btn-room-create").onclick = async () => {
     try { const r = await api("/rooms","POST",{ name: $("rm-name").value.trim() || "Adventure" });
-      $("rm-name").value=""; await openRoom(r.code); } catch(e){ err("lobby-err", e); }
+      $("rm-name").value=""; await openPrep(r.code); } catch(e){ err("lobby-err", e); }
   };
   $("btn-room-join").onclick = async () => {
     try { const r = await api("/rooms/join","POST",{ code: $("rm-code").value.trim() });
-      $("rm-code").value=""; await openRoom(r.code); } catch(e){ err("lobby-err", e); }
+      $("rm-code").value=""; await openPrep(r.code); } catch(e){ err("lobby-err", e); }
   };
-  $("btn-back").onclick = () => {
-    clearTimeout(state.reconnectTimer);
-    if (state.ws){ state.ws.onclose=null; state.ws.close(); state.ws=null; }
-    state.room = null; editorClose(); loadLobby();
-  };
+  $("btn-back").onclick = () => backToPrep();
   $("btn-chat").onclick = sendChat;
   $("chat-in").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
   const _withMod = (base) => {
@@ -224,11 +226,83 @@ function wire(){
   if (osel) osel.onchange = () => {
     const sf = $("obj-stair-fields"), lf = $("obj-lamp-fields");
     if (sf) sf.classList.toggle("hidden", osel.value !== "stair");
-    if (lf) lf.classList.toggle("hidden", osel.value !== "lamp"); };
+    if (lf) lf.classList.toggle("hidden", osel.value !== "lamp");
+    if (osel.value === "stair") fillStairFloors(); };
   $("btn-long-rest").onclick = () => wsSend({ type: "long_rest",
     clear_conditions: !!($("long-rest-conds") && $("long-rest-conds").checked) });
+  // D163-8: Loot tables are CSV content — the DM rolls them right here, and
+  // the server's "chat" announcement rides the ONE chat pipeline back to
+  // everyone. The list is the room's own loottables.csv (REST export, the
+  // same DM-only read path the Content manager uses) — parsed just enough
+  // for id + display name; a table that only the CSV knows is rollable.
+  const _csvCells = (line) => {                     // one CSV line -> cells
+    const out = []; let cur = "", q = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (q) {
+        if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+        else cur += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === ",") { out.push(cur); cur = ""; }
+      else cur += ch;
+    }
+    out.push(cur); return out;
+  };
+  const fillLoot = async (force) => {
+    const sel = $("loot-tbl"); if (!sel) return;
+    if (sel.dataset.filled === "1" && !force) return;
+    if (!state.room || !state.room.code) return;    // before join: toggle will retry
+    try {
+      const r = await fetch(`/api/content/${encodeURIComponent(state.room.code)}/export?kind=loottable`);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const lines = (await r.text()).split("\n").map(l => l.trim()).filter(Boolean).slice(1);
+      sel.innerHTML = '<option value="">— no tables yet —</option>' + lines.map(l => {
+        const c = _csvCells(l);
+        const id = (c[0] || "").trim(), name = (c[1] || "").trim() || id;
+        return id ? `<option value="${esc(id)}">${esc(name)}</option>` : "";
+      }).join("");
+      sel.dataset.filled = "1";
+    } catch (e) { sel.innerHTML = '<option value="">— table list unavailable —</option>'; }
+  };
+  const _lg = $("loot-group"); if (_lg) _lg.ontoggle = () => { if (_lg.open) fillLoot(); };
+  fillLoot();                                               // DM tools render when the DM joins
+  const _lref = $("btn-loot-refresh"); if (_lref) _lref.onclick = () => fillLoot(true);
+  const _lroll = $("btn-loot-roll"); if (_lroll) _lroll.onclick = () => {
+    const s = $("loot-tbl");
+    if (s && s.value) wsSend({ type: "roll_loot", table_id: s.value });
+  };
   $("btn-aoe").onclick = () => { state.aoeArmed = !state.aoeArmed;
     $("btn-aoe").classList.toggle("active", state.aoeArmed); };
+  // D162-5/6: the DM trap panel. The server takes the plane from the chosen
+  // token; Spring additionally names a victim. Remove is the live map_remove op.
+  const tdmCell = () => {
+    const tok = tdmToken();
+    const c = tok ? tokenCenterCell(tok) : null;
+    const x = +($("tdm-x").value || (c ? c.cx : NaN));
+    const y = +($("tdm-y").value || (c ? c.cy : NaN));
+    return Number.isFinite(x) && Number.isFinite(y) ? {x, y} : null;
+  };
+  $("tdm-tok").onchange = () => { const tok = tdmToken();
+    if (tok){ const c = tokenCenterCell(tok); $("tdm-x").value = c.cx; $("tdm-y").value = c.cy; } };
+  for (const [id, action] of [["tdm-search", "search"], ["tdm-disarm", "disarm"], ["tdm-trigger", "trigger"]])
+    $(id).onclick = () => {
+      const tok = tdmToken(), cell = tdmCell();
+      if (!tok) return toast("Pick a token on the trap's plane");
+      if (!cell) return toast("Trap cell needed");
+      const m = { type: "trap", action, token_id: tok.id, x: cell.x, y: cell.y };
+      if (action === "trigger"){
+        const v = +($("tdm-victim").value || 0);
+        if (!v) return toast("Pick a victim token for Spring");
+        m.target_id = v;
+      }
+      wsSend(m);
+    };
+  $("tdm-remove").onclick = () => {
+    const tok = tdmToken(), cell = tdmCell();
+    if (!tok) return toast("Pick a token on the trap's plane (sets the floor)");
+    if (!cell) return toast("Trap cell needed");
+    wsSend({ type: "map_remove", kind: "trap", x: cell.x, y: cell.y, floor: tok.floor || "" });
+  };
   $("btn-ping").onclick = () => { state.pingArmed = !state.pingArmed;
     $("btn-ping").classList.toggle("active", state.pingArmed); };
   $("btn-ruler").onclick = () => {
@@ -238,16 +312,21 @@ function wire(){
     draw();
   };
   $("btn-stop-move").onclick = () => { if (state.sel) wsSend({ type:"stop_move", token_id: state.sel }); };
+  // D113 Phase 5: search / disarm a trap on the controlled token's cell.
+  for (const [id, action] of [["btn-trap-search","search"], ["btn-trap-disarm","disarm"]]){
+    const el = $(id);
+    if (el) el.onclick = () => { const t = ownToken(); if (!t) return toast("Select your token first");
+      const c = tokenCenterCell(t); wsSend({ type:"trap", action, token_id: t.id, x: c.cx, y: c.cy }); };
+  }
   $("view-tactical").onclick = () => setViewMode("tactical");
   $("view-diorama").onclick = () => setViewMode("diorama");
   renderViewToggle();
-  const helpOverlay = () => $("help-overlay");
-  const setHelp = on => { const h = helpOverlay(); if (h) h.classList.toggle("hidden", !on); };
+  // D149: the overlay itself is owned by 65_help.js — these are entry points only.
   const helpBtn = $("btn-help");
-  if (helpBtn) helpBtn.onclick = () => setHelp(helpOverlay().classList.contains("hidden"));
+  if (helpBtn) helpBtn.onclick = () => setHelp(!helpVisible(), helpCtxCat());
   const helpClose = $("btn-help-close");
   if (helpClose) helpClose.onclick = () => setHelp(false);
-  const hOverlay = helpOverlay();
+  const hOverlay = $("help-overlay");
   if (hOverlay) hOverlay.onclick = e => { if (e.target === hOverlay) setHelp(false); };
   for (const b of document.querySelectorAll("#side-tabs button"))
     b.onclick = () => { localStorage.setItem(sideTabKey(), b.dataset.tab); applySideTab(); };
@@ -268,6 +347,7 @@ function wire(){
     b.onclick = () => { state.brush = b.dataset.b;
       document.querySelectorAll(".brush").forEach(x => x.classList.toggle("active", x === b));
       $("trap-fields").classList.toggle("hidden", b.dataset.b !== "trap");
+      const tef = $("trap-effect-row"); if (tef) tef.classList.toggle("hidden", b.dataset.b !== "trap");
       $("loot-fields").classList.toggle("hidden", b.dataset.b !== "loot");
       const of = $("obj-fields"); if (of) of.classList.toggle("hidden", b.dataset.b !== "obj");
       $("door-fields").classList.toggle("hidden", b.dataset.b !== "door");
@@ -278,6 +358,10 @@ function wire(){
     if (!state.editMap) return;
     wsSend({ type:"map_edit", map: state.editMap, reset_fog: $("ed-fog").checked,
              floor: state.viewFloor || "" });                  // D88: edits land on the viewed plane
+    // D158: a published buffer is no longer "unsaved" — clearing the baseline
+    // keeps a later floor-rail switch from warning about edits that are already
+    // on the server (and stops a dismissed confirm from stranding the editor).
+    state._editOrig = JSON.stringify(state.editMap);
     toast("Map saved");
   };
   $("btn-ed-cancel").onclick = editorClose;
@@ -302,6 +386,8 @@ async function appBoot(){
   wireNotes();
   wireQuestUI();
   wireRoomAtmosphere();
+  wireContent();
+  wirePrep();
   clearPings();
   if (typeof DEBUG !== "undefined" && DEBUG) document.body.classList.add("dbg-on");
   try { await loadLobby(); }

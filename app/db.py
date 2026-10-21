@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS characters (
     name TEXT NOT NULL,
     race TEXT DEFAULT '',
     char_class TEXT DEFAULT '',
+    background TEXT DEFAULT '',
     level INTEGER DEFAULT 1,
     stats TEXT DEFAULT '{}',
     hp INTEGER DEFAULT 10,
@@ -166,7 +167,7 @@ CREATE TABLE IF NOT EXISTS assets (
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS item_defs (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     room_id INTEGER NOT NULL REFERENCES rooms(id),
     name TEXT NOT NULL,
     desc TEXT DEFAULT '',
@@ -175,7 +176,8 @@ CREATE TABLE IF NOT EXISTS item_defs (
     stackable INTEGER DEFAULT 0,
     props TEXT DEFAULT '{}',
     created_by INTEGER REFERENCES users(id),
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (room_id, id)
 );
 CREATE TABLE IF NOT EXISTS containers (
     room_id INTEGER NOT NULL REFERENCES rooms(id),
@@ -189,6 +191,17 @@ CREATE TABLE IF NOT EXISTS inv_ops (
     room_id INTEGER,
     kind TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS content (
+    kind TEXT NOT NULL,
+    room_id INTEGER NOT NULL,
+    id TEXT NOT NULL,
+    name TEXT DEFAULT '',
+    data TEXT DEFAULT '{}',
+    source TEXT DEFAULT '',
+    version INTEGER DEFAULT 1,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (kind, room_id, id)
 );
 """
 
@@ -229,6 +242,53 @@ def tx():
         c.execute("COMMIT")
 
 
+def migrate_item_defs(c):
+    """D162-9 — item_defs moves from a GLOBAL id primary key to the composite
+    (room_id, id). The table was always room-scoped data under a global key:
+    two rooms using one item id meant one room silently lost its DM-library
+    row, and both write paths answered with an explicit "owned by another
+    room" refusal instead. Rebuild, D88 precedent:
+      * build the composite-key table beside the old one,
+      * COPY with heal — INSERT OR REPLACE over rowid order keeps the LAST row
+        per (room_id,id); a duplicate can never survive into the new table,
+      * compare DISTINCT source keys against target rows; any mismatch aborts
+        the swap FAIL-CLOSED (old table keeps serving, half-built table gone),
+      * only on equality: old table is RENAMED (item_defs_pre_d162 — a
+        byte-identical, proven-restorable backup the caller can inspect), the
+        new table takes its place.
+    Idempotent: composite-key tables (fresh installs and re-runs) skip."""
+    info = c.execute("PRAGMA table_info(item_defs)").fetchall()
+    legacy = (any(r[1] == "id" and r[5] == 1 for r in info)
+              and not any(r[5] == 2 for r in info))
+    if not legacy:
+        return "skip"
+    cols = [r[1] for r in info]
+    need = ["id", "room_id", "name", "desc", "kind", "weight", "stackable",
+            "props", "created_by", "created_at", "value"]
+    for col in need:                                          # value may be missing
+        if col not in cols:
+            return "abort"                                    # unexpected shape: fail-closed
+    c.execute("DROP TABLE IF EXISTS item_defs_new")
+    c.execute("CREATE TABLE item_defs_new ("
+              "id TEXT NOT NULL, room_id INTEGER NOT NULL REFERENCES rooms(id),"
+              "name TEXT NOT NULL, desc TEXT DEFAULT '', kind TEXT DEFAULT 'other',"
+              "weight REAL DEFAULT 0, stackable INTEGER DEFAULT 0,"
+              "props TEXT DEFAULT '{}', created_by INTEGER REFERENCES users(id),"
+              "created_at TEXT DEFAULT (datetime('now')), value REAL DEFAULT 0,"
+              "PRIMARY KEY (room_id, id))")
+    c.execute("INSERT OR REPLACE INTO item_defs_new(" + ",".join(need) + ") SELECT "
+              + ",".join(need) + " FROM item_defs ORDER BY rowid")
+    src = c.execute("SELECT COUNT(*) FROM (SELECT DISTINCT room_id, id FROM item_defs)").fetchone()[0]
+    dst = c.execute("SELECT COUNT(*) FROM item_defs_new").fetchone()[0]
+    if src != dst:
+        c.execute("DROP TABLE item_defs_new")                 # fail-closed: keep serving
+        return "abort"
+    c.execute("DROP TABLE IF EXISTS item_defs_pre_d162")
+    c.execute("ALTER TABLE item_defs RENAME TO item_defs_pre_d162")
+    c.execute("ALTER TABLE item_defs_new RENAME TO item_defs")
+    return "migrated"
+
+
 def init_db():
     c = conn()
     c.executescript(SCHEMA)
@@ -244,11 +304,21 @@ def init_db():
         if col not in cols:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
     migrate("room_state", "map_json", "map_json TEXT DEFAULT ''")
+    migrate("item_defs", "value", "value REAL DEFAULT 0")  # D132: gp value line
+    migrate_item_defs(c)                                    # D162-9 (below)
     migrate("characters", "weapons", "weapons TEXT DEFAULT '[]'")
     migrate("characters", "items", "items TEXT DEFAULT '[]'")
     migrate("characters", "skills", "skills TEXT DEFAULT '{}'")
     migrate("characters", "spells", "spells TEXT DEFAULT '[]'")
     migrate("characters", "spell_slots", "spell_slots TEXT DEFAULT '{}'")
+    # D163-3/-4: proficiency AXSES (tools / weapon groups / armor groups).
+    # Additive with defaults — pre-D163 sheets keep working untouched; the
+    # axes fill on the next build apply/replay (no silent auto-migration).
+    migrate("characters", "tool_profs", "tool_profs TEXT DEFAULT '[]'")
+    migrate("characters", "weapon_profs", "weapon_profs TEXT DEFAULT '[]'")
+    migrate("characters", "armor_profs", "armor_profs TEXT DEFAULT '[]'")
+    migrate("characters", "prepared_spells", "prepared_spells TEXT DEFAULT '[]'")
+    migrate("quests", "src", "src TEXT DEFAULT ''")
     migrate("tokens", "npc", "npc TEXT DEFAULT ''")
     migrate("tokens", "conds", "conds TEXT DEFAULT '[]'")
     migrate("tokens", "death", "death TEXT")
@@ -278,6 +348,13 @@ def init_db():
     # in DARK rooms (grid.dark); the DM branch never restricts.
     migrate("tokens", "light", "light INTEGER DEFAULT 0")
     migrate("tokens", "darkvision", "darkvision INTEGER DEFAULT 0")   # D89
+    # D114: vertical token geometry. height_ft = the creature's physical vertical
+    # extent (NULL = the size-category DEFAULT, a house-rule default NOT a
+    # ceiling — a Gargantuan dragon may be authored 30 ft+). elevation_ft = the
+    # token's UNDER-edge above its standing surface (0 = grounded; e.g. hovering).
+    # Both purely additive; every legacy token (NULL/0) behaves exactly as before.
+    migrate("tokens", "height_ft", "height_ft INTEGER")
+    migrate("tokens", "elevation_ft", "elevation_ft INTEGER DEFAULT 0")
     # D86: the room's floor list — JSON [{name}], '' = primary (legacy) floor.
     migrate("rooms", "floors", "floors TEXT DEFAULT '[]'")
     migrate("messages", "visibility", "visibility TEXT NOT NULL DEFAULT 'public'")
@@ -298,13 +375,57 @@ def init_db():
     migrate("messages", "npc_token_id", "npc_token_id INTEGER")
     migrate("messages", "style", "style TEXT DEFAULT ''")
     migrate("room_state", "audio_json", "audio_json TEXT DEFAULT '{}'")
+    # D141: fog-memory ghosts outlive the process (TODO P2) — one merged
+    # {user_id: {token_id: snapshot}} blob per room, written at disconnect.
+    migrate("room_state", "ghosts_json", "ghosts_json TEXT DEFAULT '{}'")
     migrate("characters", "class_levels", "class_levels TEXT DEFAULT ''")
+    # D101: background id/name chosen in the guided character flow (rule-pack
+    # ``background`` row). Pure bookkeeping — it seeds nothing mechanically by
+    # itself; starting gear flows through the authorised starting-gear route.
+    migrate("characters", "background", "background TEXT DEFAULT ''")
     migrate("characters", "abilities", "abilities TEXT DEFAULT '[]'")
     # D92: explicit EQUIPMENT slots (main_hand/off_hand/armor/acc1..acc3 → item id).
     # '{}' = no explicit rig ⇒ gear.compute_ac keeps the legacy auto-derivation.
     migrate("characters", "equipment", "equipment TEXT DEFAULT '{}'")
+    # D96: chronological character-build ledger (Stufe 1–20). '' = unbuilt.
+    # Purely additive bookkeeping: which class, which level is applied THROUGH,
+    # the subclass and the per-level choices. The MECHANICAL writes still go
+    # through progression.set_class_levels + gear cleaners — this column never
+    # becomes a second source of truth for level/HP/abilities.
+    migrate("characters", "build", "build TEXT DEFAULT ''")
+    # D99: money is ONE integer of copper pieces (never a float, never a per-coin
+    # dict that could go negative per denomination); size feeds the encumbrance
+    # size modifier; container coins are loot a character can take (also copper).
+    # All purely additive — existing rows read their defaults, no migration data.
+    migrate("characters", "wallet", "wallet INTEGER DEFAULT 0")
+    migrate("characters", "size", "size TEXT DEFAULT 'medium'")
+    migrate("containers", "coins", "coins INTEGER DEFAULT 0")
     c.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_type_created "
               "ON messages (room_id, type, created_at)")
+    # D162-7: the pending-damage ledger — one row per rolled-but-unapplied
+    # attack damage, resolved by an explicit DM Apply/Decline. status rides
+    # pending|applied|declined; hp_after stays NULL until the mutation was
+    # really through, so the sweep below turns a crashed mid-apply back into
+    # a retryable pending (GO: provably fail-tolerant, tested).
+    c.execute("""CREATE TABLE IF NOT EXISTS pending_damage (
+        id INTEGER PRIMARY KEY,
+        room_id INTEGER NOT NULL,
+        ref_id INTEGER,
+        token_id INTEGER NOT NULL,
+        attacker TEXT DEFAULT '',
+        label TEXT DEFAULT '',
+        amount INTEGER NOT NULL,
+        dmg_type TEXT DEFAULT '',
+        crit INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        hp_after INTEGER,
+        created_at TEXT DEFAULT (datetime('now')),
+        resolved_at TEXT
+    )""")
+    c.execute("UPDATE pending_damage SET status='pending' "
+              "WHERE status='applied' AND hp_after IS NULL")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_pending_room_status "
+              "ON pending_damage (room_id, status)")
     c.commit()
 
 

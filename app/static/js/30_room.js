@@ -3,10 +3,16 @@
 async function openRoom(code){
   const s = await api(`/rooms/${code}/state`);
   state.room = s; state.roomDeleted = false;   // fresh visit — re-arms auto-reconnect
-  state.viewFloor = "";                        // D88: DM plane browsing starts at primary
+  // D88/D102: the SERVER is the view SSOT — the DM starts at primary (s comes
+  // without ?floor=), a PLAYER is delivered on their token's plane; a player
+  // on a named floor must have viewFloor match, or plane-guarded events
+  // (reveals, pings, AoE, editor saves) all address the wrong plane.
+  state.viewFloor = s.view_floor || "";
   state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || [];
   state.floors = s.floors || [""];
+  state.floor_levels = s.floor_levels || null;   // D159: signed level per plane
   state.grid = s.grid; state.editing = false; state.editMap = null; state.sel = null;
+  state.preview = null; state.lightMoveId = null;   // D104: no preview survives a room switch
   state.plan = null; state.planRequest = null; state.moving = new Set();
   state.pings = []; state.ruler = null; state.rulerArmed = false; state.pingArmed = false; state.aoe = null;
   state.online = new Set([state.me.username]);
@@ -19,6 +25,9 @@ async function openRoom(code){
   $("room-role").style.background = s.role === "dm" ? "var(--gold)" : "#2c3e50";
   for (const o of document.querySelectorAll(".dm-only")) o.style.display = s.role === "dm" ? "" : "none";
   $("dmtools").classList.toggle("hidden", s.role !== "dm");
+  if ($("trappanel")) $("trappanel").classList.toggle("hidden", s.role !== "dm");   // D162-5
+  if ($("floorpanel")) $("floorpanel").classList.toggle("hidden", s.role !== "dm");
+  renderViewFloor();   // D102: plane row + floor panel exist from the first render
   $("init-btns").classList.toggle("hidden", s.role !== "dm");
   state.messages = s.messages || []; state.chat = s.chat || [];
   const savedFeed = localStorage.getItem("vtt-feed");
@@ -34,7 +43,7 @@ async function openRoom(code){
   renderMyChars(); renderRolls(); applySideTab();
   if (s.map){ state.bg = new Image(); state.bg.src = s.map; } else state.bg = null;
   await loadNotes(s.role);
-  if (s.role === "dm"){ await loadBestiary(); await loadEncounters(); }
+  if (s.role === "dm"){ await loadBestiary(); await loadEncounters(); refreshContentKinds(); }
   else { state.encounters = []; state.encRows = []; state.encId = null; }
   show("room"); resize();
   // D78: a camera framing failure must not abort the room join (WS would never
@@ -62,33 +71,318 @@ function applySideTab(){
 }
 
 function renderViewFloor(){
-  // D88: the selector only earns its place once the room has planes to browse
-  const row = $("view-floor-row"), sel = $("view-floor");
-  if (!row || !sel) return;
-  const many = state.room && state.room.role === "dm" && (state.floors || [""]).length > 1;
-  row.classList.toggle("hidden", !many);
-  if (!many) return;
-  const cur = state.viewFloor || "";
-  sel.innerHTML = (state.floors || [""]).map(f =>
-    `<option value="${f.replace(/"/g,"&quot;")}" ${f===cur?"selected":""}>${f===""?"⬛ primary":f}</option>`).join("");
-  sel.onchange = () => { state.viewFloor = sel.value; refreshRoom(); };
+  // D158: the plane switcher now lives inside the map editor as a vertical
+  // floor rail (the elevator); the old out-of-panel dropdown is gone. The DM
+  // side panel (#floorpanel) keeps out-of-editor "browse this plane" browsing.
+  renderFloorRail();
+  if (typeof renderFloorPanel === "function") renderFloorPanel();   // D102
+  if (typeof renderLightsPanel === "function") renderLightsPanel(); // D104: lamps of the VIEWED plane
+  renderViewFilter();                                               // D159
 }
+/* D159 — the personal floor DISPLAY filter. It only changes which delivered
+   planes the canvas draws; it never touches vision, delivery or movement. */
+function renderViewFilter(){
+  const el = $("viewfilter"); if (!el) return;
+  const many = (state.floors && state.floors.length > 1);
+  // D159: the filter only governs a DM's plane-local browsing; a player always
+  // sees exactly what the server delivered, so the control is DM-only.
+  const dm = state.room && state.room.role === "dm";
+  const show = dm && many && !state.preview;
+  el.classList.toggle("hidden", !show);
+  if (!show) return;
+  const mode = viewFilterMode();
+  const a = $("vf-all"), c = $("vf-current");
+  if (a){ a.className = mode === "all" ? "primary" : "ghost";
+          a.setAttribute("aria-pressed", mode === "all"); a.onclick = () => setViewFilter("all"); }
+  if (c){ c.className = mode === "current" ? "primary" : "ghost";
+          c.setAttribute("aria-pressed", mode === "current"); c.onclick = () => setViewFilter("current"); }
+}
+function setViewFilter(m){
+  if (state.viewFilter === m) return;
+  state.viewFilter = m; renderViewFilter();
+  if (typeof draw === "function") draw();
+}
+
+/* D159 — floor labels/levels/badges live in 10_core.js (shared with the canvas
+   renderer). renderFloorRail/renderFloorPanel read floorStack()/floorBadge/floorTag. */
+
+function renderFloorRail(){
+  const rail = $("floor-rail");
+  if (!rail) return;                                    // not the room view / no editor mounted
+  const floors = state.floors || [""];
+  const cur = state.viewFloor || "";
+  // Vertical stack ordered by SIGNED level (D159): highest storey on TOP, the
+  // deepest cellar at the BOTTOM, primary/ground in its true place. Levels come
+  // from the server's floor_levels so a cellar reads E−1, not a stack index.
+  const rows = floorStack().reverse();
+  let html = rows.map(name => {
+    const L = floorLevelOf(name), active = name === cur;
+    return `<button class="fl-rail${active ? " active" : ""}" data-f="${esc(name)}"`
+      + ` aria-pressed="${active}" title="Edit ${esc(floorTag(name))}">`
+      + `<span class="lvl">${floorBadge(name)}</span><span class="nm">${esc(floorLabelOf(name))}</span>`
+      + (active ? `<span class="on">\u270E editing</span>` : "") + `</button>`;
+  }).join("");
+  if (floors.length < 2)
+    html += `<small class="meta" style="opacity:.6">One floor. Add more on the 🎲 DM tab.</small>`;
+  rail.innerHTML = html;
+  rail.classList.toggle("hidden", !(state.editing || floors.length > 1));
+  for (const b of rail.querySelectorAll(".fl-rail"))
+    b.onclick = () => gotoEditFloor(b.dataset.f);
+  // D162-1: keep an open stair-target list honest when floors change mid-edit.
+  if ($("obj-op") && $("obj-op").value === "stair") fillStairFloors();
+}
+
+// D162-1: the stair target is chosen from the room's REAL planes — including
+// the primary, whose true name is "" and which is a first-class option
+// ("Ground (primary)"), so a stair back down to the ground floor is authorable.
+function fillStairFloors(){
+  const sel = $("obj-tfl");
+  if (!sel) return;
+  const floors = (state.floors && state.floors.length ? state.floors : [""]);
+  const cur = sel.value;
+  sel.innerHTML = floors.map(f =>
+    `<option value="${esc(f)}">${esc(floorLabelOf(f))}</option>`).join("");
+  if (floors.includes(cur)) sel.value = cur;
+}
+
+// D162-5: DM trap panel. The server's trap channel already lets the DM
+// search/disarm/spring ANY cell (adjacency and discovery gates are DM-skipped)
+// — what was missing was a surface for a DM who has no token of their own.
+function renderTrapPanel(){
+  const panel = $("trappanel");
+  if (!panel || panel.classList.contains("hidden")) return;
+  const tokOpts = () => (state.tokens || []).map(t =>
+    `<option value="${t.id}">${esc(t.label || "token")} @ ${esc(floorLabelOf(t.floor || ""))}</option>`).join("");
+  for (const id of ["tdm-tok", "tdm-victim"]){
+    const s = $(id); if (!s) continue;
+    const cur = s.value;
+    s.innerHTML = `<option value="">— token —</option>` + tokOpts();
+    if ([...s.options].some(o => o.value === cur)) s.value = cur;
+  }
+}
+function tdmToken(){ const s = $("tdm-tok"); const id = +(s ? s.value : 0);
+  return (state.tokens || []).find(t => t.id === id) || null; }
+
+function editHasUnsaved(){
+  return !!(state.editing && state.editMap && state._editOrig
+    && JSON.stringify(state.editMap) !== state._editOrig);
+}
+
+// The one plane switcher for every floor change (rail click + floorpanel
+// browse). While editing, the edit buffer is re-armed from the freshly fetched
+// plane so a brush can never write to a floor the DM did not select.
+function gotoEditFloor(name){
+  if ((state.viewFloor || "") === name) return;
+  if (editHasUnsaved() && !confirm(
+        `You have unsaved edits on "${floorLabelOf(state.viewFloor)}". Switch floors and discard them?`))
+    return;
+  state.viewFloor = name;
+  Promise.resolve(refreshRoom()).then(() => {
+    if (state.editing && typeof rearmEditBuffer === "function") rearmEditBuffer();
+    renderFloorRail();
+  });
+}
+
+
+/* ---------- D102 floor manager (DM side panel) ---------- */
+function renderFloorPanel(){
+  const panel = $("floorpanel"), list = $("floor-list");
+  if (!panel || !list) return;
+  if (!(state.room && state.room.role === "dm")) return;
+  const cur = state.viewFloor || "";
+  list.innerHTML = floorStack().reverse().map(f => {
+    const act = f === cur;
+    const tag = `<span class="fl-lvl" title="Signed level">${floorBadge(f)}</span> `;
+    const label = f === "" ? "⬛ Ground (primary)" : esc(f);
+    const tools = f === ""
+      ? `<span class="tiny" title="The primary floor always exists — it cannot be removed or renamed">fixed</span>`
+      : `<button class="ghost fl-ren" data-f="${esc(f)}" title="Rename floor">✏️</button>`
+        + `<button class="ghost fl-del" data-f="${esc(f)}" title="Delete floor — refused while tokens stand on it, or while a floor sits further out (remove outer floors first so the rest keep their height)">🗑</button>`;
+    return `<div class="row"${act ? ' style="background:rgba(241,196,15,.10)"' : ""}>`
+      + `<button class="ghost fl-view" data-f="${esc(f)}" title="Browse this plane — nobody is moved">${tag}${label}${act ? " ← viewing" : ""}</button>`
+      + tools + `</div>`;
+  }).join("");
+  for (const b of list.querySelectorAll(".fl-view"))
+    b.onclick = () => gotoEditFloor(b.dataset.f);   // D158: one plane switcher
+  for (const b of list.querySelectorAll(".fl-del"))
+    b.onclick = () => editFloor("DELETE", b.dataset.f, null);
+  for (const b of list.querySelectorAll(".fl-ren"))
+    b.onclick = () => startFloorRename(b.dataset.f, b);
+  const add = $("btn-floor-add"), inp = $("floor-new"), below = $("floor-below");
+  if (add && inp) add.onclick = () => {
+    const name = inp.value.trim(); if (!name) return;
+    fetch(`/api/rooms/${encodeURIComponent(state.room.code)}/floors`,
+          { method: "POST", headers: { "Content-Type": "application/json" },
+            // D159: a checked box declares the plane UNDER the primary (a cellar).
+            body: JSON.stringify({ name, below: !!(below && below.checked) }) })
+      .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
+        .then(j => { throw new Error((j && j.detail) || "Cannot add floor"); }))
+      .then(j => { inp.value = "";
+                   state.floor_levels = j.floor_levels || state.floor_levels;
+                   state.floors = j.floors || state.floors;
+                   renderFloorPanel(); renderViewFloor();
+                   if (below) below.checked = false;
+                   // D153: the ws floors_changed broadcast goes to the OTHER
+                   // clients — the actor's own open sheet kept stale options.
+                   if (state.sel && !$("sheet").classList.contains("hidden")) {
+                     const st = state.tokens.find(x => x.id === state.sel);
+                     if (st && state.npcEdit == null && !st.npc) renderSheet(st); } })
+      .catch(err => toast(err.message || "Cannot add floor"));
+  };
+}
+function startFloorRename(old, btn){
+  const row = btn.closest(".row"); if (!row) return;
+  row.innerHTML = `<input id="fl-rename-in" maxlength="24" value="${esc(old)}">`
+    + `<button class="ghost" id="fl-rename-ok" title="Rename">✓</button>`
+    + `<button class="ghost" id="fl-rename-no" title="Cancel">✗</button>`;
+  const inp = $("fl-rename-in"); if (inp) inp.focus();
+  const done = () => { const v = inp.value.trim();
+                       if (v && v !== old) editFloor("PATCH", old, v);
+                       else renderFloorPanel(); };
+  $("fl-rename-ok").onclick = done;
+  $("fl-rename-no").onclick = renderFloorPanel;
+  inp.onkeydown = e => { if (e.key === "Enter") done(); if (e.key === "Escape") renderFloorPanel(); };
+}
+function editFloor(method, old, newName){
+  const prev = state.viewFloor || "";
+  // Set the view BEFORE asking: the server broadcasts land while the fetch is
+  // still in flight, and a refresh must never request the floor that is about
+  // to stop existing under the name the server is leaving behind.
+  if (method === "PATCH" && prev === old) state.viewFloor = newName;
+  if (method === "DELETE" && prev === old) state.viewFloor = "";
+  const url = `/api/rooms/${encodeURIComponent(state.room.code)}/floors/${encodeURIComponent(old)}`;
+  fetch(url, { method,
+               headers: method === "PATCH" ? { "Content-Type": "application/json" } : undefined,
+               body: method === "PATCH" ? JSON.stringify({ name: newName }) : undefined })
+    .then(r => r.ok ? r.json() : r.json().catch(() => ({}))
+      .then(j => { throw new Error((j && j.detail) || "Floor operation failed"); }))
+    .then(j => { state.floors = j.floors || state.floors;
+                 state.floor_levels = j.floor_levels || state.floor_levels;
+                 renderFloorPanel(); renderViewFloor(); refreshRoom(); })
+    .catch(err => { toast(err.message || "Floor operation failed");
+                    state.viewFloor = prev;
+                    renderFloorPanel(); renderViewFloor(); });
+}
+
+/* ---------- D104 light manager (DM side panel) + peek (DM preview) ---------- */
+function _lamps(){
+  const g = state.grid; if (!g) return [];
+  return (g.objects || []).filter(o => ((o.interact || {}).op || {}).kind === "lamp");
+}
+function _pvEsc(s){ return String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
+function renderLightsPanel(){
+  const panel = $("lightpanel"), list = $("light-list");
+  if (!panel || !list) return;
+  if (!(state.room && state.room.role === "dm")) return;
+  const fl = state.viewFloor || "";
+  const lamps = _lamps();
+  list.innerHTML = lamps.length ? ""
+    : `<div class="row"><small class="meta" style="opacity:.6">No lamps on ${fl ? "“" + _pvEsc(fl) + "”" : "the primary plane"}.</small></div>`;
+  for (const o of lamps){
+    const on = !((o.state || {}).on === false);
+    const b = ((o.interact || {}).op || {}).bright | 0;
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML =
+      `<label style="display:flex;align-items:center;gap:5px;flex:1;min-width:0">` +
+      `<input type="checkbox" ${on ? "checked" : ""} title="active / inactive">` +
+      `<span>${on ? "💡" : "🌑"}</span>` +
+      `<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_pvEsc(o.label || "Lamp")}</span></label>` +
+      `<input type="number" min="0" max="30" value="${b}" style="width:54px" title="Bright radius in cells — walls block the glow">` +
+      `<button class="ghost pv-move" title="Move: then click the destination cell">➜</button>` +
+      `<button class="ghost pv-del" title="Remove this lamp">✕</button>`;
+    const [chk, num] = row.querySelectorAll("input");
+    chk.onchange = () => wsSend({type:"lamp", action:"update", floor: fl, id: o.id, on: chk.checked});
+    num.onchange = () => wsSend({type:"lamp", action:"update", floor: fl, id: o.id, bright: +num.value});
+    row.querySelector(".pv-move").onclick = () => {
+      state.lightMoveId = o.id; toast("Click the lamp's destination cell"); };
+    row.querySelector(".pv-del").onclick = () => {
+      if (!confirm(`Remove lamp “${o.label || "Lamp"}”?`)) return;
+      wsSend({type:"lamp", action:"remove", floor: fl, id: o.id}); };
+    list.appendChild(row);
+  }
+  const add = $("btn-lamp-add");
+  if (add) add.onclick = () => {
+    const cv = $("map"); if (!cv || !toCell) return;
+    const { cx, cy } = toCell(cv.clientWidth / 2, cv.clientHeight / 2);
+    wsSend({type:"lamp", action:"add", floor: fl, x: cx, y: cy, bright: 5, label: "Lamp"});
+  };
+}
+function renderPeek(){
+  const sel = $("peek-who");
+  if (!sel || !(state.room && state.room.role === "dm")) return;
+  const cands = (state.room.members || []).filter(m => m.role !== "dm" && m.character_id);
+  sel.innerHTML = cands.map(m => {
+    const nm = m.char && m.char.name ? m.char.name : m.username;
+    return `<option value="${m.character_id}">${_pvEsc(nm)}${m.char && m.char.name ? " (" + _pvEsc(m.username) + ")" : ""}</option>`;
+  }).join("") || `<option value="">no player characters</option>`;
+  const b = $("btn-peek");
+  if (b) b.onclick = startPeek;
+}
+function renderPreviewBar(){
+  const bar = $("previewbar"); if (!bar) return;
+  const rf = $("pv-refresh"), ex = $("pv-exit");
+  if (rf) rf.onclick = refreshPeek;
+  if (ex) ex.onclick = endPreview;
+  bar.classList.toggle("hidden", !state.preview);
+  if (!state.preview) return;
+  const p = state.preview;
+  $("pv-text").textContent = `👁 DM preview: sight of ${p.as.character || p.as.username}`
+    + ` · ${p.view_floor ? "floor “" + p.view_floor + "”" : "⬛ primary"}`
+    + (p.dark ? " · 🕯 dark" : "");
+}
+async function startPeek(){
+  const sel = $("peek-who"); if (!sel || !sel.value) return;
+  if (state.editing){ toast("Save or cancel the map editor first"); return; }
+  try {
+    const p = await api(`/rooms/${state.room.code}/view_as/${sel.value}`);
+    p._cid = +sel.value;
+    state.preview = p;
+    state.sel = null; if (typeof clearPlan === "function") clearPlan();
+    state.lightMoveId = null;
+    if (state.viewMode === "diorama") setViewMode("tactical");
+    renderPreviewBar(); draw();
+    toast(`Previewing ${p.as.character || p.as.username} — view-only`);
+  } catch(e){ toast(e.message); }
+}
+async function refreshPeek(){
+  if (!state.preview) return;
+  const cid = state.preview._cid;
+  try {
+    const p = await api(`/rooms/${state.room.code}/view_as/${cid}`);
+    p._cid = cid; state.preview = p; renderPreviewBar(); draw();
+  } catch(e){ toast(e.message); endPreview(); }   // character vanished: honest exit
+}
+function endPreview(){ if (!state.preview) return;
+  state.preview = null; renderPreviewBar(); draw(); }
 
 async function refreshRoom(){
   const s = await api(`/rooms/${state.room.code}/state`
                       + (state.viewFloor ? `?floor=${encodeURIComponent(state.viewFloor)}` : ""));
   state.room = s; state.init = s.initiative; state.tokens = s.tokens; state.ghosts = s.ghosts || []; state.grid = s.grid;
   state.floors = s.floors || [""];
+  state.floor_levels = s.floor_levels || null;   // D159: signed level per plane
   state.viewFloor = s.view_floor || ""; renderViewFloor();   // D88: server is the view SSOT
   if (typeof renderFogToggle === "function") renderFogToggle();
   if (state.plan && !state.tokens.find(t => t.id === state.plan.token_id)) state.plan = null;
   updateMoveHud();
   renderParty(); renderInit(); renderMyChars();
+  if (typeof renderPeek === "function") renderPeek();             // D104: character list
+  if (typeof renderTrapPanel === "function") renderTrapPanel();   // D162-5: DM trap panel
+  if (typeof renderPreviewBar === "function") renderPreviewBar(); // D104: a preview survives refreshes
   state.quests = s.quests || []; renderQuests();
   state.itemDefs = s.item_defs || []; renderInv();   // D92: inventory window
   state.messages = s.messages || []; state.chat = s.chat || [];
   applyAudioState(s.audio || {}); renderChatTargets(); renderVoiceTargets(); renderAudio();
   renderFeed(); applySideTab(); applyFeedPanels();
+  // D153: an OPEN sheet used to freeze at its render-time snapshot — a DM grant
+  // or HP change never landed until the next click. Re-render from the fresh
+  // state, but never while the NPC statblock editor holds unsaved edits.
+  if (state.sel && !$("sheet").classList.contains("hidden")){
+    const t = state.tokens.find(x => x.id === state.sel);
+    if (!t) renderSheet(null);
+    else if (state.npcEdit == null && !t.npc) renderSheet(t);
+  }
 }
 
 /* ---------- bestiary (DM-owned monster templates) ---------- */
@@ -166,7 +460,7 @@ async function loadNotes(role){
   try { state.notes = await api(`/rooms/${state.room.code}/notes`); } catch(e){ state.notes = []; }
   const sel = $("note-list"); if (!sel) return;
   sel.innerHTML = "";
-  if (!state.notes.length){ sel.innerHTML = "<option value=''>no journal entries</option>"; $("note-panel").classList.add("hidden"); return; }
+  if (!state.notes.length){ sel.innerHTML = "<option value=''>no journal entries</option>"; renderNote(role); return; }
   for (const n of state.notes){ const o=document.createElement("option"); o.value=n.id; o.textContent=`${n.title} (${n.visibility})`; if (n.id == state.noteId) o.selected=true; sel.appendChild(o); }
   if (!state.noteId || !state.notes.some(n => n.id == state.noteId)) state.noteId = state.notes[0].id;
   renderNote(role);
@@ -224,10 +518,11 @@ function renderBestiary(){
 async function saveNpcToBestiary(n, name, tok){
   try {
     await api("/creatures", "POST", { name: name || "Creature", level: n.level, stats: n.stats,
-      hp: n.hp, max_hp: n.max_hp, ac: n.ac, speed: n.speed, attacks: n.attacks || [],
+      hp: n.hp, max_hp: n.max_hp, ac: n.ac, speed: n.speed,
+      darkvision_ft: n.darkvision_ft || 0, attacks: n.attacks || [],
       spells: n.spells || [], spell_slots: n.spell_slots || {},
-      saves: n.saves || {}, defenses: n.defenses || {},
-      abilities: n.abilities || [], resources: n.resources || [], notes: n.notes || "",
+       saves: n.saves || {}, defenses: n.defenses || {}, companion: !!n.companion,
+       abilities: n.abilities || [], resources: n.resources || [], notes: n.notes || "",
       size: tok?.size || n.size || "Medium", disposition: tok?.disposition || n.disposition || "" });
     toast("Saved to Bestiary"); await loadBestiary();
   } catch(e){ toast(e.message); }
@@ -379,6 +674,22 @@ function feedEntry(m, kind){
   const time = kind === "log" ? `<small class="ts">${esc(_time(m))}</small> ` : "";
   const who = m.username && m.type !== "system" && m.type !== "whisper" ? `<b>${esc(m.username)}</b> ` : "";
   p.innerHTML = time + who + esc(m.body ?? m.text ?? "") + _visBadge(m);
+  // D162-7: rolled-but-unapplied damage carries its Apply/Decline right on
+  // the dice line — for the DM only. The server re-checks everything; an
+  // already-resolved row answers "already resolved", it never double-applies.
+  if (m.type === "dice" && m.meta && m.meta.pending && state.room && state.room.role === "dm"){
+    const badge = document.createElement("small");
+    badge.className = "visbadge"; badge.textContent = "pending";
+    p.appendChild(badge);
+    const mk = (txt, op, title) => {
+      const b = document.createElement("button");
+      b.className = "ghost"; b.textContent = txt; b.title = title;
+      b.onclick = () => wsSend({ type: "damage_confirm", op, pending_id: m.meta.pending });
+      p.appendChild(b);
+    };
+    mk("⚔ Apply", "apply", "Apply this damage to the target's HP");
+    mk("✕", "decline", "Decline — the dice line stays as a record");
+  }
   return p;
 }
 function stickToBottom(el){ return el.scrollHeight - el.scrollTop - el.clientHeight < 40; }
@@ -767,8 +1078,13 @@ function renderInit(){
            `<button class="primary" data-a="endturn">End Turn</button>`;
     bar.innerHTML = h;
     bar.classList.remove("hidden");
-    bar.querySelector('[data-a="dash"]').onclick = () => wsSend({ type: "dash", token_id: t.token_id });
-    bar.querySelector('[data-a="endturn"]').onclick = () => wsSend({ type: "end_turn" });
+    // D161: Dash/End Turn only EXIST for the acting player or the DM — wiring
+    // them unconditionally threw a TypeError for every other viewer and killed
+    // openRoom: players could not enter a room while someone else's turn ran.
+    const _dash = bar.querySelector('[data-a="dash"]');
+    if (_dash) _dash.onclick = () => wsSend({ type: "dash", token_id: t.token_id });
+    const _end = bar.querySelector('[data-a="endturn"]');
+    if (_end) _end.onclick = () => wsSend({ type: "end_turn" });
     for (const b of bar.querySelectorAll(".slot-chip"))
       b.onclick = () => wsSend({ type: "turn_mark", token_id: t.token_id, slot: b.dataset.slot,
                                  value: (t[b.dataset.slot] === "used") ? "available" : "used" });
@@ -896,16 +1212,64 @@ function wireLightRow(tok){
     $("dv-r").onkeydown = e => { if (e.key === "Enter") senddv(); };
   }
 }
+function _heightRowHtml(tok){
+  const h = tok.height_ft, e = (tok.elevation_ft | 0);
+  const dh = tokenDefaultHeightFt(tok);
+  return `<div class="row" title="Vertical body (D114): height is the creature's vertical extent, not a ceiling. Empty height uses the size default. A 30 ft body spans three declared planes if a full-footprint opening connects them.">`
+    + `<span class="tiny"><b>Height</b></span><input id="vh-ft" type="number" min="0" max="200" step="5" value="${h == null ? "" : h}" placeholder="${dh}" style="width:58px">`
+    + `<span class="tiny">ft (default ${dh})</span>`
+    + `<span class="tiny"><b>Flying</b></span><input id="vh-elev" type="number" min="0" max="200" step="5" value="${e}" style="width:58px">`
+    + `<span class="tiny">ft under-edge</span><button id="vh-apply">Apply</button></div>`;
+}
+function wireHeightRow(tok){
+  const b = $("vh-apply"); if (!b) return;
+  const send = () => {
+    const raw = $("vh-ft").value;
+    const h = raw === "" ? null : parseInt(raw, 10);
+    const e = parseInt($("vh-elev").value || "0", 10);
+    if (h !== null && (!Number.isInteger(h) || h < 0 || h > 200)){ toast("Body height: 0 to 200 ft"); return; }
+    if (!Number.isInteger(e) || e < 0 || e > 200){ toast("Flying elevation: 0 to 200 ft"); return; }
+    wsSend({ type:"token_height", token_id: tok.id, height_ft: h, elevation_ft: e });
+  };
+  b.onclick = send;
+  $("vh-ft").onkeydown = e => { if (e.key === "Enter") send(); };
+  $("vh-elev").onkeydown = e => { if (e.key === "Enter") send(); };
+}
+function _verticalMoveRowHtml(tok){
+  const sp = tokenSpeeds(tok), fls = state.floors && state.floors.length ? state.floors : [""];
+  const cur = tok.floor || "", can = sp.fly > 0 && state.plan == null;
+  if (!can) return "";
+  const opts = fls.filter(f => f !== cur)
+    .map(f => `<option value="${esc(f)}">${f === "" ? "Ground (primary)" : esc(f)}</option>`).join("");
+  if (!opts) return "";
+  return `<div class="row" title="D114: fly vertically through a full-footprint opening to the selected plane. The server finds the 3D route, charges the fly budget and refuses a solid ceiling or blocked volume.">`
+    + `<span class="tiny"><b>Vertical flight</b></span><select id="vf-floor" style="max-width:120px">${opts}</select>`
+    + `<button id="vf-go">Fly ↕</button></div>`;
+}
+function wireVerticalMoveRow(tok){
+  const b = $("vf-go"); if (!b) return;
+  b.onclick = () => {
+    const c = tokenCenterCell(tok);
+    wsSend({ type:"move", token_id: tok.id, tx: c.cx, ty: c.cy, teleport:false,
+             mode:"fly", floor: $("vf-floor").value });
+  };
+}
 function _floorRowHtml(tok){
   const fls = state.floors && state.floors.length ? state.floors : [""];
   const cur = tok.floor || "";
   const isDM = state.room && state.room.role === "dm";
+  const label = cur === "" ? "Ground (primary)" : esc(cur);
+  if (!isDM)
+    // D102: plane changes are the DM's and the stairs' — players READ their
+    // plane; the validated stair object remains their route.
+    return `<div class="row" title="Floor (D86): planes are independent — different floors never collide and are not visible to each other. Take the stairs (or wait for the DM) to change planes.">`
+      + `<span class="tiny"><b>Floor</b></span><span>${label}</span></div>`;
   const opts = fls.map(f => `<option value="${esc(f)}"${f === cur ? " selected" : ""}>${f === "" ? "Ground (primary)" : esc(f)}</option>`).join("");
-  return `<div class="row" title="Floor (D86): planes are independent — different floors never collide and are not visible to each other. Changing floor is an explicit stair/ladder move, not a walked one.">`
+  return `<div class="row" title="Floor (D86): planes are independent — different floors never collide and are not visible to each other. Changing floor is an explicit move, not a walked one (D102: DM only — players use stairs).">`
     + `<span class="tiny"><b>Floor</b></span><select id="fl-pick" style="max-width:120px">${opts}</select>`
     + `<button id="fl-go">Go</button>`
-    + (isDM ? `<input id="fl-new" placeholder="new floor" maxlength="24" style="width:90px">`
-             + `<button id="fl-add" title="Add a floor to this room">＋</button>` : ``) + `</div>`;
+    + `<input id="fl-new" placeholder="new floor" maxlength="24" style="width:90px">`
+    + `<button id="fl-add" title="Add a floor to this room">＋</button></div>`;
 }
 function wireFloorRow(tok){
   const go = $("fl-go"); if (!go) return;
@@ -936,7 +1300,9 @@ function _rotRowHtml(tok){
    and refuses switching tricks. */
 function _moveModeRowHtml(tok){
   const sp = tokenSpeeds(tok);
-  const modes = ["walk","fly","swim","climb"].filter(m => m === "walk" || sp[m] > 0);
+  // D140: swim/climb are always choosable (SRD surcharge without the
+  // speed); flying genuinely needs a fly speed.
+  const modes = ["walk","fly","swim","climb"].filter(m => m !== "fly" || sp.fly > 0);
   if (modes.length < 2) return "";
   state.moveMode = state.moveMode || {};
   const act = state.moveMode[tok.id] || "walk";
@@ -961,6 +1327,18 @@ function wireRotRow(tok){
   $("rot-right").onclick = () => send(90);
   $("rot-reset").onclick = () => { if (cur() !== 0) send(360 - cur()); };
 }
+/* D150: recipient picker for handing an item to another character (inv_transfer). */
+function _giveRowHtml(ch, itemId){
+  const it = (ch.items || []).find(x => x.id === itemId);
+  if (!it) return "";
+  const cands = (state.room.members || []).filter(m => m.char && m.char.id !== ch.id);
+  if (!cands.length) return `<div class="give-row">🫱 Nobody else is at this table yet.</div>`;
+  return `<div class="give-row">🫱 <b>${esc(it.name)}</b> →
+    <select id="give-to">${cands.map(m => `<option value="${m.char.id}">${esc(m.char.name)} (${esc(m.username)})</option>`).join("")}</select>
+    qty <input id="give-qty" type="number" min="1" max="${it.qty || 1}" value="1" style="width:3.5rem">
+    <button id="give-go" class="primary">Give</button>
+    <button id="give-x" class="ghost">✕</button></div>`;
+}
 function renderSheet(tok){
   state.sel = tok ? tok.id : null;
   updateMoveControls();
@@ -974,10 +1352,15 @@ function renderSheet(tok){
   // D93: peers only ever receive the tactical allow-list (items/stats/spells
   // are sheet-private) — such a row renders as a compact public card.
   if (ch && ch.items === undefined && state.room.role !== "dm"){
+    // D153: the private card had no death block, so a party member looking at
+    // a downed ally saw "ask X at the table" and no way to Stabilize — the
+    // whole D150 button was DM-only in practice. tok.death is public table
+    // state, so only that block is shared; the sheet stays private.
     $("sheet-body").innerHTML = `<div class="hpbar"><div style="width:${Math.max(0,(ch.hp||0)/Math.max(1,ch.max_hp)*100)}%"></div></div>` +
       `<b>HP ${ch.hp}/${ch.max_hp}</b>${ch.temp_hp ? ` (+${ch.temp_hp} temp)` : ""} · AC ${ch.ac_total != null ? ch.ac_total : ch.ac} · Speed ${ch.speed} ft` +
-      `<div class="meta">Private sheet — ask ${esc(ch.name)} at the table.</div>`;
+      `<div class="meta">Private sheet — ask ${esc(ch.name)} at the table.</div>` + deathHtml(tok);
     $("hp-btns").classList.add("hidden"); $("hp-adv").classList.add("hidden");
+    wireDeath(tok);
     return;
   }
   const clsTxt = ch && ch.class_levels && ch.class_levels.length
@@ -990,15 +1373,19 @@ function renderSheet(tok){
   if (!ch){
     if (tok.npc && state.room.role === "dm"){ renderNpcSheet(tok); return; }
     body.innerHTML = `<div class="meta">No character attached.</div>` +
+      `<div class="row"><button id="btn-loot-npc" title="Take gear from this fallen creature — stand next to it">💰 Loot search</button></div>` +
       (state.room.role === "dm"
         ? `<div class="row"><button id="btn-del-npc" style="color:var(--red)">Remove token</button></div>` : "");
     $("hp-btns").classList.add("hidden"); $("hp-adv").classList.add("hidden");
     const del = $("btn-del-npc"); if (del) del.onclick = () => wsSend({ type:"del_token", token_id: tok.id });
+    const lo = $("btn-loot-npc"); if (lo) lo.onclick = () => openLootChest(tok.id);
     return;
   }
   const mod = v => { const m2 = Math.floor(((v||10)-10)/2); return (m2>=0?"+":"")+m2; };
   const isDM = state.room.role === "dm", own = tok.owner_user_id === state.me.id;
-  const spanRow = (isDM || own) ? _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) : "";
+  const canManageToken = isDM || own || tok.controller_user_id === state.me.id;
+  let spanRow = (isDM || own) ? _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _heightRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) + _verticalMoveRowHtml(tok) : "";
+  if (canManageToken && !spanRow) spanRow = _heightRowHtml(tok) + _verticalMoveRowHtml(tok);
   const ac = ch.ac_total != null ? ch.ac_total : ch.ac;
   const inv = (ch.items || []);
   const invRows = inv.map(it => {
@@ -1006,10 +1393,18 @@ function renderSheet(tok){
                    it.attuned ? "🔗" : "", (it.charges >= 0 && !it.unidentified) ? `⚡${it.charges}/${it.chargesMax != null ? it.chargesMax : it.charges}` : ""].filter(Boolean).join(" ");
     const btns = [];
     const known = !it.magic || it.identified;
-    if (isDM || own) { if (it.heal && known && it.charges !== 0) btns.push(`<button data-a="use" data-id="${it.id}">Use</button>`);
-      if (it.attunable) btns.push(`<button data-a="attune" data-id="${it.id}">${it.attuned ? "Untune" : "Attune"}</button>`); }
+    if (isDM || own) { if ((it.heal && known && it.charges !== 0) || (it.props && it.props.tool && known)) btns.push(`<button data-a="use" data-id="${it.id}">Use</button>`);
+      if (it.attunable) btns.push(`<button data-a="attune" data-id="${it.id}">${it.attuned ? "Untune" : "Attune"}</button>`);
+      // D98: a versatile weapon carried in the main hand can be re-gripped; the grip
+      // decides the actual damage dice (validated atomically server-side).
+      if ((isDM || own) && it.props && it.props.versatile && ch.equipment && ch.equipment.main_hand === it.id)
+        btns.push(`<button data-a="grip" data-id="${it.id}" data-grip="${it.grip === "two" ? "one" : "two"}" title="grip determines the damage dice">${it.grip === "two" ? "✋ two→one" : "🤲 one→two"}</button>`); }
     if (isDM && it.magic && !it.identified) btns.push(`<button data-a="identify" data-id="${it.id}">Identify</button>`);
     if (isDM && it.recharge) btns.push(`<button data-a="recharge" data-id="${it.id}">Recharge</button>`);
+    // D112: authorise this character item as stealable (Model B subset).
+    if (isDM) btns.push(`<button data-a="pk" data-id="${it.id}" title="Authorise this item for a pickpocket steal (Model B)">${it.pick ? "🤝 steal ✓" : "🤝 steal"}</button>`);
+    // D150: hand one of MY items to another character at this table.
+    if (own) btns.push(`<button data-a="give" data-id="${it.id}" title="Hand it to another character at this table — one transaction, no half-moves">🫱 give</button>`);
     return `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind]||"🎒"} ${esc(it.name)}${it.qty > 1 ? " ×" + it.qty : ""}</span> <small>${chips}</small>
       <small style="opacity:.6">${it.kind==="armor" ? ("AC "+(it.ac||(it.acBonus?("+"+it.acBonus):""))) : (it.heal?("+HP "+it.heal):"")}</small>
       ${it.unidentified ? "" : `<small style="opacity:.55"> ${esc(it.desc||"")}</small>`}<span class="inv-btns">${btns.join("")}</span></div>`;
@@ -1041,78 +1436,362 @@ function renderSheet(tok){
     ["str","dex","con","int","wis","cha"].map(a =>
       `<div class="skrow"><span>${a.toUpperCase()} <b>${sgn(der.save_bonuses[a])}</b>${(ch.saves||{})[a]?" ✓":""}</span>` +
       `<button class="sv-roll" data-ab="${a}">Roll</button></div>`).join("") + `</details>` : "";
+  // D96: chronological build (Stufe 1..20). A GENERIC, server-validated tool —
+  // the client renders the chronology and POSTs choices; the backend (charbuild)
+  // owns every rule and re-checks them, so this UI holds no class logic.
+  const buildBlock = ((own || isDM) && ch.id) ? (() => {
+    let led = {}; try { led = ch.build ? (typeof ch.build === "string" ? JSON.parse(ch.build) : ch.build) : {}; } catch { led = {}; }
+    const profs = led.class_proficiencies || {};
+    const casting = led.casting || {};
+    const castTxt = casting.ability ? `Casting ability: ${esc(casting.ability.toUpperCase())}` : "";
+    const profTxt = ["weapons", "armor", "tools"]
+      .filter(k => (profs[k] || []).length)
+      .map(k => `${k[0].toUpperCase() + k.slice(1)}: ${esc((profs[k] || []).join(", "))}`)
+      .join(" · ");
+    const sp = led.species || {};
+    const spTxt = sp.name ? [sp.size ? `${esc(sp.size)}` : "",
+      `${sp.speed_ft || 0} ft speed`,
+      sp.fly_ft ? `${sp.fly_ft} ft fly` : "", sp.swim_ft ? `${sp.swim_ft} ft swim` : "",
+      sp.climb_ft ? `${sp.climb_ft} ft climb` : "",
+      sp.darkvision_ft ? `${sp.darkvision_ft} ft darkvision` : "",
+      (sp.languages || []).length ? `Languages: ${esc((sp.languages || []).join(", "))}` : "",
+      (sp.traits || []).length ? `Traits: ${esc((sp.traits || []).join(", "))}` : ""]
+      .filter(Boolean).join(" · ") : "";
+    const hist = (led.history || []).map(h => `<div>L${h.level}: ${esc((h.features || []).join(", "))}</div>`).join("");
+    return `<details class="sheet-sec"><summary><h3>⬆️ Build / Level-up</h3></summary>` +
+      `<div class="meta" style="opacity:.75">${esc(led.class_id || clsTxt || "—")}` +
+        (led.applied_through ? ` · built to ${led.applied_through}` : " · unbuilt") +
+        (led.subclass ? ` · ${esc(led.subclass)}` : "") + `</div>` +
+      (profTxt ? `<div class="meta" style="opacity:.75">Proficiencies · ${profTxt}</div>` : "") +
+      (castTxt ? `<div class="meta" style="opacity:.75">${castTxt}${casting.model ? ` · ${esc(casting.model)} caster` : ""}</div>` : "") +
+      (spTxt ? `<div class="meta" style="opacity:.75">Species · ${esc(sp.name)} — ${spTxt}</div>` : "") +
+      (hist ? `<div class="meta" style="opacity:.8">${hist}</div>` : "") +
+      `<div class="row"><input id="bld-class" placeholder="class id" value="${esc(led.class_id || "")}" style="max-width:120px">` +
+      `<input id="bld-to" type="number" min="1" max="20" value="${(led.applied_through || 0) + 1}" style="width:52px" title="build TO level">` +
+      `<button id="bld-plan" class="ghost" type="button">🧭 Plan</button>` +
+      `<button id="bld-apply" class="primary" type="button">⬆ Apply</button></div>` +
+      `<textarea id="bld-ch" spellcheck="false" title="choices JSON" placeholder='{"skills":[...],"subclass":"...","levels":{"4":{"ability":{"dex":2}}}}'` +
+      ` style="width:100%;min-height:48px;font-size:.72rem">${esc(JSON.stringify(led.decisions || {}))}</textarea>` +
+      `<div id="bld-out" class="meta" style="opacity:.85"></div>` +
+      // D109: weapon masteries — grants from the level chronology or a DM
+      // grant; the entitlement, not the weapon, unlocks a mastery effect.
+      `<details id="mas-card" class="sheet-sec"><summary><h3>🎖 Weapon Masteries</h3></summary>` +
+      `<div id="mas-out" class="meta" style="opacity:.85">open to load</div></details>` +
+      `</details>`;
+  })() : "";
+
   const attackBlock = ((own || isDM) && (der.attack_profiles || []).length) ?
     (() => { const tg = state.tokens.filter(t => t.id !== tok.id);
       return `<details class="sheet-sec" open><summary><h3>Attacks <small style="opacity:.6">server-derived</small></h3></summary>` +
       der.attack_profiles.map(p =>
-        `<div class="skrow"><span>⚔️ ${esc(p.name)} <b>${sgn(p.to_hit)}</b> ` +
+        `<div class="skrow"><span>⚔️ ${esc(p.name)}${p.versatile ? ` <small style="opacity:.5">(${p.grip})</small>` : ""}${p.gated ? ` <small title="requires attunement — bonuses inert">🔒</small>` : ""}${p.mastery ? ` <small title="mastery property" style="opacity:.7">🎖 ${esc(p.mastery)}</small>` : ""} <b>${sgn(p.to_hit)}</b> ` +
         `<small style="opacity:.6">${p.dmg}${p.dmg_bonus ? (p.dmg_bonus >= 0 ? "+" : "") + p.dmg_bonus : ""}${p.dmg_type ? " " + p.dmg_type : ""}` +
-        `${p.range_ft ? " · " + p.range_ft + " ft" : (p.reach_ft ? " · reach " + p.reach_ft + " ft" : "")}</small></span>` +
+        `${p.extra_dmg ? " +" + p.extra_dmg + (p.extra_dmg_type ? " " + p.extra_dmg_type : "") : ""}` +
+        `${p.range_ft ? " · " + p.range_ft + " ft" + (p.range_long_ft ? "/" + p.range_long_ft : "") : (p.reach_ft ? " · reach " + p.reach_ft + " ft" : "")}</small></span>` +
         (own ? `<select class="atk-adv"><option value="">—</option><option value="adv">adv</option><option value="dis">dis</option></select>` +
-               `<select class="atk-slot"><option value="action">Action</option><option value="bonus">Bonus</option></select>` +
+               `<select class="atk-slot"><option value="action">Action</option><option value="bonus">Bonus</option>` +
+               `${(!p.ranged && p.light) ? `<option value="nick" title="Nick: the Light extra attack, part of the Attack action">Nick</option>` : ""}</select>` +
+               `${p.mastery ? `<label title="apply ${esc(p.mastery)} on this attack (server-enforced)" style="opacity:.8"><input class="atk-mastery" type="checkbox" value="${esc(p.mastery)}">🎖</label>` : ""}` +
+               `${p.mastery === "cleave" ? `<select class="atk-tgt2" title="Cleave: second target"><option value="">2nd tgt —</option>${tg.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("")}</select>` : ""}` +
                `<select class="atk-tgt"><option value="">no target</option>${tg.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("")}</select>` +
-               `<button class="atk-go primary" data-id="${p.item_id}">Attack</button>` : "") + `</div>`).join("") +
-      `</details>`; })() : "";
+       `<button class="atk-go primary" data-id="${p.item_id}">Attack</button>` : "") + `</div>`).join("") +
+       `</details>`; })() : "";
+  // D112: the 2024 special melee + pickpocket actions act through THIS token;
+  // the whole resolution is server-side (opposed/DC check, save, size/reach,
+  // action economy, op-id). The sheet only names the actor and the target.
+  const specialBlock = (own || isDM) ? (() => {
+    const tg = state.tokens.filter(t => t.id !== tok.id);
+    const opts = tg.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("");
+    const grappled = (tok.conds || []).some(c => String(c.k || "").toLowerCase() === "grappled");
+    return `<details class="sheet-sec"><summary><h3>🤼 Special &amp; Stealth <small style="opacity:.6">2024 · server</small></h3></summary>` +
+      `<div class="skrow"><span>Target</span>` +
+      `<select class="sp-tgt"><option value="">— none —</option>${opts}</select>` +
+      `<button class="sp-go" data-m="grapple" title="Grapple: your Str check sets a DC, the target saves Str or Dex">🤼 Grapple</button>` +
+      `<button class="sp-go" data-m="shove_prone" title="Shove to knock prone">⬇ Prone</button>` +
+      `<button class="sp-go" data-m="shove_push" title="Shove to push 5 ft (forced move)">➡ Push</button>` +
+      `<button class="sp-go" data-m="pickpocket" title="Pickpocket: concealed Sleight of Hand; the DM sees the result">🤝 Pick</button>` +
+      (grappled ? `<button class="sp-go" data-m="escape" title="Escape: Athletics or Acrobatics vs the grapple DC">🤼 Escape</button>` : "") +
+      `</div>` +
+      `<div class="meta" style="opacity:.7;font-size:.72rem">Escape needs no target. Grapple/Shove/Pick need an ADJACENT, visible target and cost your action (in initiative).</div>` +
+      `</details>`;
+  })() : "";
   let bookBlock = "";
-  if (ch.has_spellbook){
+  if (ch.has_spellbook || (spells && spells.length)){
     const slotLine = [];
-    for (let l=1;l<=9;l++){ const d = slots[String(l)] || slots[l]; if (d && d.max>0) slotLine.push(`<small>L${l} ${Math.max(0,d.max-d.used)}/${d.max}</small>`); }
+    let maxSlot = 0;
+    for (let l=1;l<=9;l++){ const d = slots[String(l)] || slots[l]; if (d && d.max>0){ maxSlot=l; slotLine.push(`<small>L${l} ${Math.max(0,d.max-d.used)}/${d.max}</small>`); } }
+    const castable = new Set(ch.abilities || []);
     const spRows = spells.map(sp => {
       const atk = _pb(lvlv) + _smod(_ab(sp.ability));
       const dc = 8 + _pb(lvlv) + _smod(_ab(sp.ability));
+      const registered = castable.has(sp.id);
+      const taring = sp.targeting || "single";
       let btns = "";
+      const prepTag = (own && sp.prep)
+        ? `<label class="tiny" title="Daily preparation (2024)"><input type="checkbox" class="prep-sp" data-id="${sp.id}"${sp.prepared ? " checked" : ""}> prep</label>` : "";
       if (own){
         if (sp.cast === "attack") btns += `<button class="roll-sp" data-k="spell_attack" data-id="${sp.id}">Atk +${atk}</button>`;
         if (sp.cast === "save") btns += `<button class="roll-sp" data-k="spell_dc" data-id="${sp.id}">DC ${dc}</button>`;
-        if (sp.dmg){ btns += `<button class="roll-sp" data-k="spell_damage" data-id="${sp.id}">Dmg</button>` +
-                             `<button class="roll-sp" data-k="spell_damage" data-crit="1" data-id="${sp.id}">×2</button>`; }
-        btns += `<button class="primary cast-sp" data-id="${sp.id}">${sp.level>0?"Cast ▸":"Use"}</button>`;
+        if (registered && (taring === "area" || taring === "point")){
+          btns += `<small style="opacity:.6" title="Cast an area/point spell from the tactical map">🎯 map</small>`;
+        } else if (registered){
+          let sel = "";
+          if (sp.level > 0 && maxSlot >= sp.level){
+            const opts = []; for (let l=sp.level;l<=maxSlot;l++) opts.push(`<option value="${l}"${l===sp.level?" selected":""}>L${l}</option>`);
+            sel = `<select class="cast-lvl" title="upcast slot level">${opts.join("")}</select>`;
+          }
+          // D161: SINGLE-targeted abilities (heals, Bane…) had NO target control —
+          // ability_cast shipped without target_id and the server answered "No
+          // target token", so the whole class of ally-targeted spells was
+          // uncastable from the sheet. Same visible-token list the attacks use.
+          if (taring === "single") {
+            const tg = state.tokens.filter(t => t.id !== tok.id)
+              .map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("");
+            sel += `<select class="ab-tgt" title="target">${tg ? `<option value="">target…</option>${tg}` : `<option value="">— no target —</option>`}</select>`;
+          }
+          btns += sel + `<button class="primary cast-ab" data-id="${sp.id}">${sp.level>0?"Cast ▸":"Use"}</button>`;
+        } else {
+          btns += `<button class="primary cast-sp" data-id="${sp.id}">${sp.level>0?"Cast ▸":"Use"}</button>`;
+        }
       }
-      return `<div class="sprow"><span>${sp.level>0?`<small>${sp.level}L</small>`:"<small>✨</small>"} ${esc(sp.name)}</span> <small style="opacity:.6">${esc(sp.school||"")}${sp.dmg?(" · "+esc(sp.dmg)):""}</small><span class="spbtns">${btns}</span></div>`;
+      return `<div class="sprow"><span>${sp.level>0?`<small>${sp.level}L</small>`:"<small>✨</small>"} ${esc(sp.name)} ${prepTag}</span> <small style="opacity:.6">${esc(sp.school||"")}${sp.dmg?(" · "+esc(sp.dmg)):""}</small><span class="spbtns">${btns}</span></div>`;
     }).join("");
     bookBlock = `<details class="sheet-sec" open><summary><h3>📖 Spellbook ${slotLine.length?`<small style="opacity:.6"> · ${slotLine.join(" ")}</small>`:`<small style="opacity:.6"> · no slots</small>`}</h3></summary>${spRows||`<div class="meta" style="opacity:.6">No spells learned.</div>`}</details>`;
-  } else if (own && spells.length){
-    bookBlock = `<details class="sheet-sec"><summary><h3>📖 Spellbook</h3></summary><div class="meta" style="opacity:.7">Add a <b>📖 spellbook</b> item to your character to cast at the table.</div></details>`;
   }
+  // D99: wallet + encumbrance + companions. Every number arrives pre-derived on
+  // the sheet (der.wallet / der.encumbrance) — the client renders and issues only
+  // authorised intents (DM grant/deduct, owner→member transfer); it NEVER sends a
+  // balance. A "companion" is a token already visible to this viewer (owner or
+  // controller = the same player, or bound to this character) — never a second
+  // model, never a token the viewer is not allowed to see or on a hidden plane.
+  const _wal = der.wallet || {};
+  const _cur = _wal.currencies || [];
+  const _coinOpts = _cur.map(c => `<option value="${c.id}">${c.id}</option>`).join("");
+  const _coinStr = (_wal.coins || []).filter(c => c.count).map(c => `${c.count} ${c.id}`).join(" ") || "empty";
+  const _legend = _cur.map(c => `${c.id}=${c.value_cp}cp`).join(" · ");
+  const _memOpts = (state.room.members || []).filter(mm => mm.char && mm.char.id !== ch.id)
+    .map(mm => `<option value="${mm.char.id}">${esc(mm.username)}</option>`).join("");
+  const _walletBlock = `<details class="sheet-sec"><summary><h3>🪙 Wallet <small style="opacity:.6">${esc(_coinStr)}</small></h3></summary>
+    <div class="meta" style="opacity:.7">Rates: ${esc(_legend)}</div>
+    ${own ? `<div class="wlabel" style="margin-top:.4rem">Transfer to a room member</div>
+      <div class="inv-row"><input class="money-amt" type="number" min="1" placeholder="amt" style="width:5rem">
+      <select class="money-coin">${_coinOpts}</select>
+      <select class="money-to">${_memOpts || '<option value="">(no one else)</option>'}</select>
+      <button class="money-send ghost">Send ▸</button></div>` : ""}
+    ${isDM ? `<div class="wlabel" style="margin-top:.4rem">DM · grant / deduct</div>
+      <div class="inv-row"><input class="money-amt" type="number" min="1" placeholder="amt" style="width:5rem">
+      <select class="money-coin">${_coinOpts}</select>
+      <button class="money-grant primary">Grant</button>
+      <button class="money-deduct ghost">Deduct</button></div>` : ""}</details>`;
+  const _enc = der.encumbrance || {};
+  const _pct = Math.max(0, Math.min(100, _enc.percent || 0));
+  const _weightBlock = `<details class="sheet-sec"><summary><h3>⚖️ Encumbrance <small style="opacity:.6">${_enc.carried||0} / ${_enc.capacity||0} lb</small></h3></summary>
+    <div class="hpbar"><div style="width:${_pct}%;${_enc.overloaded?"background:var(--red)":""}"></div></div>
+    <div class="meta">${(_enc.carried||0)} of ${(_enc.capacity||0)} lb (${_enc.percent||0}%)${_enc.overloaded ? ' · <b style="color:var(--red)">OVERLOADED</b>' : ""}</div>
+    <div class="meta" style="opacity:.55">Limit from effective Strength, size and worn carry-bonuses. Coins weigh ${( _enc.coin_weight||0.02 )} lb each. No movement penalty is applied yet.</div></details>`;
+  const _ownerUid = tok.owner_user_id;
+  const _rel = (t) => (_ownerUid && (t.owner_user_id === _ownerUid || t.controller_user_id === _ownerUid))
+                     || (ch && t.character_id === ch.id) || (isDM && t.owner_user_id === _ownerUid);
+  const _comp = (state.tokens || []).filter(t => t.id !== tok.id && _rel(t));
+  const _memName = (uid) => { const mm = (state.room.members || []).find(x => x.user_id === uid); return mm ? mm.username : ""; };
+  const _compRows = _comp.map(t => {
+    const youOwn = t.owner_user_id === state.me.id, youCtl = t.controller_user_id === state.me.id;
+    const badge = youOwn ? "yours" : (youCtl ? "you control" : (t.controller_user_id ? "led by " + esc(_memName(t.controller_user_id)) : "uncontrolled"));
+    const mount = t.mount_token_id ? (state.tokens.find(x => x.id === t.mount_token_id) || {}).label : "";
+    const ctlOpts = (state.room.members || []).map(mm => `<option value="${mm.user_id}"${(t.controller_user_id||0)===mm.user_id?" selected":""}>${esc(mm.username)}</option>`).join("");
+    const mountOpts = `<option value="">on foot</option>` + (state.tokens||[]).filter(x => x.id !== t.id)
+      .map(x => `<option value="${x.id}"${(t.mount_token_id||0)===x.id?" selected":""}>${esc(x.label||"token")}</option>`).join("");
+    return `<div class="inv-row" data-cmp="${t.id}"><b>${esc(t.label||"Companion")}</b>
+      <small style="opacity:.7"> · ${badge}${mount?` · rides ${esc(mount)}`:""}</small>
+      <button class="cmp-goto ghost" data-id="${t.id}" title="Select on the map">📍</button>
+      ${isDM ? `<select class="cmp-ctl" data-id="${t.id}" title="assign controller"><option value="">unled</option>${ctlOpts}</select>
+      <select class="cmp-mount" data-id="${t.id}" title="mount">${mountOpts}</select>
+      <button class="cmp-del ghost" data-id="${t.id}" title="remove">✕</button>` : ""}</div>`;
+  }).join("");
+  const _compBlock = `<details class="sheet-sec"><summary><h3>🐾 Companions <small style="opacity:.6">${_comp.length||0}</small></h3></summary>
+    ${_compRows || `<div class="meta" style="opacity:.6">No companions bound to this sheet.</div>`}
+    ${isDM ? `<div class="inv-row" style="margin-top:.3rem"><input id="cmp-name" placeholder="companion label" maxlength="32" style="flex:1">
+      <button id="cmp-add" class="ghost">＋ Add for ${esc(ch.name||"")} ▸</button></div>
+      <div class="meta" style="opacity:.5">Adds a token this player controls (owner). You can then assign a controller or a mount above. Only the DM may hand out control — a player can never seize another's companion.</div>` : ""}</details>`;
   body.innerHTML = spanRow + `
     <div class="hpbar"><div style="width:${Math.max(0,ch.hp/ch.max_hp*100)}%;${ch.hp/ch.max_hp<=.25?"background:var(--red)":""}"></div></div>
     <b>HP ${ch.hp}/${ch.max_hp}</b>${ch.temp_hp ? ` (+${ch.temp_hp} temp)` : ""} · AC ${ac} · Speed ${ch.speed} ft
-    ${der.prof_bonus != null ? `<div class="meta" style="opacity:.75">Initiative ${sgn(der.initiative)} · Proficiency ${sgn(der.prof_bonus)} · Hit dice ${Math.max(0,(ch.hit_dice_max||0)-(ch.hit_dice_spent||0))}/${ch.hit_dice_max||0}</div>` : ""}
+    ${(der.speed_effective && der.speed_effective !== ch.speed) ? `<small style="opacity:.7"> (→ ${der.speed_effective} ft worn)</small>` : ""}${der.darkvision_ft ? ` · <span title="darkvision from equipped items">👁 ${der.darkvision_ft} ft</span>` : ""}
+    ${der.prof_bonus != null ? `<div class="meta" style="opacity:.75">Initiative ${sgn(der.initiative)} · Proficiency ${sgn(der.prof_bonus)} · Hit dice ${Math.max(0,(ch.hit_dice_max||0)-(ch.hit_dice_spent||0))}/${ch.hit_dice_max||0}${der.hit_dice_bonus ? ` · Gear ${sgn(der.hit_dice_bonus)}` : ""}</div>` : ""}
     ${deathHtml(tok)}
     ${hpStatesHtml(tok, ch, own || isDM)}
     <div class="statline">${STATS.map(([k,l]) =>
       `<div class="stat"><small>${l}</small>${v(ch.stats,k)} <small>${der.stat_mods ? sgn(der.stat_mods[k]) : mod(v(ch.stats,k))}</small></div>`).join("")}</div>
     ${conditionsHtml(tok)}
     ${defenseHtml(ch.defenses)}
-    ${inv.length ? `<div class="inv"><div class="wlabel">Inventory <small style="opacity:.6">(attuned ${(ch.items||[]).filter(x=>x.attunable&&x.attuned).length}/${der.attune_max || 3})</small></div>${invRows}</div>` : ""}
-    ${attackBlock}${skillBlock}${saveBlock}${bookBlock}
+    ${inv.length ? `<div class="inv"><div class="wlabel">Inventory <small style="opacity:.6">(attuned ${(ch.items||[]).filter(x=>x.attunable&&x.attuned).length}/${der.attune_max || 3})</small></div>${invRows}${(own && state.giveId) ? _giveRowHtml(ch, state.giveId) : ""}</div>` : ""}
+    ${attackBlock}${specialBlock}${skillBlock}${saveBlock}${bookBlock}${buildBlock}
+    ${_walletBlock}${_weightBlock}${_compBlock}
     <details><summary style="cursor:pointer;font-size:.8rem;opacity:.7">Notes</summary><div style="white-space:pre-wrap;font-size:.82rem">${esc(ch.notes)}</div></details>`;
   for (const b of body.querySelectorAll(".inv-btns button")) b.onclick = () => {
     const id = b.dataset.id;
     if (b.dataset.a === "use") wsSend({ type:"use_item", token_id: tok.id, item_id: id, op_id: invOpId() });
+    else if (b.dataset.a === "grip") wsSend({ type:"inv_grip", char_id: ch.id, item_id: id, grip: b.dataset.grip, op_id: invOpId() });
     else if (b.dataset.a === "attune") wsSend({ type:"attune", char_id: ch.id, item_id: id });
     else if (b.dataset.a === "identify") wsSend({ type:"identify", char_id: ch.id, item_id: id });
     else if (b.dataset.a === "recharge") wsSend({ type:"recharge", char_id: ch.id, item_id: id });
+    else if (b.dataset.a === "pk") wsSend({ type:"pickable", char_id: ch.id, item_id: id,
+             action: (b.textContent || "").indexOf("✓") >= 0 ? "clear" : "set", op_id: invOpId() });
+    else if (b.dataset.a === "give") { state.giveId = (state.giveId === id ? null : id); renderSheet(tok); }
+  };
+  // D150: the one-shot recipient picker for 🫱 give — the server move is atomic.
+  const gGo = $("give-go"), gX = $("give-x");
+  if (gGo) gGo.onclick = () => {
+    const to = +$("give-to").value, qty = Math.max(1, +$("give-qty").value || 1);
+    wsSend({ type:"inv_transfer", char_id: ch.id, to_char_id: to, item_id: state.giveId,
+             qty, op_id: invOpId() });
+    state.giveId = null; renderSheet(tok); toast("Handing it over…");
+  };
+  if (gX) gX.onclick = () => { state.giveId = null; renderSheet(tok); };
+  // D99 wiring — money (authorised intents only) + companion controls (reuse the
+  // existing token_controller / token_mount / del_token / add_token handlers).
+  const _money = (action, row, extra) => {
+    const a = parseFloat(row.querySelector(".money-amt").value);
+    if (!(a > 0)) { toast("Enter an amount"); return; }
+    const msg = { type:"inv_money", action, char_id: ch.id, amount: a,
+                  coin: row.querySelector(".money-coin").value, op_id: invOpId() };
+    if (extra) Object.assign(msg, extra);
+    wsSend(msg);
+  };
+  for (const b of body.querySelectorAll(".money-send")) b.onclick = () => {
+    const to = +b.closest(".inv-row").querySelector(".money-to").value || -1;
+    _money("transfer", b.closest(".inv-row"), { to_char_id: to });
+  };
+  for (const b of body.querySelectorAll(".money-grant")) b.onclick = () => _money("grant", b.closest(".inv-row"));
+  for (const b of body.querySelectorAll(".money-deduct")) b.onclick = () => _money("deduct", b.closest(".inv-row"));
+  for (const b of body.querySelectorAll(".cmp-goto")) b.onclick = () => {
+    const t = (state.tokens || []).find(x => x.id === +b.dataset.id); if (t) renderSheet(t); };
+  for (const b of body.querySelectorAll(".cmp-ctl")) b.onchange = () =>
+    wsSend({ type:"token_controller", token_id:+b.dataset.id, controller_id:(+b.value)||null });
+  for (const b of body.querySelectorAll(".cmp-mount")) b.onchange = () =>
+    wsSend({ type:"token_mount", token_id:+b.dataset.id, mount_id:(+b.value)||null });
+  for (const b of body.querySelectorAll(".cmp-del")) b.onclick = () => {
+    if (confirm("Remove this companion?")) wsSend({ type:"del_token", token_id:+b.dataset.id }); };
+  const _ca = $("cmp-add");
+  if (_ca) _ca.onclick = () => {
+    const name = ($("cmp-name") && $("cmp-name").value || "Companion").slice(0, 32);
+    wsSend({ type:"add_token", label:name, owner_user_id:_ownerUid || null, size:"Small",
+             x:(tok.x||400)+40, y:(tok.y||300)+40 });
   };
   const _vis = () => ($("sr-vis") && $("sr-vis").value) || "public";
   for (const b of body.querySelectorAll(".sk-roll")) b.onclick = () => wsSend({ type:"roll", kind:"skill", skill: b.dataset.skill, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
   for (const b of body.querySelectorAll(".roll-sp")) b.onclick = () => wsSend({ type:"roll", kind: b.dataset.k, spell_id: b.dataset.id, crit: b.dataset.crit === "1", visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
+  for (const c of body.querySelectorAll(".prep-sp")) c.onchange = () =>
+    wsSend({ type: "spell_prepare",
+             spell_ids: [...body.querySelectorAll(".prep-sp")].filter(x => x.checked).map(x => x.dataset.id) });
   for (const b of body.querySelectorAll(".cast-sp")) b.onclick = () => wsSend({ type:"cast", spell_id: b.dataset.id, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null, op_id: invOpId() });
+  for (const b of body.querySelectorAll(".cast-ab")) b.onclick = () => {
+    const sel = b.closest(".spbtns") && b.closest(".spbtns").querySelector(".cast-lvl");
+    const msg = { type:"ability_cast", token_id: tok.id, ability_id: b.dataset.id, op_id: invOpId() };
+    if (sel && sel.value) msg.cast_level = +sel.value;
+    const tgt = b.closest(".spbtns") && b.closest(".spbtns").querySelector(".ab-tgt");
+    if (tgt && tgt.value) msg.target_id = +tgt.value;      // D161
+    wsSend(msg);
+  };
   for (const b of body.querySelectorAll(".sv-roll")) b.onclick = () => wsSend({ type:"roll", kind:"save", ability: b.dataset.ab, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
   for (const b of body.querySelectorAll(".atk-go")) b.onclick = () => {
     const row = b.closest(".skrow");
-    wsSend({ type:"roll", kind:"attack", item_id: b.dataset.id, token_id: tok.id,
+    const msg = { type:"roll", kind:"attack", item_id: b.dataset.id, token_id: tok.id,
              target_id: row.querySelector(".atk-tgt").value || null,
              adv: row.querySelector(".atk-adv").value || null,
              slot: row.querySelector(".atk-slot").value,
-             visibility:_vis(), op_id: invOpId() });
+             visibility:_vis(), op_id: invOpId() };
+    const ms = row.querySelector(".atk-mastery");
+    if (ms && ms.checked) { msg.mastery = ms.value;
+      const t2 = row.querySelector(".atk-tgt2"); if (t2) msg.target2_id = t2.value || null; }
+    wsSend(msg);
   };
+  // D112: Special & Stealth — every rule runs server-side; the sheet supplies
+  // only the actor (this token), the target, and a fresh op-id.
+  for (const b of body.querySelectorAll(".sp-go")) b.onclick = () => {
+    const m = b.dataset.m, row = b.closest(".skrow");
+    if (m === "escape") { wsSend({ type: "escape", token_id: tok.id, op_id: invOpId() }); return; }
+    const sel = row.querySelector(".sp-tgt"), tgt = sel && sel.value;
+    if (!tgt) { toast("Pick a target first"); return; }
+    const msg = { token_id: tok.id, target_id: +tgt, op_id: invOpId(), visibility: _vis() };
+    if (m === "grapple") { msg.type = "grapple"; }
+    else if (m === "shove_prone") { msg.type = "shove"; msg.mode = "prone"; }
+    else if (m === "shove_push") { msg.type = "shove"; msg.mode = "push"; }
+    else if (m === "pickpocket") { msg.type = "pickpocket"; }
+    wsSend(msg);
+  };
+  const _bld = () => { const c = $("bld-class"); return c ? { cls: c.value, to: +$("bld-to").value, raw: $("bld-ch").value } : null; };
+  const bp = $("bld-plan");
+  if (bp) bp.onclick = async () => { const b = _bld(), out = $("bld-out"); if (!b) return;
+    try { const p = await api(`/build/${state.room.code}/${ch.id}/plan?class_id=${encodeURIComponent(b.cls)}&to=${b.to}`);
+      const n = p.needs || {}, hints = [];
+      if (n.skills) hints.push(`skills ${n.skill_count}/${n.skill_options.length}: ${n.skill_options.join(", ")}`);
+      if (n.subclass) hints.push(`subclass: ${(p.subclass_options || []).join(", ")}`);
+      if (Object.keys(n.levels || {}).length) hints.push(`level choices: ${Object.keys(n.levels).join(", ")}`);
+      if (n.spell) hints.push(`${n.spell.model} caster — choose at spell levels e.g. {"levels":{"${n.spell.first}":{"cantrips":["${(n.spell.pool_cantrips||[])[0]||"id"}"],"spells":["${(n.spell.pool_spells||[])[0]||"id"}"]}}}`);
+      out.innerHTML = (p.ok ? `<span style="color:#9d9">plan ok · ${p.levels.length} levels</span>`
+                            : `<span style="color:#e74c3c">${esc((p.errors || []).join(", "))}</span>`)
+                  + (hints.length ? `<br>need: ${esc(hints.join(" | "))}` : "");
+    } catch (e) { out.textContent = e.message; } };
+  const ba = $("bld-apply");
+  if (ba) ba.onclick = async () => { const b = _bld(), out = $("bld-out"); if (!b) return;
+    let choices = {}; try { choices = b.raw ? JSON.parse(b.raw) : {}; } catch (e) { out.textContent = "choices JSON: " + e.message; return; }
+    try { const r = await fetch(`/api/build/${state.room.code}/${ch.id}/apply`,
+          { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ class_id: b.cls, to: b.to, choices }) });
+      const j = await r.json();
+      // D101 bug fix: refreshRoom() alone re-fetched the state but never RE-RENDERED
+      // the open sheet — the panel kept showing "unbuilt" + old skills until a full
+      // browser reload. Same re-render the snapshot WS handler does (40_ws.js).
+      if (j.ok) { toast("Built to level " + j.result.level); await refreshRoom();
+        if (state.sel) renderSheet(state.tokens.find(t => t.id === state.sel) || null); }
+      else if (j.needs_choice) out.innerHTML = `<span style="color:#f1c40f">choices still needed</span><br><small>${esc(JSON.stringify(j.needs_choice))}</small>`;
+      else out.innerHTML = `<span style="color:#e74c3c">${esc(j.error || j.reason || "refused")}</span>`;
+    } catch (e) { out.textContent = e.message; } };
+  // D109: mastery card — lazy GET report, one pending pick at a time, DM grants.
+  const masCard = $("mas-card");
+  if (masCard) {
+    const masPost = async (path, body) => {
+      try { const r = await fetch(`/api/build/${state.room.code}/${ch.id}${path}`,
+            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const j = await r.json();
+        if (!j.ok) toast("🎖 " + (j.error || j.reason || "refused"));
+        else { await refreshRoom();
+          renderSheet(state.tokens.find(t => t.id === state.sel) || null); }
+      } catch (e) { toast("🎖 " + e.message); }
+    };
+    const masLoad = async () => {
+      const out = $("mas-out"); if (!out) return;
+      try {
+        const d = await api(`/build/${state.room.code}/${ch.id}/mastery`);
+        const grants = (d.grants || []).map(g =>
+          `<div>${g.id ? "✓" : "◻"} ${g.via === "level" ? "L" + g.level : "DM grant"}: ` +
+          `<b>${esc(g.id || "— pending —")}</b></div>`).join("") ||
+          `<div style="opacity:.6">no masteries yet — they accrue as you level</div>`;
+        const pend = (d.grants || []).find(g => !g.id);
+        const pick = pend ? `<div class="row"><select id="mas-pick-sel">` +
+            (pend.pool || []).map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("") +
+            `</select><button id="mas-pick" class="primary" type="button">Choose</button></div>` : "";
+        const grant = state.room.role === "dm" ? `<div class="row" style="opacity:.85">` +
+            `<select id="mas-grant-sel">${["cleave","graze","nick","push","sap","slow","topple","vex"]
+              .map(m => `<option value="${m}">${m}</option>`).join("")}</select>` +
+            `<button id="mas-grant" class="ghost" type="button">DM grant</button></div>` : "";
+        out.innerHTML = grants + pick +
+          (d.allowed && d.allowed.length ? `<div>unlocked: ${esc(d.allowed.join(", "))}</div>` : "") + grant;
+        const pb = $("mas-pick");
+        if (pb) pb.onclick = () => masPost("/mastery", { pick: $("mas-pick-sel").value });
+        const gb = $("mas-grant");
+        if (gb) gb.onclick = () => masPost("/mastery/grant", { mastery: $("mas-grant-sel").value });
+      } catch (e) { out.textContent = e.message; }
+    };
+    masCard.addEventListener("toggle", () => { if (masCard.open) masLoad(); });
+  }
   wireConditions(tok);
   wireHpStates(tok);
   wireDeath(tok);
   wireSpanRow(tok);
-  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireLightRow(tok);
-  wireRotRow(tok); wireMoveModeRow(tok);
+  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireHeightRow(tok); wireLightRow(tok);
+  wireRotRow(tok); wireMoveModeRow(tok); wireVerticalMoveRow(tok);
   $("hp-btns").classList.toggle("hidden", state.room.role !== "dm" || !tok.character_id);
   $("hp-adv").classList.toggle("hidden", state.room.role !== "dm");
   function v(s,k){ const x = s && s[k]; return typeof x === "number" ? x : 10; }
@@ -1155,7 +1834,7 @@ function renderNpcSheet(tok){
     const d = n.spell_slots[String(lv)] || n.spell_slots[lv] || {max:0};
     slotCells.push(`<label class="slotcell">L${lv}<input class="npc-slot" data-lv="${lv}" type="number" min="0" max="9" value="${d.max||0}" style="width:36px"></label>`);
   }
-  body.innerHTML = _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) + `
+  body.innerHTML = _spanRowHtml(tok) + _visualRowHtml(tok) + _artRowHtml(tok) + _floorRowHtml(tok) + _heightRowHtml(tok) + _lightRowHtml(tok) + _rotRowHtml(tok) + _moveModeRowHtml(tok) + _verticalMoveRowHtml(tok) + `
     <div class="row"><input id="npc-name" placeholder="NPC name" value="${esc(tok.label)}" maxlength="32">
       <select id="npc-size">${["Tiny","Small","Medium","Large","Huge","Gargantuan"].map(s => `<option value="${s}" ${(tok.size||"Medium")===s?"selected":""}>${s}</option>`).join("")}</select>
       <select id="npc-disp"><option value="">neutral</option>${["friend","neutral","hostile"].map(d => `<option value="${d}" ${(tok.disposition||"")===d?"selected":""}>${d}</option>`).join("")}</select>
@@ -1178,8 +1857,16 @@ function renderNpcSheet(tok){
       <span class="tiny">fly</span><input id="npc-fly" type="number" min="0" value="${n.fly||0}" style="width:46px">
       <span class="tiny">swim</span><input id="npc-swim" type="number" min="0" value="${n.swim||0}" style="width:46px">
       <span class="tiny">climb</span><input id="npc-climb" type="number" min="0" value="${n.climb||0}" style="width:46px">
+      <span class="tiny">dark</span><input id="npc-dark" type="number" min="0" max="999" value="${n.darkvision_ft||0}" style="width:46px">
     </div>
+    <div class="row"><button id="npc-inventory" title="Manage this creature's carried gear (lives on the server, players never see it while it stands)">🎒 Inventory</button>
+      <button id="npc-loot" title="Take gear from this fallen creature" class="${(n.hp||0) > 0 ? "hidden" : ""}">💰 Loot</button></div>
     <div class="statline">${statCells}</div>
+    ${n.companion ? `<div class="tiny" id="npc-companion">🐾 Companion</div>` : ""}
+    ${Object.entries(n.skills || {}).filter(([, v]) => +v > 0).length
+      ? `<div class="tiny" id="npc-skills">Skills: ${esc(Object.entries(n.skills).filter(([, v]) => +v > 0)
+          .map(([k, v]) => `${SKILLS[k] ? SKILLS[k][0] : k} ${+v >= 2 ? "★★" : "★"}`).join(", "))}</div>`
+      : ""}
     <div class="row chips" id="npc-abil">${abilRolls}</div>
     <div class="row"><label><input type="checkbox" id="npc-prof"> proficient</label>
       <select id="npc-adv"><option value="">—</option><option value="adv">ADV</option><option value="dis">DIS</option></select></div>
@@ -1220,6 +1907,7 @@ function renderNpcSheet(tok){
       <button id="npc-save" class="primary">💾 Save NPC</button>
       <button id="npc-to-best" class="ghost">＋ Bestiary</button>
       <button id="npc-del" style="color:var(--red)">Remove</button>
+      <button id="npc-drop" class="ghost" title="Let go: a flyer or carried body falls from here (D162-3)">🪂 Drop</button>
     </div>`;
   for (const b of body.querySelectorAll(".npc-stat")) b.oninput = () => {
     n.stats = n.stats || {}; n.stats[b.dataset.k] = Math.max(1, Math.min(30, +b.value||10));
@@ -1233,7 +1921,10 @@ function renderNpcSheet(tok){
   $("npc-fly").oninput = e => n.fly = Math.max(0, +e.target.value||0);
   $("npc-swim").oninput = e => n.swim = Math.max(0, +e.target.value||0);
   $("npc-climb").oninput = e => n.climb = Math.max(0, +e.target.value||0);
+  $("npc-dark").oninput = e => n.darkvision_ft = Math.max(0, Math.min(999, +e.target.value||0));
   $("npc-lvl").oninput = e => { n.level = Math.max(1, Math.min(30, +e.target.value||1)); renderNpcSpells(tok); };
+  $("npc-inventory").onclick = () => openNpcChest(tok.id);
+  const _nl = $("npc-loot"); if (_nl) _nl.onclick = () => openLootChest(tok.id);
   for (const b of body.querySelectorAll(".npc-slot")) b.oninput = () => {
     const lv = b.dataset.lv; const prev = n.spell_slots[String(lv)] || {used:0};
     n.spell_slots[String(lv)] = { max: Math.max(0, Math.min(9, +b.value||0)), used: Math.min(Math.max(0,Math.min(9,+b.value||0)), prev.used||0) };
@@ -1273,14 +1964,16 @@ function renderNpcSheet(tok){
   $("npc-save").onclick = () => {
     wsSend({ type:"update_npc", token_id: tok.id, label: ($("npc-name").value||"NPC").slice(0,32),
       level: n.level, stats: n.stats, hp: n.hp, max_hp: n.max_hp, ac: n.ac, speed: n.speed,
-      fly: n.fly || 0, swim: n.swim || 0, climb: n.climb || 0,
+       fly: n.fly || 0, swim: n.swim || 0, climb: n.climb || 0,
+       darkvision_ft: n.darkvision_ft || 0,
       attacks: n.attacks, spells: n.spells, spell_slots: n.spell_slots,
-      saves: n.saves, defenses: n.defenses,
-      abilities: n.abilities, resources: n.resources, notes: n.notes,
+       saves: n.saves, defenses: n.defenses, companion: !!n.companion,
+       abilities: n.abilities, resources: n.resources, notes: n.notes,
       size: $("npc-size").value, disposition: $("npc-disp").value || "neutral" });
     toast("NPC saved");
   };
   $("npc-del").onclick = () => { if (confirm("Remove this NPC token?")) wsSend({ type:"del_token", token_id: tok.id }); };
+  $("npc-drop").onclick = () => wsSend({ type:"token_drop", token_id: tok.id });
   const ctl = $("npc-controller");
   if (ctl) ctl.onchange = () => wsSend({ type:"token_controller", token_id: tok.id,
                                          controller_id: (+ctl.value) || null });
@@ -1289,8 +1982,8 @@ function renderNpcSheet(tok){
                                          mount_id: (+mnt.value) || null });
   $("npc-to-best").onclick = () => saveNpcToBestiary(n, ($("npc-name").value || "NPC").slice(0,32), tok);
   wireSpanRow(tok);
-  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireLightRow(tok);
-  wireRotRow(tok); wireMoveModeRow(tok);
+  wireVisualRow(tok); wireArtRow(tok); wireFloorRow(tok); wireHeightRow(tok); wireLightRow(tok);
+  wireRotRow(tok); wireMoveModeRow(tok); wireVerticalMoveRow(tok);
   renderNpcSpells(tok);
   renderNpcAttacks(tok);
   renderNpcAbilities(tok);
@@ -1356,6 +2049,7 @@ function renderNpcAttacks(tok){
       (a.dmg?`<button class="atk-go" data-m="damage" title="Roll damage only">Dmg</button>`:"") +
       ((+a.dc>0)?`<button class="atk-go" data-m="dc" title="Post save DC">DC ${+a.dc}</button>`:"") +
       `<span class="tiny">dc</span><input class="na-dc" type="number" min="0" max="30" value="${a.dc||0}" style="width:38px">` +
+      `<span class="tiny">reach</span><input class="na-reach" type="number" min="0" max="999" value="${a.reach==null?5:a.reach}" style="width:48px">` +
       `<button class="na-del" title="Remove">✕</button>`;
     const send = mode => { const v = r.querySelector(".na-tgt").value;
       wsSend({ type:"npc_attack", token_id: tok.id, attack: idx, mode, target_id: v ? +v : null }); };
@@ -1363,6 +2057,7 @@ function renderNpcAttacks(tok){
     r.querySelector(".na-hit").oninput = e => a.to_hit = Math.max(-20, Math.min(30, +e.target.value||0));
     r.querySelector(".na-dmg").oninput = e => a.dmg = e.target.value;
     r.querySelector(".na-dc").oninput = e => a.dc = Math.max(0, Math.min(30, +e.target.value||0));
+    r.querySelector(".na-reach").oninput = e => a.reach = Math.max(0, Math.min(999, +e.target.value||0));
     r.querySelector(".na-del").onclick = () => { n.attacks.splice(idx, 1); renderNpcAttacks(tok); };
     for (const b of r.querySelectorAll(".atk-go")) b.onclick = () => send(b.dataset.m);
     box.appendChild(r);
@@ -1510,14 +2205,23 @@ function deathHtml(tok){
   const boxes = n => { let h = ""; for (let i=0;i<3;i++) h += `<span class="dsv${i<n?" on":""}"></span>`; return h; };
   const status = d.dead ? `<b style="color:var(--red)">DEAD</b>` : d.stable ? `<b style="color:var(--green)">Stable</b>` : `<b style="color:var(--red)">Dying</b>`;
   const roll = (own || isDM) && !d.stable && !d.dead ? `<button id="dsave" class="primary">☠ Roll Death Save</button>` : "";
+  // D150 (AP-022 UI closure): D136's Stabilize existed only as a WS op — the
+  // button rides the patient's death block; the server re-checks adjacency,
+  // the action and whose turn it is. A player can never stabilise themselves.
+  const mt = myToken();
+  const stab = (d.stable || d.dead) ? "" :
+    ((isDM || (mt && mt.id !== tok.id))
+      ? `<button id="dstab" class="ghost" title="Medicine check DC 10 — your action; you must be next to the patient">🩺 Stabilize</button>` : "");
   const clr = isDM ? `<button id="dclear" class="ghost">Clear</button>` : "";
   return `<div class="death"><div class="wlabel">Death Saves</div>
     <div class="dsrow"><span class="tiny">Succ</span><span class="dsucc">${boxes(d.s)}</span>
       <span class="tiny">Fail</span><span class="dfail">${boxes(d.f)}</span>${status}</div>
-    <div class="row dsbtns">${roll}${clr}</div></div>`;
+    <div class="row dsbtns">${roll}${stab}${clr}</div></div>`;
 }
 function wireDeath(tok){
   const b = $("dsave"); if (b) b.onclick = () => wsSend({ type:"death_save", token_id: tok.id });
+  const s = $("dstab"); if (s) s.onclick = () => { const m = myToken();
+    wsSend({ type:"stabilize", token_id: m ? m.id : -1, target_token_id: tok.id }); };
   const c = $("dclear"); if (c) c.onclick = () => wsSend({ type:"death_clear", token_id: tok.id });
 }
 
@@ -1653,10 +2357,42 @@ function renderInv(){
         btns.push(`<input id="split-q" type="number" min="1" max="${it.qty - 1}" value="1" style="width:52px">` +
                   `<button data-a="splitgo" data-id="${it.id}">Go</button>` +
                   `<button data-a="splitcancel">✕</button>`);
+      // D153: Use lived only on the sheet — the inventory window itself had no
+      // consumable path. Same server gate (use_item), same known/charges guard.
+      if ((it.heal && known && it.charges !== 0) || (it.props && it.props.tool && known))
+        btns.push(`<button data-a="use" data-id="${it.id}">Use</button>`);
       if (it.stackable)
         btns.push(`<button data-a="combine" data-id="${it.id}" ${state.invCombine === it.id ? "class='active'" : ""}>${state.invCombine === it.id ? "pick other" : "Combine"}</button>`);
       if (isDM) btns.push(`<button data-a="remove" data-id="${it.id}" style="color:var(--red)">Remove</button>`);
-      const sub = [known ? esc(it.desc || "") : "unidentified",
+      // D106: curse controls are DM-only UI over DM-only data; the sheet owner
+      // gets no buttons here at all — the server decides what an owner sees.
+      if (isDM && it.curse && it.curse.revealed)
+        btns.push(`<button data-a="conceal" data-id="${it.id}">☠ conceal</button>`);
+      if (isDM && it.curse && !it.curse.revealed)
+        btns.push(`<button data-a="reveal" data-id="${it.id}">☠ reveal</button>`);
+      if (isDM && it.curse && it.curse.whisper)
+        btns.push(`<button data-a="whisper" data-id="${it.id}" title="whisper the stored curse text to the current owner">☠ whisper</button>`);
+      // D113: arming (which event + which effect cell) and activation are DM
+      // authoring over the SAME curse metadata; they are orthogonal to reveal —
+      // the server keeps activation independent of disclosure.
+      if (isDM && it.curse && it.curse.trigger && it.curse.effects)
+        btns.push(it.curse.active
+          ? `<button data-a="deactivate" data-id="${it.id}" title="curse is ACTIVE and will fire">🔮 active</button>`
+          : `<button data-a="activate" data-id="${it.id}" title="curse is armed but DORMANT — switch it on">💤 dormant</button>`);
+      if (isDM && it.curse)
+        btns.push(`<button data-a="arm" data-id="${it.id}" title="choose which event fires this curse and its effect cell">⚙ arm</button>`);
+      if (isDM && it.curse)
+        btns.push(`<button data-a="cursee" data-id="${it.id}">☠ edit</button>` +
+                  `<button data-a="cursex" data-id="${it.id}" style="color:var(--red)">☠ ✕</button>`);
+      if (isDM && !it.curse)
+        btns.push(`<button data-a="cursee" data-id="${it.id}">☠ curse</button>`);
+      // owner (revealed by the DM) and DM both see the released fields; the
+      // whisper text only reaches its target through the private chat channel.
+      const curse = it.curse ? "☠ " + esc(it.curse.name || "A curse") +
+                    (it.curse.desc ? " — " + esc(it.curse.desc) : "") +
+                    (isDM && it.curse.whisper ? " 📜" : "") +
+                    (isDM && it.curse.active ? " 🔮" : "") : "";
+      const sub = [known ? esc(it.desc || "") : "unidentified", curse,
                    it.weight ? it.weight + " lb" : ""].filter(Boolean).join(" · ");
       return `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind] || "🎒"} ${esc(it.name)}${it.qty > 1 ? " ×" + it.qty : ""}</span>` +
         `<small style="opacity:.55"> ${sub}</small><span class="inv-btns">${btns.join("")}</span></div>`;
@@ -1666,6 +2402,9 @@ function renderInv(){
       if (a === "equip"){
         const slot = items.querySelector(`select[data-slot="${id}"]`)?.value || "main_hand";
         wsSend({ type: "inv_equip", char_id: ch.id, slot, item_id: id, op_id: invOpId() });
+      } else if (a === "use"){   // D153: consumable path in the inventory window
+        const t = state.tokens.find(x => x.character_id === ch.id);
+        wsSend({ type: "use_item", token_id: t ? t.id : -1, item_id: id, op_id: invOpId() });
       } else if (a === "split"){ state.invSplit = id; renderInv(); }
       else if (a === "splitcancel"){ state.invSplit = null; renderInv(); }
       else if (a === "splitgo"){
@@ -1680,6 +2419,18 @@ function renderInv(){
         const it = inv.find(i => i.id === id);
         const q = window.confirm(`Remove ALL ${it ? it.qty : ""} × ${it ? it.name : ""}?`) ? (it ? it.qty : 1) : 0;
         if (q > 0) wsSend({ type: "inv_remove", char_id: ch.id, item_id: id, qty: q, op_id: invOpId() });
+      } else if (a === "cursee" || a === "cursex" || a === "reveal" || a === "conceal" || a === "whisper"){
+        // D106: every authority lives server-side; the client only names the
+        // instance — never a recipient, never a disclosure truth of its own.
+        if (a === "cursee") curseEdit({ char_id: ch.id }, inv.find(i => i.id === id) || { id });
+        else if (a === "cursex"){
+          if (window.confirm("Remove the curse from this item?"))
+            wsSend({ type: "curse", action: "clear", char_id: ch.id, item_id: id, op_id: invOpId() });
+        }
+        else wsSend({ type: "curse", action: a, char_id: ch.id, item_id: id, op_id: invOpId() });
+      } else if (a === "arm" || a === "activate" || a === "deactivate"){
+        if (a === "arm") curseArm({ char_id: ch.id }, inv.find(i => i.id === id) || { id });
+        else wsSend({ type: "curse", action: a, char_id: ch.id, item_id: id, op_id: invOpId() });
       }
     });
   }
@@ -1707,38 +2458,199 @@ function wireInvStatic(){
     if (!defId) { toast("Create an item definition first."); return; }
     wsSend({ type: "inv_grant", char_id: ch.id, def_id: defId, qty, op_id: invOpId() });
   };
-  const mk = $("inv-mkdef");
-  if (mk) mk.onclick = () => {
-    const name = (($("inv-newname") || {}).value || "").trim();
-    if (!name){ toast("Name it first."); return; }
-    // D93: attack properties ride the definition — the server validates
-    // every one of them (gear.clean_props); the client just collects.
+  const _v = id => { const el = $(id); return el ? (el.value || "") : ""; };
+  const _ck = id => !!($(id) && $(id).checked);
+  const _num = id => { const el = $(id); if (!el || el.value === "") return null;
+    const n = +el.value; return Number.isFinite(n) ? n : null; };
+  function collectDef(){
+    const name = _v("inv-newname").trim(); if (!name) return null;
     const props = {};
-    const dmg = (($("inv-newdmg") || {}).value || "").trim();
-    if (dmg) props.damage_dice = dmg;
-    const dt = (($("inv-newdtype") || {}).value || ""); if (dt) props.damage_type = dt;
-    const ab = (($("inv-newatab") || {}).value || ""); if (ab) { props.ability = ab; props.mod_to_damage = true; }
-    if (($("inv-newprof") || {}).checked) props.proficient = true;
-    wsSend({ type: "item_def", action: "create", defn: {
-      name, kind: (($("inv-newkind") || {}).value || "other"),
-      stackable: !!($("inv-newstack") || {}).checked,
-      weight: +(($("inv-newweight") || {}).value || 0),
-      props }, op_id: invOpId() });
-    $("inv-newname").value = "";
+    const put = (k, val) => { if (val !== "" && val !== null && val !== false && !(Array.isArray(val) && !val.length)) props[k] = val; };
+    put("damage_dice", _v("inv-newdmg").trim().toLowerCase());
+    put("damage_dice_two_handed", _v("inv-newdmg2").trim().toLowerCase());
+    if (_ck("inv-newvers")) props.versatile = true;
+    if (_ck("inv-new2h")) props.two_handed = true;
+    if (_ck("inv-newfin")) props.finesse = true;
+    put("reach_ft", _num("inv-newreach"));
+    put("range_ft", _num("inv-newrgn"));
+    put("range_long_ft", _num("inv-newrgl"));
+    const ab = _v("inv-newatab"); if (ab) { props.ability = ab; }
+    if (_ck("inv-newprof")) props.proficient = true;
+    put("attack_bonus", _num("inv-newatabonus"));
+    put("damage_bonus", _num("inv-newdmbonus"));
+    put("damage_type", _v("inv-newdtype"));
+    put("extra_damage_dice", _v("inv-newextra").trim().toLowerCase());
+    put("extra_damage_type", _v("inv-newextrat").trim().toLowerCase());
+    put("ac_base", _num("inv-newacbase"));
+    put("ac_bonus", _num("inv-newacbonus"));
+    put("ac_max_dex", _num("inv-newacmaxdex"));
+    put("attribute_bonus", _v("inv-newattrb").trim());
+    put("attribute_set", _v("inv-newattrset").trim());
+    put("darkvision_ft", _num("inv-newdark"));
+    put("speed_bonus_ft", _num("inv-newspeed"));
+    put("skill_prof", _v("inv-newskill").trim());
+    put("expertise", _v("inv-newexpert").trim());
+    put("save_prof", _v("inv-newsave").trim());
+    put("charges", _num("inv-newcharges"));
+    if (_ck("inv-newrecharge")) props.recharge = "long";
+    if (_ck("inv-newmagic")) props.magic = true;
+    if (_ck("inv-newattune")) props.attune = true;
+    const defn = { name, kind: _v("inv-newkind") || "other",
+      stackable: _ck("inv-newstack"), weight: +(_v("inv-newweight") || 0),
+      desc: _v("inv-newdesc"), props };
+    const eid = _v("inv-editid"); if (eid) defn.id = eid;
+    return defn;
+  }
+  function clearDefForm(){
+    ["inv-newname","inv-newdmg","inv-newdmg2","inv-newreach","inv-newrgn","inv-newrgl",
+     "inv-newatabonus","inv-newdmbonus","inv-newextra","inv-newextrat","inv-newacbase",
+     "inv-newacbonus","inv-newacmaxdex","inv-newattrb","inv-newattrset","inv-newdark",
+     "inv-newspeed","inv-newskill","inv-newexpert","inv-newsave","inv-newcharges",
+     "inv-newdesc","inv-editid"].forEach(id => { if ($(id)) $(id).value = ""; });
+    ["inv-newvers","inv-new2h","inv-newfin","inv-newprof","inv-newrecharge","inv-newmagic",
+     "inv-newattune","inv-newstack"].forEach(id => { if ($(id)) $(id).checked = false; });
+    if ($("inv-newweight")) $("inv-newweight").value = "0";
+    ["inv-newdtype","inv-newatab","inv-newkind"].forEach(id => { if ($(id)) $(id).selectedIndex = 0; });
+  }
+  function fillDefForm(d){
+    clearDefForm();
+    const setv = (id, v) => { if ($(id) && v != null) $(id).value = v; };
+    const setck = (id, v) => { if ($(id)) $(id).checked = !!v; };
+    const p = d.props || {};
+    $("inv-editid").value = d.id || "";
+    setv("inv-newname", d.name); setv("inv-newdesc", d.desc); setv("inv-newweight", d.weight);
+    setv("inv-newkind", d.kind); if ($("inv-newkind")) $("inv-newkind").value = d.kind || "other";
+    setck("inv-newstack", d.stackable);
+    setv("inv-newdmg", p.damage_dice); setv("inv-newdmg2", p.damage_dice_two_handed);
+    setck("inv-newvers", p.versatile); setck("inv-new2h", p.two_handed); setck("inv-newfin", p.finesse);
+    setv("inv-newreach", p.reach_ft); setv("inv-newrgn", p.range_ft); setv("inv-newrgl", p.range_long_ft);
+    if (p.ability && $("inv-newatab")) $("inv-newatab").value = p.ability;
+    setck("inv-newprof", p.proficient);
+    setv("inv-newatabonus", p.attack_bonus); setv("inv-newdmbonus", p.damage_bonus);
+    if (p.damage_type && $("inv-newdtype")) $("inv-newdtype").value = p.damage_type;
+    setv("inv-newextra", p.extra_damage_dice); setv("inv-newextrat", p.extra_damage_type);
+    setv("inv-newacbase", p.ac_base); setv("inv-newacbonus", p.ac_bonus); setv("inv-newacmaxdex", p.ac_max_dex);
+    if (p.attribute_bonus) setv("inv-newattrb", Object.entries(p.attribute_bonus).map(([a, b]) => a + (b >= 0 ? "+" : "") + b).join(","));
+    if (p.attribute_set) setv("inv-newattrset", p.attribute_set.ability + "," + p.attribute_set.value);
+    setv("inv-newdark", p.darkvision_ft); setv("inv-newspeed", p.speed_bonus_ft);
+    if (Array.isArray(p.skill_prof)) setv("inv-newskill", p.skill_prof.join(","));
+    if (Array.isArray(p.expertise)) setv("inv-newexpert", p.expertise.join(","));
+    if (Array.isArray(p.save_prof)) setv("inv-newsave", p.save_prof.join(","));
+    setv("inv-newcharges", p.charges); setck("inv-newrecharge", p.recharge === "long");
+    setck("inv-newmagic", p.magic); setck("inv-newattune", p.attune);
+    const ed = $("inv-defeditor"); if (ed) ed.open = true;
+  }
+  const save = $("inv-mkdef");
+  if (save) save.onclick = () => {
+    const defn = collectDef();
+    if (!defn) { toast("Name it first."); return; }
+    wsSend({ type: "item_def", action: defn.id ? "update" : "create", defn, op_id: invOpId() });
+  };
+  const nc = $("inv-newclear");
+  if (nc) nc.onclick = clearDefForm;
+  const ld = $("inv-loaddef");
+  if (ld) ld.onclick = () => {
+    const id = ($("inv-def") || {}).value || "";
+    const d = (state.itemDefs || []).find(x => x.id === id);
+    if (!d) { toast("Pick a definition to edit."); return; }
+    fillDefForm(d);
   };
 }
 
-function openInvContainer(ob){
-  state.invChest = { object_id: ob.id, label: ob.label || "Container",
-                     floor: state.viewFloor || "", items: [], loading: true };
+/* D106: DM curse administration for one concrete item instance. Three small
+   channels ride the ONE "curse" transport: set/clear (metadata), reveal/conceal
+   (disclosure to the current owner) and whisper (private delivery, recipient
+   resolved server-side). The editor is intentionally prompt-based to match the
+   inventory panel's minimal style; all truth is authored by the server reply
+   "curse_updated", never by what was typed in. */
+function curseEdit(scope, it){
+  const c = it.curse || {};
+  const name = window.prompt("Curse name (DM only)", c.name || "");
+  if (name === null) return;
+  const desc = window.prompt("Secret description (DM only — players never see this until revealed)", c.desc || "");
+  if (desc === null) return;
+  const whisper = window.prompt("Whisper text for the owner (stays secret, delivered only via \"☠ whisper\")", c.whisper || "");
+  if (whisper === null) return;
+  if (!name && !desc && !whisper){ toast("Give the curse a name, a description or a whisper text."); return; }
+  wsSend({ type: "curse", action: "set", ...scope, item_id: it.id,
+           name, desc, whisper, op_id: invOpId() });
+}
+
+function curseArm(scope, it){
+  // D113: choose WHICH event arms this curse and the effect-grammar cell it
+  // runs (the same grammar a magic item uses). The server validates the cell and
+  // refuses a bad one; activation stays a separate, orthogonal switch (⚙/🔮).
+  const c = it.curse || {};
+  const trig = window.prompt("Trigger event that fires the curse\n(use, equip, unequip, on_hit, on_damaged, on_transfer)", c.trigger || "");
+  if (trig === null) return;
+  const effects = window.prompt("Effect cell — JSON, e.g. {\"ops\":[{\"op\":\"condition\",\"key\":\"prone\",\"until\":\"end\"}]}",
+                                c.effects || "");
+  if (effects === null) return;
+  wsSend({ type: "curse", action: "arm", ...scope, item_id: it.id,
+           trigger: trig.trim(), effects, op_id: invOpId() });
+}
+
+function applyCurseUpdate(p){
+  // DM-only authoritative patch: the server tells us the stored truth for
+  // exactly this instance; local panels render THAT, so they can never drift
+  // ahead of (or behind) the stored metadata.
+  let items = null;
+  if (p.char_id != null){
+    const m = ((state.room && state.room.members) || []).find(
+      x => x.char && String(x.char.id) === String(p.char_id));
+    items = m && m.char.items;
+  } else if (state.invChest && String(state.invChest.object_id) === String(p.object_id)){
+    items = state.invChest.items;
+  }
+  const it = (items || []).find(i => String(i.id) === String(p.item_id));
+  if (it){ if (p.curse) it.curse = p.curse; else delete it.curse; }
+  renderInv();
+}
+
+function openInvContainer(ob){  state.invChest = { object_id: ob.id, label: ob.label || "Container",
+                     floor: state.viewFloor || "", items: [], coins: 0, loading: true };
   setSideTab("inv"); renderInvChest();
   wsSend({ type: "inv_container", action: "inspect", object_id: ob.id, floor: state.viewFloor || "" });
 }
 
 function showInvContents(p){
+  // p.npc_token marks a D105 NPC container ("tok:<id>"); the source (who may
+  // do WHAT with it — world chest vs DM manage vs looting) was decided at
+  // open time and survives the server reply.
+  const prev = state.invChest && state.invChest.object_id === p.object_id ? state.invChest : null;
   state.invChest = { object_id: p.object_id, label: p.label || "Container",
-                     floor: p.floor || "", items: p.items || [] };
+                     floor: p.floor || "", items: p.items || [], coins: p.coins || 0,
+                     token_id: p.npc_token != null ? p.npc_token : (prev && prev.token_id) || null,
+                     src: p.npc_token != null ? ((prev && prev.src) || "loot") : "chest" };
   setSideTab("inv"); renderInvChest();
+}
+/* D105: open the same chest panel for an NPC container. Inventory management
+   (src npc) is DM-only server-side; looting (src loot) works for anyone who
+   stands next to the body — the server says "It isn't here." while it stands. */
+function openNpcChest(tokId){
+  const tok = state.tokens.find(t => t.id === tokId);
+  state.invChest = { object_id: "tok:" + tokId, token_id: tokId, src: "npc",
+                     label: ((tok && tok.label) || "NPC"), floor: (tok && tok.floor) || "",
+                     items: [], coins: 0, loading: true };
+  setSideTab("inv"); renderInvChest();
+  wsSend({ type: "npc_inv", action: "inspect", token_id: tokId });
+}
+/* D133: a map LOOT object flagged `container` opens the SAME chest window on
+   the server key "loot:<id>" — contents arrive only from inv_container. */
+function openLootObject(lo){
+  state.invChest = { object_id: "loot:" + lo.id, label: lo.label || "Loot",
+                     floor: state.viewFloor || "", items: [], coins: 0, loading: true };
+  setSideTab("inv"); renderInvChest();
+  wsSend({ type: "inv_container", action: "inspect", object_id: "loot:" + lo.id,
+           floor: state.viewFloor || "" });
+}
+function openLootChest(tokId){
+  const tok = state.tokens.find(t => t.id === tokId);
+  state.invChest = { object_id: "tok:" + tokId, token_id: tokId, src: "loot",
+                     label: ((tok && tok.label) || "Fallen creature"), floor: (tok && tok.floor) || "",
+                     items: [], coins: 0, loading: true };
+  setSideTab("inv"); renderInvChest();
+  wsSend({ type: "loot", action: "inspect", token_id: tokId });
 }
 
 function renderInvChest(){
@@ -1749,20 +2661,48 @@ function renderInvChest(){
   box.classList.remove("hidden");
   const isDM = state.room && state.room.role === "dm";
   const ch = invTargetChar();
+  const src = cs.src || "chest";
+  const _dst = src === "chest" ? { type: "inv_container", object_id: cs.object_id, floor: cs.floor }
+                               : { type: src === "npc" ? "npc_inv" : "loot", token_id: cs.token_id };
+  // D106: DM curse authoring also works on world chests and NPC carcasses;
+  // reveal/whisper are deliberately NOT offered here — they need a player
+  // owner, which a container does not have (the server enforces the same).
+  const _curseScope = src === "chest" ? { object_id: cs.object_id, floor: cs.floor }
+                                      : { token_id: cs.token_id };
   const rows = (cs.items || []).map(it =>
     `<div class="inv-row"><span class="inv-name">${ITEM_ICONS[it.kind] || "🎒"} ${esc(it.name)} ×${it.qty}</span>` +
-    `<small style="opacity:.55"> ${esc(it.desc || "")}</small><span class="inv-btns">` +
-    `<input id="tk-q-${it.id}" type="number" min="1" max="${it.qty}" value="1" style="width:52px">` +
-    `<button data-tk="${it.id}" ${ch ? "" : "disabled"}>Take</button>` +
-    (isDM ? `<button data-rm="${it.id}" style="color:var(--red)">Remove</button>` : "") +
-    `</span></div>`).join("") || `<div class="meta">${cs.loading ? "opening…" : "Empty."}</div>`;
+    `<small style="opacity:.55"> ${[esc(it.desc || ""),
+      (isDM && it.curse) ? "☠ " + esc(it.curse.name || "a curse") + (it.curse.whisper ? " 📜" : "") : ""
+    ].filter(Boolean).join(" · ")}</small><span class="inv-btns">` +
+    (src === "npc" ? "" :
+      `<input id="tk-q-${it.id}" type="number" min="1" max="${it.qty}" value="1" style="width:52px">` +
+      `<button data-tk="${it.id}" ${ch ? "" : "disabled"}>${src === "loot" ? "Loot" : "Take"}</button>`) +
+    (isDM ? `<button data-ce="${it.id}">${it.curse ? "☠ edit" : "☠ curse"}</button>` +
+            (it.curse ? `<button data-arm="${it.id}">⚙ arm</button>` +
+              (it.curse.trigger && it.curse.effects
+                ? `<button data-act="${it.id}">${it.curse.active ? "🔮 active" : "💤 dormant"}</button>` : "") +
+              `<button data-cx="${it.id}" style="color:var(--red)">☠ ✕</button>` : "") : "") +
+    // D112: authorise THIS NPC item as stealable (Model B subset). Only an NPC
+    // container can be flagged here; the server re-inspects so the label flips.
+    (isDM && src === "npc" ? `<button data-pk="${it.id}" title="Authorise this item for a pickpocket steal (Model B)">${it.pick ? "🤝 steal ✓" : "🤝 steal"}</button>` : "") +
+    (isDM && src !== "loot" ? `<button data-rm="${it.id}" style="color:var(--red)">Remove</button>` : "") +
+    `</span></div>`).join("") || `<div class="meta">${cs.loading ? "opening…" : (src === "loot" ? "Nothing to loot." : "Empty.")}</div>`;
   const own = (ch && ch.items || []).filter(i => !i.unidentified);
+  const _coinOpts = ["cp", "sp", "ep", "gp", "pp"].map(c => `<option value="${c}">${c}</option>`).join("");
+  const _coinCtl = `<input id="coin-amt" type="number" min="1" value="1" style="width:60px"><select id="coin-sel">${_coinOpts}</select>`;
+  const _coinRow = (cs.coins > 0)
+    ? `<div class="inv-row"><span class="inv-name">🪙 <b>${cs.coins} cp</b></span><span class="inv-btns">${_coinCtl}` +
+      (src === "npc" ? (isDM ? `<button id="coin-out" title="Take coin out (gone from this container)">Remove</button><button id="coin-fill">Add</button>` : "") :
+        `<button id="coin-take" ${ch ? "" : "disabled"}>${src === "loot" ? "Loot" : "Take"}</button>` +
+        (isDM && src === "chest" ? `<button id="coin-fill">Add</button>` : "")) + `</span></div>`
+    : (isDM && src !== "loot" ? `<div class="inv-row"><span class="inv-name"><small style="opacity:.6">🪙 no coin — </small></span><span class="inv-btns">${_coinCtl}<button id="coin-fill">Add coin</button></span></div>` : "");
   box.innerHTML = `<h3>📦 ${esc(cs.label)} <button id="chest-close" class="ghost" title="close">✕</button></h3>` +
-    rows +
-    (cs.loading ? "" : `<div class="row"><select id="put-item" title="take from this character's inventory">` +
-      (own.map(i => `<option value="${i.id}">${esc(i.name)} ×${i.qty}</option>`).join("") || "<option value=''>nothing to put</option>") +
-      `</select><input id="put-q" type="number" min="1" value="1" style="width:52px">` +
-      `<button id="chest-put" ${ch && own.length ? "" : "disabled"}>Put</button>` +
+    _coinRow + rows +
+    (cs.loading || src === "loot" || !(isDM || src === "chest") ? "" : `<div class="row">` +
+      (src === "chest" ? `<select id="put-item" title="take from this character's inventory">` +
+        (own.map(i => `<option value="${i.id}">${esc(i.name)} ×${i.qty}</option>`).join("") || "<option value=''>nothing to put</option>") +
+        `</select><input id="put-q" type="number" min="1" value="1" style="width:52px">` +
+        `<button id="chest-put" ${ch && own.length ? "" : "disabled"}>Put</button>` : "") +
       (isDM ? `<select id="fill-def" title="definition to put in">` +
         ((state.itemDefs || []).map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join("") || "<option value=''>no defs</option>") +
         `</select><input id="fill-q" type="number" min="1" value="1" style="width:52px"><button id="chest-fill">Fill</button>` : "") +
@@ -1771,12 +2711,29 @@ function renderInvChest(){
   if (cl) cl.onclick = () => { state.invChest = null; renderInvChest(); };
   box.querySelectorAll("button[data-tk]").forEach(b => b.onclick = () => {
     const q = +(($("tk-q-" + b.dataset.tk) || {}).value || 1);
-    wsSend({ type: "inv_container", action: "move", object_id: cs.object_id, floor: cs.floor,
-             char_id: ch.id, item_id: b.dataset.tk, qty: q, op_id: invOpId() });
+    wsSend({ ..._dst, action: src === "loot" ? "take" : "move", char_id: ch.id,
+             item_id: b.dataset.tk, qty: q, op_id: invOpId() });
   });
   box.querySelectorAll("button[data-rm]").forEach(b => b.onclick = () => {
-    wsSend({ type: "inv_container", action: "remove", object_id: cs.object_id, floor: cs.floor,
-             item_id: b.dataset.rm, qty: 9999, op_id: invOpId() });
+    wsSend({ ..._dst, action: "remove", item_id: b.dataset.rm, qty: 9999, op_id: invOpId() });
+  });
+  box.querySelectorAll("button[data-ce]").forEach(b => b.onclick = () =>
+    curseEdit(_curseScope, (cs.items || []).find(i => String(i.id) === b.dataset.ce) || { id: b.dataset.ce }));
+  box.querySelectorAll("button[data-arm]").forEach(b => b.onclick = () =>
+    curseArm(_curseScope, (cs.items || []).find(i => String(i.id) === b.dataset.arm) || { id: b.dataset.arm }));
+  box.querySelectorAll("button[data-act]").forEach(b => {
+    const it = (cs.items || []).find(i => String(i.id) === b.dataset.act) || {};
+    wsSend({ type: "curse", action: it.curse && it.curse.active ? "deactivate" : "activate",
+             ..._curseScope, item_id: b.dataset.act, op_id: invOpId() });
+  });
+  box.querySelectorAll("button[data-cx]").forEach(b => b.onclick = () => {
+    if (window.confirm("Remove the curse from this item?"))
+      wsSend({ type: "curse", action: "clear", ..._curseScope, item_id: b.dataset.cx, op_id: invOpId() });
+  });
+  box.querySelectorAll("button[data-pk]").forEach(b => {
+    const it = (cs.items || []).find(i => String(i.id) === b.dataset.pk) || {};
+    wsSend({ type: "pickable", token_id: cs.token_id, item_id: b.dataset.pk,
+             action: it.pick ? "clear" : "set", op_id: invOpId() });
   });
   const put = $("chest-put");
   if (put) put.onclick = () => {
@@ -1787,7 +2744,12 @@ function renderInvChest(){
   const fill = $("chest-fill");
   if (fill) fill.onclick = () => {
     const id = (($("fill-def") || {}).value || ""); if (!id) return;
-    wsSend({ type: "inv_container", action: "fill", object_id: cs.object_id, floor: cs.floor,
-             def_id: id, qty: +(($("fill-q") || {}).value || 1), op_id: invOpId() });
+    wsSend({ ..._dst, action: "fill", def_id: id, qty: +(($("fill-q") || {}).value || 1), op_id: invOpId() });
   };
+  const _coin = (action) => wsSend({ ..._dst, action, char_id: ch && ch.id,
+    amount: +(($("coin-amt") || {}).value || 1),
+    coin: (($("coin-sel") || {}).value || "cp"), op_id: invOpId() });
+  const ct = $("coin-take"); if (ct) ct.onclick = () => _coin("coins_take");
+  const cf = $("coin-fill"); if (cf) cf.onclick = () => _coin("coins_fill");
+  const co = $("coin-out"); if (co) co.onclick = () => _coin("coins_remove");
 }

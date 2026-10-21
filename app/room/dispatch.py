@@ -10,32 +10,76 @@ from .combat import (handle_dash, handle_end_turn, handle_hp, handle_init_end,
                      handle_turn_mark)
 from .conditions import (handle_cond_add, handle_cond_remove,
                             handle_knock_prone, handle_stand)
-from .death import handle_death_clear, handle_death_save
+from .death import handle_death_clear, handle_death_save, handle_stabilize
 from .doors import handle_door
 from .encounters import handle_spawn_encounter
+from .grapple import handle_escape, handle_grapple, handle_shove
 from .dice import (handle_cast, handle_long_rest, handle_npc_attack, handle_resource,
-                   handle_roll, handle_short_rest)
+                   handle_roll, handle_short_rest, handle_spell_prepare)
 from .items import handle_attune, handle_identify, handle_recharge, handle_use_item
+from .loot import handle_roll_loot
 from .fog import handle_fog_edit, handle_fog_toggle
 from .interact import handle_interact
-from .inv import (handle_inv_adjust, handle_inv_container, handle_inv_equip,
-                  handle_inv_grant, handle_inv_remove, handle_inv_transfer,
-                  handle_item_def)
+from .lights import handle_lamp                          # D104: DM light management
+from .inv import (handle_curse, handle_inv_adjust, handle_inv_container, handle_inv_equip,
+                   handle_inv_grant, handle_inv_grip, handle_inv_money, handle_inv_remove, handle_inv_transfer,
+                   handle_item_def, handle_loot, handle_npc_inv)
 from .movement import handle_move, handle_path_preview, handle_stop_move
 from .moveforced import handle_forced_move
 from .net import broadcast, get_map, map_lock, send_to, set_map, sys_msg
 from .pings import handle_ping
+from .pickpocket import handle_pickable, handle_pickpocket, handle_pickpocket_take
 from .progression import handle_class_levels
 from .quests import (handle_quest_add, handle_quest_complete, handle_quest_delete,
                      handle_quest_fail, handle_quest_obj_add, handle_quest_obj_done,
                      handle_quest_update)
 from .secret_events import handle_secret_event
 from .status import handle_exhaustion, handle_inspiration, handle_temp_hp
+from .traps import handle_trap                    # D113: data-driven discover/disarm
 from .tokens import (handle_add_token, handle_del_token, handle_token_controller,
+                     handle_token_drop,
                      handle_token_mount, handle_token_rotate, handle_token_span,
                      handle_token_visual, handle_update_npc, handle_token_image,
                      handle_token_floor, handle_token_light,
-                     handle_token_darkvision)
+                     handle_token_darkvision, handle_token_height)
+
+
+from .pending import handle_damage_confirm
+
+
+async def handle_map_remove(ws, room_id, user, is_dm, msg):
+    """D162-6: remove the trap/loot entities on ONE cell of ONE plane — the
+    live counterpart of the editor's traprm/lootrm brushes. DM-only with a
+    LOUD refusal (D162-11); scoped by floor so other planes' entities are
+    provably untouched; runtime flags of surviving entities stay authoritative
+    (absence removes only the named cell's entries)."""
+    if not is_dm:
+        await send_to(ws, "error", {"msg": "DM only"})
+        return
+    kind = str(msg.get("kind") or "")
+    if kind not in ("trap", "loot"):
+        return await send_to(ws, "error", {"msg": "kind must be trap or loot"})
+    try:
+        cx, cy = int(msg.get("x")), int(msg.get("y"))
+    except (TypeError, ValueError):
+        return await send_to(ws, "error", {"msg": "cell x,y required"})
+    fl = str(msg.get("floor") or "")
+    if not floors.exists(room_id, fl):
+        return await send_to(ws, "error", {"msg": "No such floor"})
+    key = "traps" if kind == "trap" else "loot"
+    async with map_lock(room_id):
+        mp = get_map(room_id, fl)
+        before = len(mp.get(key) or [])
+        mp[key] = [e for e in (mp.get(key) or [])
+                   if not (e.get("x") == cx and e.get("y") == cy)]
+        removed = before - len(mp[key])
+        if removed:
+            set_map(room_id, mp, fl)
+    if not removed:
+        return await send_to(ws, "error", {"msg": "Nothing to remove on that cell"})
+    await send_to(ws, "whisper", {"msg": f"Removed {removed} {kind} entity(ies) "
+                                         f"on {fl or 'the ground floor'}."})
+    await broadcast(room_id, "map_changed", None)
 
 
 async def handle_map_edit(ws, room_id, user, is_dm, msg):
@@ -89,11 +133,45 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
                 trap["discovered"] = bool(prev.get("discovered"))
                 trap["triggered"] = bool(prev.get("triggered"))
                 trap["triggered_by"] = prev.get("triggered_by")
+                # D113 Phase 5: a disarmed trap stays disarmed — a stale editor
+                # snapshot must not silently re-arm one the players already
+                # disabled (same authoritative-runtime-flag rule as the rest).
+                if prev.get("disarmed"):
+                    trap["disarmed"] = True
+                    trap["triggered"] = True
         old_loot = {e.get("id"): e for e in old.get("loot", [])}
         for loot in mp_new.get("loot", []):
             prev = old_loot.get(loot.get("id"))
             if prev is not None:
                 loot["taken_by"] = prev.get("taken_by")
+                loot["hinted"] = bool(prev.get("hinted"))   # D133 runtime marker
+        # D162-1: stair targets are validated at AUTHORING time — a dangling
+        # plane name used to save cleanly and only answer "Nothing happens." at
+        # use time. The primary ("" ) is always a valid target. Legacy maps that
+        # already carry a dangling stair stay saveable (compatibility): only a
+        # NEW or CHANGED dangling target is refused, with an understandable msg.
+        def _stair_target(o):
+            op = ((o.get("interact") or {}).get("op")) or {}
+            return op["floor"] if op.get("kind") == "stair" else None
+        legacy_dangling = set()
+        for o in old.get("objects", []):
+            tf = _stair_target(o)
+            if tf is not None and not floors.exists(room_id, tf):
+                legacy_dangling.add((o.get("id"), tf))
+        bad_targets = []
+        for o in mp_new.get("objects", []):
+            tf = _stair_target(o)
+            if tf is None or floors.exists(room_id, tf):
+                continue
+            if (o.get("id"), tf) in legacy_dangling:
+                continue
+            bad_targets.append(tf)
+        if bad_targets:
+            return await send_to(ws, "error", {"msg":
+                "Stairs point at a floor that does not exist: "
+                + ", ".join(sorted(set(bad_targets)))
+                + " - pick a real floor from the dropdown "
+                "(the ground floor is selectable as Ground (primary))."})
         # D82: object runtime state (the generic boolean carrier) is authoritative
         # world state — a stale editor snapshot must not reset it (trap precedent).
         old_objs = {e.get("id"): e for e in old.get("objects", [])}
@@ -117,6 +195,9 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
     if dark_changed:
         from .visibility import reevaluate_visibility
         await reevaluate_visibility(room_id)
+    if old.get("openv") != mp_new.get("openv"):
+        from .visibility import reevaluate_visibility
+        await reevaluate_visibility(room_id)
 
 
 HANDLERS = {
@@ -132,8 +213,10 @@ HANDLERS = {
     "fog_edit": handle_fog_edit,
     "fog_toggle": handle_fog_toggle,
     "map_edit": handle_map_edit,
+    "lamp": handle_lamp,                                 # D104: DM-only lamp add/update/remove
     "add_token": handle_add_token,
     "del_token": handle_del_token,
+    "token_drop": handle_token_drop,        # D162-3: DM lets a flyer/body go
     "update_npc": handle_update_npc,
     "cond_add": handle_cond_add,
     "cond_remove": handle_cond_remove,
@@ -141,6 +224,7 @@ HANDLERS = {
     "knock_prone": handle_knock_prone,
     "token_span": handle_token_span,
     "token_visual": handle_token_visual,      # D82: presentation bounds only
+    "token_height": handle_token_height,      # D114: vertical body (height_ft/elevation_ft)
     "token_image": handle_token_image,        # D85: server-validated artwork asset only
     "token_floor": handle_token_floor,        # D86: change the occupancy/visibility plane
     "token_light": handle_token_light,        # D87: light radius in cells (dark rooms)
@@ -153,6 +237,7 @@ HANDLERS = {
     "aoe": handle_aoe,
     "death_save": handle_death_save,
     "death_clear": handle_death_clear,
+    "stabilize": handle_stabilize,          # D136: Help-to-stabilize check
     "init_start": handle_init_start,
     "init_next": handle_init_next,
     "init_end_round": handle_init_end_round,
@@ -166,6 +251,8 @@ HANDLERS = {
     "identify": handle_identify,
     "recharge": handle_recharge,
     "cast": handle_cast,
+    "spell_prepare": handle_spell_prepare,
+    "roll_loot": handle_roll_loot,
     "long_rest": handle_long_rest,
     "short_rest": handle_short_rest,
     "resource": handle_resource,
@@ -195,7 +282,21 @@ HANDLERS = {
     "inv_adjust": handle_inv_adjust,           # D92: split/combine (owner)
     "inv_transfer": handle_inv_transfer,       # D92: member→member hand-off
     "inv_equip": handle_inv_equip,             # D92: (un)equip a slot
+    "inv_grip": handle_inv_grip,               # D98: versatile one/two-handed grip
+    "inv_money": handle_inv_money,             # D99: grant/deduct (DM) / transfer (owner) coin
     "inv_container": handle_inv_container,     # D92: world container inspect/move
+    "npc_inv": handle_npc_inv,                 # D105: DM manages NPC inventories
+    "loot": handle_loot,                       # D105: looting a downed NPC
+    "curse": handle_curse,                     # D106: DM-authored secret item curses
+    "grapple": handle_grapple,                 # D112: 2024 Grapple (check→save)
+    "shove": handle_shove,                     # D112: 2024 Shove (prone | 5-ft push)
+    "escape": handle_escape,                   # D112: escape a grapple (fixed DC)
+    "pickpocket": handle_pickpocket,           # D112: concealed steal attempt (DM)
+    "pickpocket_take": handle_pickpocket_take,  # D112: auto-steal a DM-'pick' item
+    "pickable": handle_pickable,               # D112: DM authorizes stealable items
+    "trap": handle_trap,                        # D113: data-driven search/disarm/spring
+    "map_remove": handle_map_remove,            # D162-6: DM trap/loot removal by cell
+    "damage_confirm": handle_damage_confirm,  # D162-7: Apply/Decline rolled damage
 }
 
 

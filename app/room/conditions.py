@@ -22,10 +22,18 @@ async def handle_cond_add(ws, room_id, user, is_dm, msg):
     if tok is False:
         await send_to(ws, "error", {"msg": "Not your token"})
         return
-    conds = C.add(C.load(tok), msg.get("key"), msg.get("rounds", 0), msg.get("until", ""))
+    conds = C.add(C.load(tok), msg.get("key"), msg.get("rounds", 0), msg.get("until", ""),
+                  dc=msg.get("dc"), sa=msg.get("sa"))
     db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), tok["id"]))
     sys_msg(room_id, f"{tok['label']} is now {C.label(str(msg.get('key','')).strip())}.")
     await send_cond_bump(room_id, tok, conds)     # SPRINT-21: hidden NPC stays hidden
+    # D113 (2024): a concentration-ending state landing (DM-authored too) ends a
+    # concentrating creature's concentration outright — re-reads the just-written
+    # state and, if it now blocks, clears the flag + every linked condition.
+    from .concentration import enforce_after_condition
+    await enforce_after_condition(room_id, tok)
+    from .fall import after_condition              # D162-3: flyer + let-go state
+    await after_condition(room_id, tok)
 
 
 async def handle_cond_remove(ws, room_id, user, is_dm, msg):
@@ -100,6 +108,8 @@ async def knock_prone(room_id, tok, actor="DM"):
     db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), tok["id"]))
     sys_msg(room_id, f"{tok['label']} is knocked prone ({actor}).")
     await send_cond_bump(room_id, tok, conds)     # trap knocks too (D83 callers)
+    from .fall import after_condition              # D162-3: a flyer without hover falls
+    await after_condition(room_id, tok)
     return conds
 
 

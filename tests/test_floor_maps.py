@@ -35,9 +35,16 @@ def state_floor(client, user, code, floor=""):
     return r.json()
 
 
-def add_floor(client, dm, code, name):
+def add_floor(client, dm, code, name, ground=True):
     r = client.post(f"/api/rooms/{code}/floors", json={"name": name}, headers=H(dm))
     assert r.status_code == 200, r.text
+    # D159: a never-edited non-primary plane is now open AIR, not a floor slab.
+    # These D88/D114 tests assert the plane behaves as a standable, solid plane
+    # (isolation, a solid ceiling, DM-hopped walkers), so the DM lays a floor by
+    # default. ground=False keeps it as open volume for the new-air geometry.
+    if ground:
+        set_floor_grid(client, dm, code, name,
+                       lambda g: g.update(cells=[0] * len(g["cells"])))
 
 
 def set_floor_grid(client, dm, code, floor, mutate):
@@ -99,26 +106,28 @@ def test_walls_and_stairs_obey_the_plane_map(client):
     # The crypt is SEALED along the very row the token stands on: the same
     # cell that is free air on primary is solid rock one plane down.
     set_floor_grid(client, dm, code, "crypt", lambda g: wall_row(g, cy))
-    with ws_connect(client, player, code) as wsp:
+    # D102: the token_floor channel is DM-only — the terrain check on the
+    # target plane runs the same, but the transition arrives through the DM.
+    with ws_connect(client, player, code) as wsp, ws_connect(client, dm, code) as wsd:
         # walkable on primary (the wall exists only crypt-side) ...
         wsp.send_json({"type": "path_preview", "token_id": mine["id"],
                        "tx": cx, "ty": cy + 3})
         prev = recv_until(wsp, "path_preview")["payload"]
         assert prev.get("path"), "open primary must yield a route"
         # ... stepping DOWN into rock is refused by the target plane's terrain
-        wsp.send_json({"type": "token_floor", "token_id": mine["id"], "floor": "crypt"})
-        err = recv_until(wsp, "error", fail_on_error=False)
+        wsd.send_json({"type": "token_floor", "token_id": mine["id"], "floor": "crypt"})
+        err = recv_until(wsd, "error", fail_on_error=False)
         assert err["kind"] == "error" and "room" in err["payload"]["msg"].lower()
     assert db.q1("SELECT floor FROM tokens WHERE id=?", (mine["id"],))["floor"] == ""
     # DM opens the seam (plane-local edit only), and the same step now works
     set_floor_grid(client, dm, code, "crypt",
                    lambda g: [g["cells"].__setitem__(cell_idx(g, x, cy), 0)
                               for x in range(g["w"])])
-    with ws_connect(client, player, code) as wsp:
-        wsp.send_json({"type": "token_floor", "token_id": mine["id"], "floor": "crypt"})
-        ev = wsp.receive_json()
+    with ws_connect(client, dm, code) as wsd:
+        wsd.send_json({"type": "token_floor", "token_id": mine["id"], "floor": "crypt"})
+        ev = wsd.receive_json()
         while ev.get("kind") not in ("token_floor", "error"):
-            ev = wsp.receive_json()
+            ev = wsd.receive_json()
         assert ev["kind"] == "token_floor", ev
     assert db.q1("SELECT floor FROM tokens WHERE id=?", (mine["id"],))["floor"] == "crypt"
     # primary is UNTOUCHED by every crypt edit above

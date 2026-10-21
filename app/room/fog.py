@@ -46,7 +46,8 @@ async def handle_fog_edit(ws, room_id, user, is_dm, msg):
         set_map(room_id, mp, fl)
     # D88: plane-scoped — a client must never receive fog truth for a plane it
     # is not standing on (the client applies cells/explored blindly).
-    await send_to_plane(room_id, fl, "fog_changed", {"cells": changed, "terrain": terrain})
+    await send_to_plane(room_id, fl, "fog_changed",
+                        {"cells": changed, "terrain": terrain, "floor": fl})
 
 
 async def handle_fog_toggle(ws, room_id, user, is_dm, msg):

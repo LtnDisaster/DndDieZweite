@@ -10,6 +10,14 @@ docker compose run --rm test                     # CANONICAL: pinned py3.12 imag
 for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 ```
 
+## Done — D159: offene Volumen, signed Levels, freie 3D-Flugbewegung (2026-10-19)
+- [x] Terrain `air`(6): nie bearbeitete Nicht-Primary-Ebene = Luft, Ground (E0) = Boden; gespeicherte Zellen byte-identisch (D159)
+- [x] Massive Platte: gelegte Fläche deckelt Säule + blockiert Sicht/Vertikalbewegung; `openv`/`air`/`void` öffnen (`mapmodel.slab`, `vertical3d.boundary_open`)
+- [x] Signierte/below-Ebenen (Keller E−1/E−2) mit abwärtskompatiblem Speicher (`floors.level_map`/`order`, `FloorIn.below`)
+- [x] Freie 3D-Flugbewegung über die EINE Engine (`find_path_3d` + `vertical_path_clear`): Mehrgeschoss + diagonale Komposition, serverseitige Kollision/Budget/Größe
+- [x] Anzeige-Filter „All visible“/„This floor only“ (rein darstellend) + E-Tags (E0/E+1/E−1) + Cross-Etagen-Badge im Canvas
+- [x] Air-Pinsel + plane-abhängiger „erase“; `test_d159_open_volumes.py` + `test_d159_view_frontend.py`; Kanon 1137 passed; echter Chromium-E2E rc=0
+
 ## Done — features (context anchor)
 - [x] Accounts / characters / rooms / join codes / chat / initiative
 - [x] Server-authoritative dice, traps, loot, HP (D3, D6)
@@ -414,16 +422,20 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       compose overrides), `scripts/make_release.sh` with post-archive forbidden-path check.
 
 ## P1 — Repo hygiene
-- [ ] Add a `Makefile`/`scripts/smoke.sh`: start (pidfile) -> live `vtt_smoke*.mjs` -> stop
+- [x] **Makefile + scripts/smoke.sh (D143, 2026-10-17):** live smoke starts uvicorn on an
+      ephemeral loopback port with its own VTT_DATA_DIR, proves health/register/room over
+      HTTP, stops via pidfile trap. `make test|compile|check|smoke|lock` wraps the checks.
       (the `.mjs` suites stay a **dev-only** live-server harness; `pytest` is the durable suite).
-- [ ] Pin exact Python/FastAPI/uvicorn/starlette versions (`requirements.lock`) for reproducible CI.
+- [x] **requirements.lock (D143, 2026-10-17):** full transitive freeze of the canonical
+      Docker test image (incl. starlette); `make lock` regenerates it deliberately.
 - [ ] Optional CI job: `pytest` + `compileall` + `node --check` on push.
 
 ## P2 — Known soft spots (call out before touching)
 - [ ] **Path preview latency:** `findPathJS` was removed and movement is now server-authoritative.
       Remaining drift risk is UI formatting only; add a browser e2e test for async preview requests.
-- [ ] **Ghost persistence:** `_last_seen` is in-memory (D9) — lost on restart, wrong under
-      multi-worker. Persist to `room_state`/DB before scaling beyond one process.
+- [x] **Ghost persistence (D142, 2026-10-17):** viewer fog memory is persisted to
+      room_state.ghosts_json at disconnect and hydrated on first sight/room join —
+      restart-safe in one process; multi-worker remains the known boundary.
 - [ ] **Multi-token per user:** ownership is one-token-per-user by construction (assign reuses),
       but nothing enforces it in the schema; door adjacency now handles legacy multi-token rows
       (D49 era). Decide explicitly before adding a feature that creates second tokens.
@@ -464,10 +476,14 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
       SSRF/private-network/hostname policy would tighten this without removing local files.
 - [ ] YouTube/Spotify playback depends on third-party autoplay policy; direct audio is the most
       reliable channel for selective/private effects.
-- [ ] Consumable potions (remove on last use) — currently charges-only, potions aren't deleted.
-- [ ] Attunement UX: warn/gate attuning to an *unidentified* magic item.
+- [x] Consumable potions (remove on last use) — D146: potion/scroll entries are
+      consumed in the same transaction as the heal (qty>1 loses one dose,
+      cursed entries stay, rechargeables keep the depleted shell).
+- [x] Attunement UX (D147: resolved by rule, not by gate — attuning to an
+      unidentified magic item IDENTIFIES it, exactly as DMG/SRD prescribe).
 - [ ] Per-party (vs per-item) knowledge of identified items; party shared notes.
-- [ ] Cross-tab / reconnect: seed ghosts more robustly; multi-socket-per-user testing.
+- [x] Cross-tab / reconnect (D148): multi-socket tests prove prune/persist/hydrate
+      are per-user not per-socket; reconnect re-seeds ghosts from the DB.
 - [ ] Browser e2e (Playwright) for canvas: route preview + ghost rendering — the JS split is
       verified by parity + `node --check` + the WS/REST suites, **not** by a real DOM/canvas test.
 - [ ] NPC blocks now cover abilities + HP/AC + spells (D24) **and natural attacks + a bestiary**
@@ -485,5 +501,800 @@ for f in app/static/js/*.js; do node --check "$f"; done   # JS syntax check
 - [x] F2 hidden-target probing oracle closed; error byte-identical to nonexistent
 - [x] F3 inv_ops namespaced per acting char/object (no migration)
 - [x] tests/test_sprint24_hardening.py (7 live-dispatch adversarial tests)
-- [ ] DEFERRED: live range/reach pin (harness grant-of-2nd-def flaky — server
-      gate itself implemented; skip marker carries the reason)
+- [x] Live range/reach pin restored (`tests/test_sprint24_hardening.py`): the old
+      harness failure came from alphabetically ambiguous definition-ID lookup;
+      lookup is now by name. No skip remains.
+
+## Done — Sprint 25 Phase A: CSV content packages (2026-10-12, D95)
+- [x] `app/content.py` — ONE content engine: 8-kind schema (species/class/subclass/
+      item/spell/background/feat/creature), parse/validate(file/line/column),
+      idempotent apply + conflict/replace, ZIP auto-detect, export with formula
+      escaping; **no code executed from CSV**; size/row/zip-bomb guards.
+- [x] Reuses the engines (no second engine): items→`item_defs`(typed combat props,
+      `weapon_profiles` reads range), spells→`abilities.register` (slot cost),
+      everything else read back from `content` (Phase B/sheet). Restart-safe
+      (`main.startup` re-registers abilities from the DB).
+- [x] `content` table `(kind,room_id,id)` in `db.py` (additive; room 0 = global).
+- [x] `app/content_api.py` — DM-only REST `/api/content/{code}` import(preview/apply/
+      replace)/export(one|zip)/kinds; raw-body transport (no python-multipart).
+- [x] `app/content_pack/*.csv` technical pack (original names; ATTRIBUTION.md).
+- [x] DM "📚 Rule packages" panel + `app/static/js/70_content.js` (registered in the
+      D78 integrity gate). Guide: `docs/CSV_CONTENT_GUIDE.md`.
+- [x] `tests/test_content.py` + `tests/test_content_examples.py` (16 doc examples
+      imported by the real importer). **Canonical (py3.12): 593 passed, 18 skipped.**
+- [ ] **PHASE C:** known-vs-prepared spell model; slot-progression TABLE (D58).
+
+## Done — Sprint 25 Phase B: chronological character build (2026-10-12, D96)
+- [x] `app/charbuild.py` — pure `plan()`/`apply()` Stufe 1–20 from D95 content;
+      drives ONLY the existing engines (`progression.set_class_levels`, HP from
+      `hp_base`/`hp_per_level`, `gear.clean_saves/clean_skills`, ASI/feat→`stats`).
+      No second engine; slots never derived from total level (D58).
+- [x] Additive `characters.build` ledger (class, applied_through, subclass,
+      per-level decisions, `base_stats` snapshot). Idempotent forward recompute;
+      missing choices → `needs_choice` writes nothing; rebuild ≤ applied_through refused.
+- [x] `app/charbuild_api.py` room-scoped `/api/build/{code}/{cid}` plan/apply;
+      authz mirrors `class_levels` (owner / room-DM via `room_members`).
+- [x] Room-sheet "⬆️ Build / Level-up" section (generic; renders chronology, POSTs
+      choices; no class logic in the client).
+- [x] `tests/test_charbuild.py` (Stufe 1/8/20 chronology, subclass/ASI/feat on
+      their levels, needs_choice no-write, repeat/forward guard, restart ledger,
+      owner-vs-DM-vs-outsider authz).
+## Done — Sprint 25 Phase C: class spellcasting through the existing engines (2026-10-12, D97)
+- [x] Content schema additive: `spell_first_level`/`spell_replace`/`class_resource_reset`
+      (class) + `scale_tiers` (spell); `slot_progression` is now a per-class-level
+      **TABLE the build READS** (never derived from total level, D58).
+- [x] `charbuild`: known-model classes CHOOSE at each total-delta level
+      (`needs_choice`), prepared-model use the class list; writes castable
+      `abilities`, display `spells`, the slot table and `class_resource` → the
+      generic `resources` list. Non-casters write none of the spell columns.
+- [x] `abilities.execute`: `cast_level` (upcast `upcast_step`) and cantrip
+      `scale_tiers` applied generically into the ONE base dice term; `op_id` is
+      claimed up-front inside the write tx → one slot and one effect per request.
+- [x] `handle_long_rest` also refills short-reset class resources (long ≥ short).
+- [x] Sheet spellbook: registered spells cast via `ability_cast` (+ upcast level
+      select), AoE aimed from the map; `gear.clean_spells` carries `targeting`.
+- [x] Pack templates `adept`/`warden`/`seer` + `scale_tiers`/`upcast_step` spells.
+- [x] `tests/test_spells.py` — models, slot-table-vs-total-level, choice no-write,
+      forward idempotency, resource reset, upcast/cantrip scaling, dup-op_id guard.
+## Done — Sprint 27 Phase D: weapons, equipment & magic items through the one engine (2026-10-12, D98)
+- [x] `gear.effective_gear` — a DERIVED, transient equipment overlay (stats/sets/
+      darkvision/speed) consumed by `_stat_mod`/`skill_bonus`/`save_bonus`/
+      `compute_ac`/`clean_speeds`/`weapon_profiles`; never persisted, base stats
+      never mutated (equip/unequip/restart can't double-apply or go stale).
+- [x] `gear.clean_props` = THE single prop validator (DM defs + content import).
+      Five bonus scopes distinguished: per-weapon, general (`attribute_*`),
+      while-equipped, while-attuned (`attune` gate → inert until attuned), on-consume.
+- [x] Weapons: one/two/versatile grip (`inv_grip`, off-hand cleared atomically, dice
+      chosen), finesse/ranged ability choice, ability-mod-to-damage default,
+      `extra_damage_dice/_type`, long-range tiers (≤normal ok / ≤long dis / beyond
+      invalid, advantage cancels), `ac_base`/`ac_bonus`/`ac_max_dex` in AC.
+- [x] `items.csv` additive: `hands`; `charges`/`recharge`/`attune`/`heal_dice` now
+      projected into the definition and promoted onto the inventory entry.
+- [x] Sheet + DM editor (browser): item-definition editor (kind/grip/dice/range/AC/
+      attribute/grant/magic + `✎ Edit` reload), grip toggle, effective speed +
+      darkvision, gated 🔒, longer/extra damage shown; legacy math byte-identical.
+- [x] `tests/test_weapons_gear.py` + `tests/test_content_examples.py` (ranged,
+      attribute bonus/set, multi-effect). Docs: D98, CSV guide (items section 4.4 +
+      section 7 + examples), AGENT_GUIDE, MANUAL.
+
+## Done — Sprint 28 Phase E: currency, carrying & companions (2026-10-12, D99)
+- [x] Currency: ONE server-owned integer of **copper** (`characters.wallet`),
+      `gear.CURRENCIES` data table (cp/sp/ep/gp/pp, coin weight 0.02 lb),
+      `to_cp`/`cp_breakdown`/`cp_label`; a client sends only (int, coin) → never
+      mints gold. DM grant/deduct, player→member **transfer** (atomic, replay),
+      container **loot** (`coins_fill`/`coins_take`, one object-namespaced claim);
+      no-negative rollback; all through `inventory.py` + `op_id` replay.
+- [x] Encumbrance: DERIVED (`gear.encumbrance`) — `qty×weight` per distinct stack
+      (equipped counted once, never double), coins weigh the shown split, capacity
+      = effective STR × `CARRY_PER_STR`(15) × `SIZE_CARRY` × + worn `carry_bonus`.
+      `overloaded` is a WARN only — no movement penalty yet. `characters.size` +
+      `items.carry_bonus` additive.
+- [x] Companions = existing tokens with `owner_user_id`/`character_id` (DM binds in
+      `add_token`); control via D82 `token_controller` (DM-only, room member),
+      riding via `token_mount`; a player can never seize a foreign companion and
+      only sees already-visible tokens (no hidden/other-plane leak).
+- [x] Sheet collapsibles (Wallet / Encumbrance / Companions) + DM grant/deduct +
+      container coin row; reload-stable (all derived, server-rendered).
+- [x] `tests/test_money_encumbrance.py` (18) + `tests/test_content_examples.py`
+      (carry_bonus example). Docs: D99, CSV guide (section 8 + items `carry_bonus`
+      + example 15b), AGENT_GUIDE, MANUAL.
+- [ ] **PHASE F (next):** overload MOVEMENT penalty (once fully specified/tested);
+      content-configurable currency rate table; DM item-editor `carry_bonus` field;
+      short-rest charge recharge.
+
+## Done — Sprint 29 Phase 1-5: Operation Integration (2026-10-12, D100)
+- [x] **G7 atomic cost:** op_id claim + slot/resource spend folded into ONE
+      `db.tx()` (`_cast_gate`, `app/abilities.py`); refused cost rolls the claim
+      back. Pinned by a synchronous thread-hammer (`_cast_gate`, max=1 → exactly 1
+      success), not the flaky async engine.
+- [x] **D100 autonomy lock:** editor `PUT /characters/{cid}` no longer writes
+      `level`/`spells`/`spell_slots`; raw `class_levels` WS is DM-only. Validated
+      `charbuild.apply` (owner/DM) + DM advance preserved; ordinary sheet fields stay
+      editable; no data migrated. `test_progression.py` / `test_sprint23_combat.py`
+      updated to stage authorised fields via the legitimate writers (`set_progression`).
+- [x] **G5:** non-DM `long_rest`/`short_rest` now returns an explicit error (no silence).
+- [x] **G8b:** `npc._clean_abilities` keeps a bare string ability id alongside prose, so
+      a familiar made through the real `add_token` path stays castable by its controller.
+- [x] **G9/A13:** `item_defs` create + CSV projection REFUSE a cross-room id collision
+      (global PK kept, no destructive rebuild); reads/delete/grant already room-scoped;
+      room-scoped `content` row still stored. Tests read `item_defs` by ROOM+id.
+- [x] **Node 22 in the test image** (`COPY --from=node22 /usr/local/bin/node`, test
+      stage only; no npm, no runtime change) → the ~17 node-gated parity/diorama tests
+      run the real shipped JS instead of skipping.
+- [x] **C1** WS flush-barrier in the mount/floor test (kills the historical flake);
+      **C2** room-qualified `containers`/`item_defs` test queries.
+- [x] `tests/test_d100_integration.py` (10): green end-to-end flow + each fix pinned.
+      Local suite `682 passed, 0 failed`. Docs: D100, AGENT_GUIDE (hazards), MANUAL.
+- [ ] **Follow-ups (honest limits):** per-room `item_defs` key (needs a schema rebuild —
+      now refused, not fixed); server-authorise ability SCORES/saves (still owner-editable
+      sheet fields, no confirmed exploit); `POST /characters` stays the trusted authoring/
+      seed surface; content-configurable currency table (carried from Phase E).
+
+## Done — Sprint 30 Phase 1-4: D101 Room Preparation & Guided Build (2026-10-13, D101)
+
+- [x] **Room preparation screen** (`#view-prep` + `app/static/js/80_prep.js`, D78-stamped,
+      in `MODULES`/`REQUIRED`): create/join/room-click land here; DM sees rule-pack status +
+      CSV import (reuses `ctPost/ctRender`) + roster; player picks/creates a character,
+      prepares, seats it and opens the table via the EXISTING `openRoom()`. Table back →
+      `backToPrep()`; lobby "Bring" shortcut untouched. No server-side "phase" invented.
+- [x] **`GET /api/content/{code}/options`** — room-member-readable id+name catalogue of the
+      room's rule pack (class/subclass level-rows collapse per id); drives every dropdown.
+      import/export/kinds stay DM-only; names only, never row payloads.
+- [x] **Guided build wizard** derives ALL fields from `charbuild.plan` `needs` (skills,
+      subclass, per-level feat/ASI, known-model spell picks), labels ids via the options
+      catalogue, counts missing decisions, refuses nothing client-side — the server stays
+      the validator. Raw choices JSON remains as opt-in EXPERT mode; unsupported decision
+      types are flagged visibly there, never skipped. No hardcoded class lists.
+- [x] **`characters.background`** (additive column; `None` on PUT = keep stored value so
+      legacy lobby saves cannot wipe it) + **`POST /api/rooms/{code}/starting-gear`**:
+      background `starting_items` granted through `app/inventory.py` only, per-room
+      item-def resolution, unresolvable CSV text REPORTED as skipped, deterministic
+      `op_id` → replay answers "already" (no double grant). Authz mirrors the build API.
+- [x] **The confirmed reload bug is fixed at both ends**: `build_apply` broadcasts
+      `snapshot` (all clients refresh + re-render sheets, DM included) AND the sheet's
+      apply handler re-renders the selected token locally after `refreshRoom()`.
+      No browser reload needed; pinned server-side and as a UI regression assert.
+- [x] **Latent bug fixed:** re-seat of a user's second character 500'd (`sqlite3.Row`
+      into `footprint.*` `.get()` in `assign_char`) — now `dict(tok)`, pinned by test.
+- [x] `tests/test_d101_prep.py` (13): options access + empty room, background roundtrip
+      + wipe guard, starting-gear (grant/skip/idempotent/authz/missing-data/`inv_changed`),
+      apply→`snapshot`, manipulated choices refuse-and-write-nothing, prep UI wiring,
+      apply re-render, legacy flows untouched. Canonical close:
+      `docker compose run --rm test` → **694 passed, 1 skipped, 0 failed**.
+      Docs: D101, AGENT_GUIDE (frontend list, prep section, test map), MANUAL checklist D101.
+- [x] **Follow-up (D145): species ability bonuses from `species.csv` are mechanical
+      now** — report/apply endpoints grant them EXACTLY-ONCE via the build ledger
+      and the recompute replays them at the chronology front (UI button optional).
+      Remaining honest limits: starting gear is bound
+      by D100's GLOBAL `item_defs` id (second room importing the same pack gets refused
+      projections → those items list as skipped until the per-room key rebuild happens);
+      lobby editor stays legacy free-text (guided flow is room-scoped because content is);
+      public room browser intentionally NOT built (join-by-code preserved).
+
+## Done — Sprint 31: D102 Floors operable (Stockwerke: Integrität, Isolierung, DM-Verwaltung) (2026-10-13, D102)
+
+- [x] **Plane-integrity bugs fixed (the actual "Stockwerke kaputt" reports):** trap
+      discovery (`room/movement.py` walk) and the `toggle` op (`room/interact.py`)
+      saved the VIEWED PLANE's map with an un-floored `set_map` → that overwrote the
+      PRIMARY map's content (terrain, objects, fog). Both save with the floor they
+      hold. WS-connect reveal groups tokens by floor and reveals on EACH token's own
+      plane map; `assign_char` (re-seat) likewise loads/writes the token's plane —
+      the primary blob is only ever written by writes that mean it. No migration.
+- [x] **Visibility isolation:** `explored`/`fog_changed` payloads carry `floor`;
+      clients apply them only while they match `state.viewFloor` (the aoe/ping guard
+      pattern); walk/connect reveals deliver via `send_to_plane_viewed` (token
+      holders + DM + token-less observers on primary). DM canvas filtering corrected
+      to the VIEWED plane (`viewerPlane()` → `viewFloor` for the DM; off-plane tokens
+      not rendered AND not clickable). `openRoom` honours the server's `view_floor`
+      from the first frame (player on a named floor: guards, brushes and saves
+      address the right plane immediately).
+- [x] **Plane changes: DM + validated stairs (operator decision).** `token_floor`
+      is DM-only ("Only the DM moves tokens between floors"); the stair object
+      remains the players' route with the target plane fully checked; sheet floor
+      row read-only for players. D88/Sprint-20/19 tests that encoded the old
+      owner-may-hop policy were re-pointed to the DM socket (behavior checks kept).
+- [x] **The floor manager exists** (it never did — that was "nicht bedienbar"):
+      DM side panel "Floors" (own panel, DM tab): browse/add/rename/delete with
+      server refusal reasons surfaced (primary, tokens standing there). NEW
+      `PATCH /api/rooms/{code}/floors/{name}` — `FLOOR.rename` moves registry,
+      `floor_maps` row and `tokens.floor` together, then stair `op.floor`
+      references are retargeted on every plane map (rename without it dangles
+      stairs); `floors_changed` + `map_changed` follow.
+- [x] `tests/test_d102_floors.py` (9): trap/toggle cross-plane save pins, connect/
+      assign reveal on the standing plane, plane-labelled + plane-scoped reveal and
+      fog-edit delivery, DM-only hop with stairs still open, rename (registry/map/
+      tokens/stairs + same-name/unknown/duplicate/non-DM refusals), player snapshot
+      delivered on the token's plane. Two node-harness hit-test extractions extended
+      (tokenAt now filters by onPlane). Canonical close:
+      `docker compose run --rm test` → **703 passed, 1 skipped, 0 failed**.
+      Docs: D102, AGENT_GUIDE (floors section,
+      module table, test map), MANUAL checklist D102.
+- [ ] **Follow-ups (honest limits):** ⬜-brush backlog untouched (paints cell 0, does
+      not block plane separation); stale editor snapshots can resurrect an old floor
+      name via their objects (editor-merge caveat, D88 class); no per-plane token
+      counts in the panel; stairs remain the only player-facing plane transition.
+
+## Done — Sprint 32: D103 Map editor truth + PNG display (Karten-Editor: echtes "kein Boden", Bildchen laden im Browser) (2026-10-13, D103)
+
+- [x] **PNG root cause fixed at the route, not the pipeline:** the DB canon
+      `/assets/<id>` (loaded verbatim by the canvas) was NEVER routed — only
+      `/api/assets/<id>` existed, so artwork 404'd in every real browser (and the
+      onerror blacklisted it in the art cache). New prefix-free `media_router`
+      delegates to the SAME `get_asset`: identical auth, no-oracle 404, clean
+      re-encode, `nosniff`. `/api` form unchanged; zero pipeline edits.
+- [x] **"Kein Boden" became a real state:** terrain registry 5 = void (impassable,
+      not climbable, sight passes). All engines refuse it automatically via the D69
+      registry (path/LOS/placement/collision/preview) — no engine edits. Old maps
+      byte-compatible (no 5 exists until painted; fog `None` stays floor; sanitize
+      clamps 6→5, still rejects fog nulls). D102's ⬜-backlog resolved honestly:
+      new 🕳️ brush paints 5 (drag included), ⬜ keeps 0 and finally RENDERs as
+      floor (two-tone tiling), 🧹 semantics unchanged.
+- [x] `tests/test_d103_editor_assets.py` (8): void blocks movement/teleport/
+      placement but not vision/light (one map, one column, both proofs), paint
+      preserves walls/doors/traps, void is plane-local (crypt pit ≠ primary),
+      registry/sanitize/legacy semantics, player map_edit refusal, canonical asset
+      url serves for owner AND riding-token DM while strangers/junk get 404 on BOTH
+      urls, assigned-artwork roundtrip, client brush/canvas wiring pins. Two D69
+      clamp tests updated (5 legitimate, 6+ clamps).
+      Canonical close: `docker compose run --rm test` → **711 passed, 1 skipped,
+      0 failed**. Docs: D103, AGENT_GUIDE (registry 0..5, asset routing, brushes),
+      MANUAL checklist D103.
+- [ ] **Follow-ups (honest limits):** diorama renders void as a flat tile (D97 file
+      untouched); concurrent editors stay last-writer-wins (D88 class); artwork
+      `max-age=86400` can outlive access revocation in a warm cache; no automatic
+      "fall into void" simulation — the server only refuses occupancy.
+
+## Done — Sprint 33: D104 Lights manageable + DM player-view peek (Lichtquellen-bedienung, DM-Spielersicht) (2026-10-13, D104)
+
+- [x] **Light management on the ONE existing lamp model:** new DM-only `lamp`
+      WS channel (`room/lights.py`) — add/update(bright,label,on,move)/remove by
+      id on a named plane, same canon + id-merge as the object sanitizer, same
+      `reevaluate_visibility` as lamp-interact/map-edit. Silent administration
+      (no fake chronicle). New DM panels: **Lights** (viewed plane: toggle/
+      radius/rename/move-by-click/delete/add-at-centre) — the editor's place/
+      remove tools finally got the list they never had.
+- [x] **DM peek `GET /rooms/{code}/view_as/{cid}`:** the /state player branch
+      EXTRACTED to `rooms._viewer_token_view`, shared by both callers — zero
+      second visibility logic; read-only (explored/ghost/broadcast untouched,
+      pinned); DM-only (member 404 / outsider 403 / foreign-character 404).
+      Client: `viewG/viewTokens/viewGhosts` render accessors, dead canvas input
+      while previewing, diorama blocked, plane filter server-side, banner
+      "👁 DM preview: sight of …", Snapshot + Refresh (approved design).
+- [x] **Audit find fixed:** WS connect reveal ignored darkness (classic FOG_R
+      light-budget bypass on reconnect) — now defers to `viewer_visible_cells`
+      on dark planes; rule variants (magical darkness) documented, NOT invented.
+- [x] `tests/test_d104_lights_preview.py` (14): lamp roundtrip radius/off, walls
+      block light exactly like sight, darkness = memory+footstep only,
+      darkvision effective, plane isolation of lamp + light, non-DM refused,
+      view_as byte-equal to the player's own /state, leak-free (hidden NPC/
+      undiscovered traps/dm_only/secret doors/op-payload), purity (explored +
+      player state unchanged), auth matrix, reconnect reveals by light's reach,
+      legacy rooms classic, toggled-off survives later map_edit, client wiring
+      source pins. Two loop-head source pins followed to the accessors (D102
+      precedent), z-pin satisfied via `--z-movehud`. Canonical close:
+      `docker compose run --rm test` → **725 passed, 1 skipped, 0 failed**.
+      Docs: D104, AGENT_GUIDE (lights section, view_as security, test map),
+      MANUAL checklist D104.
+- [ ] **Follow-ups (honest limits):** preview = moment-image (Refresh);
+      dm_only-lamps not panel-editable yet (editor tool only); no magical-
+      darkness state (documented variant); no falling mechanics; managing
+      lights mid-preview only shows after Refresh.
+
+## Done — Sprint 34: D105 Class kit, NPC gear and looting (Klassen-Startausrüstung, NPC-Inventare, Loot) (2026-10-13, D105)
+- [x] classes.csv: starting_items / starting_choices (level-1, additive, Demo scout+warden);
+      prep screen is server-driven (GET report + radio groups + ONE grant POST with class_choices).
+- [x] Grant all-or-nothing (kein Claim bei kaputtem Pack — reparierbar), class kit exactly-once
+      ("already" before choices parse), background part D101-identisch; GET starting-gear/{cid} report.
+- [x] NPC inventories = containers table keyed tok:<token_id>, DM-only `npc_inv` channel
+      (inspect/fill/remove/coins_fill/coins_remove); contents never in any payload but own inspect.
+- [x] Looting `loot` channel: gate NPC hp==0 (live; heal>0 re-locks), D82/D92 authz
+      (room/plane/reach/own char, DM per seated char), container_give forces direction,
+      op_id everywhere (replay/race safe), chronicle 💰/🪙.
+- [x] New SSOT primitives: INV.container_give, INV.container_remove_coins; token deletion
+      cleans exactly its tok:<id> container (no orphans, no other stock touched).
+- [x] Fixed by tests: token pixel vs map-object cell coords in the reach check.
+- [x] UI: prep gear step (80_prep.js), NPC sheet Inventory/Loot, player "Loot search",
+      chest panel routes chest/npc/loot sources with op_id per action.
+- [x] tests/test_d105_gear_loot.py (24: 22 server + 2 source pins) green; suites
+      content/d101/sprint22/money/hardening/integration/npc/footprint regression green;
+      canonical 749 passed, 1 skipped, 0 failed (baseline 725 + 24).
+      Docs: D105, AGENT_GUIDE (inventory/loot section), CSV guide (gear grammar),
+      MANUAL checklist D105.
+
+## Done — Sprint 35: D106 Cursed items + secret metadata + DM whispers (Verfluchte Gegenstände, geheime Metadaten, DM-Flüsterpost) (2026-10-14, D106)
+
+- [x] Per-instance curse metadata INSIDE the item entry (`curse {name, desc, whisper, revealed}`)
+      — no schema change, no migration; the entry dict IS the instance and travels
+      transfer/chest/loot through the existing atomic moves (ids are per-inventory only).
+- [x] Fail-closed sanitising: `gear.clean_items` strips `curse` by default; engine mutation
+      paths read trusted (`keep_curse=True`) — equip/use/attune/identify/recharge/long rest
+      and the honest sheet-PUT round-trip provably never wipe it; client PUTs can neither
+      forge a curse nor flip `revealed` (`_preserve_curses`).
+- [x] One disclosure gate `gear.curse_view`: DM full, owner ONLY a revealed curse's
+      name+desc (whisper text never leaves chat), everyone else sees nothing — server-side,
+      applied to /state, lobby sheets, container/loot replies; broadcasts never carry items.
+- [x] Cursed instances never stack, never split; marking a qty>1 stack carves EXACTLY one
+      qty=1 piece atomically (op_id-guarded writes; replay mints nothing).
+- [x] Owner change keeps the curse, clears `revealed` (knowledge never travels);
+      reveal/conceal/whisper are DM-commands, recipient resolved server-side from the
+      item's current holder (room-membership enforced), delivered via the existing
+      private `chat.post_chat` whisper — no second chat stack, foreign players see
+      nothing live and nothing in history.
+- [x] D105 follow-up: `handle_del_token` deletes token + `tok:<id>` container + seat +
+      chronicle in ONE `db.tx()` (FK-failure rolls back both — tested with the real FK error).
+- [x] UI: DM ☠-editor/reveal/whisper/clear on sheet + chest + NPC panels, owner sees
+      revealed curse line; 55_diorama.js untouched.
+- [x] tests/test_d106_curses.py (26 behaviour tests, 0 source pins) green;
+      canonical 775 passed, 1 skipped, 0 failed (baseline 749 + 26).
+      Docs: D106 (DECISIONS), AGENT_GUIDE (curse channel + inventory section + test map),
+      MANUAL checklist D106.
+- [ ] **Restarbeit (D110 umgewidmet — war „bewusst nicht gebaut“, weiterhin
+      gewollt; vollständige Planung + Sprintreihenfolge S40–S44:
+      `docs/FEATURE_COMPLETE_GAPS.md`):** Taschendiebstahl-Mechanik,
+      automatische Fluch-Auslöser/Zufallstabellen, geheime Rettungswürfe,
+      mechanische Fluch-Folgen (Schaden/Saves/Ticks), Fluch-Verbreitung.
+
+## Done — Sprint 36: D107 Integration & Browser-Readiness-Audit + Regelkompatibilitäts-Audit 2014↔2024 (D107)
+
+- [x] Regelbasis-Beschluss: **D&D 5e (2024)** ist verbindliche primäre Regelbasis
+      (DECISIONS D107) — Abweichungen der Engine sind jetzt dokumentierte
+      Abstände mit R-Nummern, kein stiler Drift.
+- [x] Audit geschrieben: `docs/RULES_AUDIT_2024.md` — Matrix mit `Datei:Zeile`-
+      Belegen (Ableitungen/Proficiency, Species/Background/ASI/Feats, Klassen-
+      fortschritt, Zauber inkl. Concentration, Waffen inkl. Weapon Mastery,
+      Zustände/Tod/Ruhe), Einstufungen [2014]/[2024]/[gleich]/[HR]/[Anz.]/[lück].
+- [x] Bereits 2024-konform festgehalten: Cantrip-Skalung nach Gesamtcharakter-
+      stufe (abilities.py), ASI-Kadenz datengetrieben (classes.csv), Attunement
+      Kap 3, Cover-/Krit-/Traglast-Semantik.
+- [x] CSV-Schema-Eignung je Datei bewertet; additive Spalten-Vorschläge
+      (species.origin_feats, backgrounds.ability_bonuses, feats.tier,
+      items.mastery) NUR dokumentiert — kein Schema-Change in D107.
+- [x] Hausregel-Register H1–H9 (Death-Saves D34, Rests D35, NPC-0-HP D56/D105,
+      Attunement-Gate, Exhaustion-/Inspiration-/Ranks-Anzeige, Modi-Hoheit,
+      Content-Originalität) mit DECISIONS-Verlinkung.
+- [x] Priorisierte R-Liste: 4×R-P0 (Proficiency-Dice, ASI-Träger 2024, Feat-
+      Modell 2024, Weapon Mastery), 5×R-P1, ~9×R-P2 + R-L0 (SRD-5.2-Lizenz-
+      prüfung durch Menschen, bevor 2024-Originaltexte übernommen werden).
+- [x] README: Ein-Satz-Statushinweis; CSV-Guide §11 „Eignung für 2024".
+- [x] Schranken gehalten: keine Regelimplementierung, keine neuen Content-Packs,
+      keine fremden Regeltexte außer SRD-5.1-freigegeben, keine Änderung an
+      55_diorama.js, keine Git-Befehle. Kanonisch: 775 passed, 1 skipped,
+      0 failed (doku-only — Erwartung erfüllt).
+
+## Done — Nachtschicht 2026-10-16 (D115): Gear-/Build-Lücken ohne neue Maschinen schließen
+
+- [x] **Ausrüstung → Engines:** `movement._speeds` und
+      `visibility._token_darkvision_cells` lesen `gear.effective_gear`;
+      `speed_bonus_ft` erhöht das Bewegungsfeld, `darkvision_ft` erhöht den
+      LOS-Radius in einer Darkvision-Sicht (5 ft je Rasterschritt),
+      `hit_dice_bonus` wirkt im Short Rest und `hands:2` nutzt die bestehende
+      Zwei-Hände-Regel.
+- [x] **Origin/Build:** Background-`skill_prof` wird im bestehenden
+      `_replay_origin`-Pfad angewandt; `feats.spells_grant` läuft über dieselbe
+      Grant-Achse wie Subklassen und landet im bestehenden `spell_state`;
+      `classes.expertise` ist eine optionale Skill-Achse mit fail-closed Prüfung.
+- [x] **Provenienz/UI:** Background-Tools/Sprachen/Feature, Species-Projektion,
+      `classes.weapon_prof`/`armor_prof` und Subclass-Features erscheinen als
+      read-only Build-Ledger/UI; keine zweite Größen-, Bewegungs- oder
+      Proficiency-Maschine.
+- [x] Tests: `tests/test_engine_gear_grants.py` (11), Node-`--check` für alle
+      `app/static/js/*.js` grün, `python3 -m compileall -q app` grün.
+- [x] Kanonischer Docker-Lauf: **959 passed, 1 skipped, 0 failed**.
+- [x] Schranken gehalten: keine Git-Befehle, keine `.git`-Aktionen, keine
+      Änderung an `55_diorama.js`, keine Migration, kein externer Dienst und kein
+      Fake-grüner Test. `feats.requires`, mechanische Species-/Klassenwerte und
+      Item-/Zauber-Dauerablauf bleiben dokumentierte offene Grenzen.
+
+## Done — Autonomer Lauf 2026-10-16 (D116/D117): letzter Skip entfernt, Dauer verdrahtet
+
+- [x] **AP-001:** Der Reichweiten-/Reach-Live-Test ist nicht mehr übersprungen.
+      Die Ursache lag im Test (alphabetisch mehrdeutige `item_def`-ID-Auswahl),
+      nicht in der Engine. Zehn Wiederholungen und die Kanonsuite sind grün.
+- [x] **AP-002:** Condition-Hooks wurden vollständig inventarisiert. Die
+      Feature-Matrix ersetzte die veraltete Annahme, `blinded`, `invisible` oder
+      `poisoned` seien nicht verdrahtet.
+- [x] **AP-003:** `duration` ist jetzt ein mechanischer Startwert für
+      `condition`-Operations: `"rounds":"duration"` oder fehlendes `rounds`
+      übernimmt die in Runden umgerechnete Dauer. Die bestehende Conditionsuhr
+      bleibt die einzige Uhr.
+- [x] **AP-004:** `classes.spellcasting_ability` erscheint in Plan, Apply und
+      Build-Ledger sowie im Wizard-/Bogen. Die pro-Zauber-Ausführung bleibt
+      unverändert; es wurde kein zweites Spellcasting-Modell gebaut.
+- [x] **AP-005:** `classes.expertise` ist eine geführte Checkbox-Auswahl im
+      Wizard. Serverseitig werden exakte Anzahl, Duplikate und fehlende
+      Übung geprüft; der Erfolg nutzt weiterhin nur die Skill-Achse.
+- [x] **AP-006:** `scripts/e2e_build_wizard.py` prüft die komplette Wizard-Kette
+      in echtem headless Chromium; Playwright läuft in einem temporären venv.
+- [x] **AP-007:** `feats.requires` prüft Attributswert-, Skill-Proficiency- und
+      Feature-Voraussetzungen fail-closed; unbekannte Formen werden abgewiesen.
+      Der Wizard zeigt Verfügbarkeit und fehlende Voraussetzungen.
+- [x] **AP-008:** `npc.project_creature()` übersetzt `creatures.csv` in den
+      bestehenden NPC-/Bestiarium-Block; DM-Review und Bestiarium-Import sind
+      DM-only, mit echtem Chromium-Nachweis.
+- [x] **AP-009:** `darkvision_ft` überlebt CSV → NPC-Block → Spawn und nutzt
+      die bestehende D89-Token-Sinnensäule; der NPC-Editor bearbeitet Feet und
+      leitet Token-Zellen serverseitig ab.
+- [x] **AP-010:** Der Bestiarium-Spawn sendet den vollständigen NPC-Block;
+      projizierte Skills erscheinen im Monster-Sheet, inklusive echter
+      Chromium-Verifikation an Hawk-kin.
+- [x] **AP-011:** `resource.mode=restore` erweitert dieselbe Effekt- und
+      Ressourcen-Achse; Kosten-Preflight, Unbekannt-Fail-closed und echter
+      `ability_cast`-Nachweis bleiben erhalten.
+- [x] **AP-012:** `build.species` versorgt die bestehende Movement-, LOS- und
+      Footprint-Kette; Tests belegen Stoutheart 25 ft/12 Zellen und Kit-kin
+      Small-Token ohne neue Engine.
+- [x] **AP-013:** `companion` überlebt CSV → NPC-Block → Creature-Review, Spawn,
+      Sheet und Bestiarium als Markierung; Token-Steuerung/Ownership bleiben auf
+      den bestehenden Pfaden. Echte WS-Angriffs- und Slotpfade sichern den
+      vollständigen Spawn-Block.
+- [x] Docs: `AUTONOMOUS_WORK_LOG.md`, `DECISIONS.md`
+      (D116/D117/D118/D119/D120/D121/D122/D123/D124/D125/D126/D127), `FEATURE_MATRIX.md`,
+      `FEATURE_COMPLETE_GAPS.md`, `CSV_ONLY_READINESS.md` und
+      `EFFECT_GRAMMAR.md`.
+- [x] Kanonischer Docker-Lauf: **981 passed, 0 skipped, 0 failed**.
+- [x] Schranken gehalten: keine Git-Befehle, keine `.git`-Aktionen, keine
+      Änderung an `55_diorama.js`, keine Migration und keine zweite Engine.
+
+## Done — Autonomer Nachtrag + Recovery 2026-10-17 (D128/AP-014)
+
+- [x] **D128/AP-014 nachdokumentiert:** NPC-Angriffs-`reach` ist seit dem
+      gepushten Stand hartes Gate über `dice._vertical_range_distance`
+      (CSV-Projektion „reach N ft“, `clean_npc`-Clamp 0–999,
+      `na-reach`-Editorfeld). Code und `tests/test_d128_npc_reach.py` waren
+      bereits vorhanden; DECISIONS/AP-Abschnitt fehlten durch den
+      Sitzungsabbruch und wurden in der Recovery-Sitzung nachgereicht.
+- [x] **Recovery-Baseline:** kanonischer Lauf **985 passed, 0 skipped,
+      0 failed** (981 + 4 D128-Tests) — keine unfertige Integration im Code;
+      reparaturbedürftig war ausschließlich die Doku.
+- [x] Runtime-Start + `/api/health` + Build-Hash-Konsistenz geprüft; echte
+      Chromium-E2E (`e2e_build_wizard.py`, `e2e_creature_projection.py`)
+      gegen Wegwerf-Instanz beide **PASS**.
+- [x] `docs/CSV_ONLY_READINESS.md` („reach advisory“ → durchgesetztes Gate),
+      `docs/FEATURE_MATRIX.md` (Kanon 985/D128), `docs/AUTONOMOUS_WORK_LOG.md`
+      (AP-014 + Recovery-Lauf) und `DECISIONS.md` (D128) aktualisiert.
+- [x] Bericht: `docs/RECOVERY_2026-10-17.md`.
+
+## Done — Sprint 43 (D114): vertikale Token-Geometrie, `openv`, vertikaler Flug und UI
+
+- [x] **Phase 2 Fallen-Konsistenz:** Legacy-Trap-d20 läuft über
+      `dice.do_roll("1d20", None)["kept"]` statt `random.randint`; Entschärfen
+      bleibt echter DEX-Check, UI sagt „Dexterity check“. Die offene
+      Thieves'-Tools-Proficiency-Lücke ist dokumentiert, nicht kaschiert.
+- [x] **Phase 3 Token-Volumen:** additive `tokens.height_ft`/`tokens.elevation_ft`;
+      Größenkategorien nur als Defaults, keine Obergrenze; WS `token_height`;
+      Server-Clamp 0..200 ft; Owner-/DM-only; verdeckte NPC-Tokens leaken weder
+      Höhe noch Elevation.
+- [x] **Phase 4 Öffnungen:** `mapmodel.openv` pro Ebene/Zelle, Fail-closed
+      default `0`, Editor-Validation, Fog-Maske; `vertical3d.body_planes()`
+      verlangt Öffnung für das gesamte Footprint und nutzbare Zielzellen;
+      `observable_cells()` trennt Körperpräsenz von senkrechtem Schacht.
+- [x] **Phase 5 Live-Integration:** `/state`, Token-Delivery, Präsenzereignisse,
+      `plane_viewers`, Angriff, Grapple und Interact fragen die zentrale
+      `vertical3d`-Entscheidung; Körperpräsenz macht Nebel-/Ebenenpublikum,
+      Schacht gibt nur Sicht; `token_height` und `openv`-Änderungen lösen
+      `reevaluate_visibility` aus; Push über Ebenen bleibt abgelehnt.
+- [x] Tests Phase 2–5: `test_d113_traps.py` (+2), `test_d114_vertical.py` (5),
+      `test_d114_openings.py` (4), `test_d114_phase5_integration.py` (5).
+- [x] Kanonischer Docker-Lauf nach Phase 5: **937 passed, 1 skipped,
+      0 failed**.
+- [x] **Phase 6 Bewegung/Flug:** `find_path_3d()` über `(floor, origin)`-Zuständen;
+      `walk3d()`/`_move3d()`/`_teleport3d()`; vertikale Schritte kosten
+      kanonisch `10 ft = 2` Bewegungsfelder; `void` ist freie Flugluft, aber
+      kein Standboden; `walk` darf eine offene Vertikalachse nicht nutzen;
+      Ganzzervolumen-Kollision mit bestehenden Owner-/Reiter-Ausnahmen;
+      Etagenwechsel nur bei explizitem `floor`-Feld.
+- [x] **Phase 7 UI/Canvas:** `height_ft`/`elevation_ft` im Sheet, vertikaler
+      Flugknopf, `openv`-Editorpinsel, `↕`-Öffnungshinweis,
+      `↑`/`↕`-Tokenindikatoren und plane-richtige Canvaslogik.
+      `55_diorama.js` blieb unverändert.
+- [x] **Phase 8 Integration:** `tests/test_d114_phase8_integration.py` (4) prüft
+      horizontalen Anflug + Etagenwechsel, Walk-Verweigerung, `openv`-Roundtrip
+      auf benannter Ebene und Hit-Testing eines serverseitig erlaubten
+      Cross-Plane-Tokens mit dem echten Canvas-Code.
+- [x] **Phase 9 Doku/Abschluss:** `docs/VERTICAL_GEOMETRY.md`, `DECISIONS.md`,
+      `AGENT_GUIDE.md` und Gap-Dokumente auf den tatsächlichen Stand gebracht;
+      verbleibende Einschränkungen sind ausdrücklich benannt.
+- [x] Tests Phase 6–8: `test_d114_phase6_vertical_movement.py` (7),
+      `test_d114_phase8_integration.py` (4).
+- [x] Kanonischer Docker-Lauf nach Sprint 43: **948 passed, 1 skipped,
+      0 failed**.
+
+## Done — Sprint 42 (Phases 2–4): D113 Konzentration 2024 + automatische Flüche + Opposed-Op (S42, D113)
+
+- [x] **Phase 2 Konzentration (DECISIONS D113):** additive `conc`-Verlinkung an
+      Conditions (`app/conditions.py`), Lebenszyklus in
+      `app/room/concentration.py` (`end_previous`/`break_link`/`on_damage`/
+      `enforce_after_condition`); Save via `room.opposed.save_roll`; DC
+      `max(10, floor(HP/2))` ohne Cap auf tatsächlich verlorene HP (nach Resistenz
+      + Temp-HP); Down/Inkapazität brechen ohne Wurf; `on_damaged`-Tiefen-Gate in
+      `room.health.change_hp`; Cast beendet alte Konzentration zuerst und stempelt
+      `conc`.
+- [x] **Phase 3 automatische Flüche:** `active` ⟂ `revealed`; DM-Aktionen
+      `arm` (Trigger + validierter Wirk-Cell) und `activate`/`deactivate`
+      (`app/inventory.py`, `app/room/inv.py`); Omit-when-Default in
+      `gear.clean_curse` (kein alter Fluch wird aktiv, byte-identisch rückwärts-
+      kompatibel); Auslösung nur an Mutationen (equip/unequip/use/on_hit/
+      on_damaged/on_transfer) und nur wenn aktiv+passender Trigger; curse-origin-
+      Fragmente via `net.dm_whisper` nur an den DM; Owner-Ansicht bleibt
+      `curse_view`-streng; `on_transfer` op-id-geclaimt (atomar, kein Doppel-Feuer).
+- [x] **Phase 4 Opposed-Op (Grammatik v2):** `effectops` akzeptiert v1+v2
+      (`V_MIN..V_MAX`), neuer `opposed`-Op via `room.opposed`, `canon()`
+      cell-erhaltende Version; v3/unbekannt weiterhin abgelehnt; eine
+      D111-Assertion (v2) auf v3 umgestellt.
+- [x] **Phase 6 (teil):** Curse-Autoren-UI (⚙ arm, 🔮 active/💤 dormant) im
+      Charakterblatt und Container-Panel (Englisch, `30_room.js`); deutsche
+      Doku (DECISIONS D113, TODO, `docs/EFFECT_GRAMMAR.md`,
+      `docs/RULES_AUDIT_2024.md`, `docs/FEATURE_MATRIX.md`,
+      `MANUAL_BROWSER_CHECKLIST.md`).
+- [x] **Phase 5 Fallen datengetrieben:** Map-Entity-Felder `effects`/`trigger`/
+      `search_dc`/`disarm_dc`/`repeat` (Omit-when-Default, alte Fallen
+      byte-identisch); Auslösung via `effectops.run_ops` statt `random.randint`
+      (Save/Check/Schaden/Condition/Forced-Move, kein zweiter Würfelkern);
+      Entdecken = WIS-(Wahrnehmung)-Check, Entschärfen = DEX-Geschicklichkeitswurf
+      über `room.opposed` (keine Werkzeug-Proficiency-Engine); WS `trap`
+      (`search`/`disarm`/DM `trigger`), Leak-frei: Fehlsuche == leeres Feld
+      (byte-identisch, kein Oracle); `disarmed` überlebt Editor-Snapshots.
+- [x] Tests: `tests/test_d113_concentration.py` (9), `tests/test_d113_curses.py`
+      (9), `tests/test_d113_opposed.py` (6), `tests/test_d113_traps.py` (10),
+      alle echte WS-Pfade, keine Skips.
+- [x] **Phase 7 vertikale Geometrie (nur 10-ft-Skala):** EINE Höhen-Einheit UND
+      EINE deklarierte Ebenen-Stufe = exakt 10 ft (`app/vertical.py`,
+      ELEV_FT/FLOOR_FT); Ebenen-Reihenfolge = Höhen-Stack
+      (`floors.level`/`absolute_height_ft`), rein Reporting — Ebenen bleiben
+      unabhängig. KEIN Höhenkampf (Sturz/Deckung/Flug bleiben D70/D83 aus);
+      Pfad gateert weiterhin |Δz| ≤ 1 in EINHEITEN; `elev`-Klammer bleibt -6..6.
+      Kein Diorama.
+- [x] Tests: `tests/test_d113_vertical.py` (4). Phase 2–7 gesamt: Konzentration
+      (9) + Flüche (9) + Opposed (6) + Fallen (10) + Vertikal (4) = 38 neue Tests.
+- [x] Kanonischer Docker-Lauf: **921 passed, 1 skipped, 0 failed**.
+- [~] **Phase 6 (Doku):** deutsche Doku zu allen Phasen geschrieben
+      (DECISIONS/TODO/EFFECT_GRAMMAR/RULES_AUDIT/FEATURE_MATRIX/AGENT_GUIDE/
+      MANUAL_BROWSER_CHECKLIST); Browser-Durchlauf bleibt menschliche Abnahme.
+
+## Done — Sprint 41: D112 Kontesto-Primitive + 2024-Sonderkampf + Taschendiebstahl (S41, D112)
+
+- [x] **Kontesto-Primitive (`app/room/opposed.py`, DECISIONS D112):** dünner,
+      wiederverwendbarer Helfer über dem BESTEHENDEN Würfelkanal
+      (`do_roll`/`_combine_adv`) und den `gear`-Bonusquellen — `participant`,
+      `check_roll`, `save_roll`, `bonus_roll`, `melee_attack_number`,
+      `better_save`, `opposed_wins(att, def, tie=)`, `beats_dc`, `Tie`. Drei
+      Formen (Wurf-vs-Wurf, Wurf→DC→Rettung, Wurf-vs-feste-DC) sind nur
+      Komposition, EIGENE Regeln trägt das Modul keine. Tie-Regel per Default
+      `defender` (d20-Gleichstand → Verteidiger / DC muss erreicht werden),
+      `attacker` kippt, `dm` wirft `Tie` auf und übergibt an den DM — nie ein
+      stiller Münzwurf. Effektgrammatik-Op für kontesto-CSV bleibt S42; die
+      Schnittstelle ist in `docs/EFFECT_GRAMMAR.md` dokumentiert, damit S42
+      diesen Helfer einwickeln kann statt ihn zweimal zu bauen. Keine zweite
+      Rules-Engine.
+- [x] **2024-Sonderkampf (`app/room/grapple.py`):** NICHT der
+      2014er Athletik-gegen-Athletik-Wettkampf. Grapple = Sonderkampf-Wert des
+      Angreifers (`melee_attack_number` = max(unbewaffneter Angriffsbonus,
+      Athletik-Wurf)) wird zur DC, auf die das Ziel mit einer RETTUNG antwortet
+      (`save_roll`), per Default die höhere der beiden Stärke/Geschicklichkeit
+      (`better_save`), DM-überschreibbar (`save`); Shove (niederringen / 5 ft
+      stoßen) über denselben Wurf, Stoß über das bestehende
+      `moveforced.apply_forced_move`. Zustand rein additiv: der `grappled`-Conds-
+      Eintrag trägt Grappler-`src` plus neues optionales `dc` (int 1–30,
+      `_clean_dc`), Entkommen = „Athletik oder Akrobatik gegen gespeicherte DC".
+      Der Grapple endet, sobald das Ziel die Reichweite verlässt —
+      `end_grapples_out_of_reach` hängt an den drei autoritativen
+      Bewegungs-Enden (erzwungene Bewegung inkl. Shove, normaler Lauf,
+      DM-Teleport) — oder wenn der Grappler weg/kampunfähig ist (Entkommen
+      gelingt dann automatisch). Reichweite/Nachbarschaft nutzen DIESELBE
+      Eckpunkt-Geometrie (Chebyshev ≤ 1) wie `room.dice`; Größengate „höchstens
+      eine Größenkategorie größer" über `npc.SIZES`-Index.
+- [x] **Taschendiebstahl (`app/room/pickpocket.py`):** BEIDE
+      2024-Adjudikationsmodelle. Modell A `pickpocket` = DM-vermittelte Probe —
+      versteckter Fingerfertigkeits-Wurf, Ergebnis NUR an den DM; Modell B
+      `pickpocket_take` lässt den Dieb EIN konkretes DM-autorisiertes Item wählen
+      und bei Erfolg atomar übertragen. Weil 2024 KEINE passive Wahrnehmung hat
+      (`RULES_AUDIT_2024` A7), ist „bemerkt" entweder feste DM-`notice_dc`
+      (`beats_dc`) ODER ein echter, vom Helfer gewürfelter Wahrnehmungs-Wurf mit
+      `opposed_wins(tie="defender")` — der Engine erzwingt nie einen Modus.
+      Entdeckung wird SEPARAT vom Diebstahl-Erfolg an den DM gemeldet. Erfolg =
+      eine atomare `inventory.transfer` (PC-Opfer) bzw.
+      `inventory.container_give` (NPC `tok:<id>`) mit `_ownership_moves`, das
+      Fluch-Metadaten erhält und `revealed` zurücksetzt. `handle_pickable`
+      (nur DM) schaltet das neue `pick` an Charakter-Item (`set_pick_char`) oder
+      NPC-Container (`container_set_pick`).
+- [x] **Leak-/Replay-Wächter sind tragend:** nur DM-markierte `pick`-Items sind
+      stehlbar, ein nicht markiertes/unbekanntes Item antwortet exakt wie eine
+      misslungene Probe (`_pick_entry` → None), der Endpunkt ist nie ein
+      Inventar-Orakel; die op-id-`_claim` wird VOR dem Ausgaben des
+      Aktions-Slots und VOR jedem Wurf genommen, ein Replay zahlt und würfelt
+      nichts; jede Voraussetzung (Raum, Ebene, Reichweite, Sichtbarkeit,
+      Authz, Größe, Ziel-lebt) wird VOR jeder Ausgabe geprüft. `pick` stapelt
+      nie (`_stack_key` → None) und läuft über die `clean_items`-Whitelist.
+- [x] **UI (Phase 5) = nur Akteur+Ziel:** das Blatt nennt wer auf wen mit
+      frischem `op_id`, die ganze Auflösung läuft serverseitig; DM autorisiert
+      `pick`-Items im NPC-Truhe- und Charakterblatt (`🤝 steal`). Keine neuen
+      Reply-Kinds nötig — Grapple/Shove/Escape nutzen `dice`+`cond`+
+      `initiative`, Pickpocket `whisper`+`dice`+`inv_changed`, `pickable`
+      `inv_contents`/`inv_changed`; `40_ws.js` unberührt, `55_diorama.js`
+      unberührt.
+- [x] Doku: `docs/FEATURE_COMPLETE_GAPS` (S41 UMGESETZT; Kontesto-Op → S42),
+      `FEATURE_MATRIX`, `RULES_AUDIT_2024` (Grapple/Shove/Escape + Pickpocket
+      jetzt implementiert, 2024-korrekt), `CSV_ONLY_READINESS` je Fläche neu
+      bewertet, `EFFECT_GRAMMAR` (kontesto-Schnittstelle als S42-Einwickel-
+      punkt), AGENT_GUIDE (drei Module + sechs WS-Typen + Testkarte),
+      MANUAL_BROWSER_CHECKLIST (D112), DECISIONS D112.
+- [x] `tests/test_d112_contested.py`: 31 echte Integrationstests über die
+      WS-Pfade (Save-/Tie-Unit, voller Grapple/Shove/Escape, beide
+      Pickpocket-Modelle, Leak, Replay, Nebenläufigkeit, verfluchter Transfer,
+      Cross-Room, Cross-Plane, Aktions-Ökonomie). Keine neuen Skips, keine
+      Source-Pins.
+- [x] Kanon: `docker compose run --build --rm test` — **883 passed,
+      1 skipped, 0 failed** (Basis 852 + 31; der 1 Skip bleibt die gepinnte
+      Altlast aus Sprint 24). Ein einzelner Ping-Ebenen-Zustelltest
+      (`test_sprint20_security`) flackerte im Voll-Lauf an einem Chat-Flush-
+      Timing; isoliert stabil und im Wiederholungslauf grün, kein Regression
+      (diese Phase war JS-only).
+
+## Done — Sprint 40: D111 Effektgrammatik v1 + Zustandskatalog als CSV (S40, D111)
+
+- [x] **Effektgrammatik v1 (`app/effectops.py`, DECISIONS D111):** versionierte,
+      strikt validierte JSON-Op-Ketten (`damage/heal/temp_hp/condition/
+      condition_remove/break_concentration/save/check/forced_move/resource`)
+      mit harten Grenzen (8 Ops, Tiefe 1, 40 Knoten, 4000 Zeichen, DC 0–30/
+      „auto“, Move 1–10 Zellen, Kosten 1) und byte-stabiler Kanonisierung;
+      unbekannte Ops/Felder verwerfen die Zeile beim Import — laut, nie
+      stillkorrigiert. Ausführung ausschließlich durch die bestehenden Engines
+      (health/dice/moveforced/conditions/gear/inventory), `abilities.execute()`
+      trägt die Kette in derselben Shell (Kosten/Chronik/Privatsphäre
+      unverändert). Keine zweite Engine.
+- [x] **Zustandskatalog als CSV:** `conditions.csv` (Hook-Flags
+      Bewegungs­verbot/Tempo/Vor-/Nachteil/Save-Auto-Fail + `effects`-Hook-Dict
+      `on_start`/`on_round`/`on_expire`), SRD-Keys als `BUILTIN_HOOKS`-Daten —
+      CSV-Zeile mit gleichem `id` überschreibt, Import invalidiert den
+      per-Room-Cache; `/state cond_catalog` + `10_core.js`-Legende.
+- [x] **Trigger use/equip/unequip/on_hit/on_damaged** inline an den
+      autoritativen Handlers (items/inv/dice/health/combat), Claim-Wächter
+      (ein Feuer pro Token+Trigger+Träger+Runde/Op, keine Trigger-Ketten,
+      Budget 8), Ressourcen-Preflight im Claim-Tx: abgelehnte Wirkung zahlt
+      nichts, Replay feuert nie nach.
+- [x] Feats mit Zelle → castbare `feat_<id>`-Ability (charbuild-Entitlement,
+      Load-Pfad registriert); Items `effects`+`trigger` (getragene Pfade
+      gelesen, nie aus Blatt-Kopie); Spells `effects`-Zweig im Executor;
+      defekte Zellen werden verworfen (`gear.clean_props`/`clean_definition`).
+- [x] **Engine-Fix 0 (P1, Condition-Ablauf):** `combat._cond_update` rief für
+      gelöschte Token den broadcast-pflichtigen `remove()` statt des
+      Low-Level-Pfads — schiefhängende Rekursion (Explosionsgefahr bei
+      Ketten); jetzt netzfreier Abzug + eigener Test.
+- [x] **Engine-Fix 2 (P1, net.py):** Cross-Loop-Zustellung war mit `id(ws)`
+      verdrahtet — CPython-Id-Wiederverwendung ließ einen frischen Socket
+      einen STOPPED Loop erben; jede Zustellung dorthin hing für immer
+      (`wrap_future` ohne Ende). Loop wohnt jetzt auf dem Socket
+      (`ws._iio_loop`), gestoppte Loops werden abgelehnt, Cross-Loop-Sends
+      haben Timeout. Von den neuen Tests gefunden; Produktions-Risiken
+      bestanden bisher nicht (ein Loop), Latenz war real.
+- [x] SRD-Verhaltensänderung dokumentiert: grappled/restrained blockieren
+      Bewegung jetzt komplett (SRD „speed 0“), Altbau-Move-Ban-Hardcodes
+      ersetzt; 2024-Vereinfachungen (frightened pauschal, blinded checks-dis,
+      DM-prone) in `docs/EFFECT_GRAMMAR.md`.
+- [x] Demo-Pack additiv: `conditions.csv` (smouldering/shaken/slicked) +
+      `thunder_lure`/`oil_vial`/`ring_ember`/`blade_quake`/`martyr` mit
+      Zellen; Generator byte-idempotent (2 Läufe, Vergleich im Image).
+- [x] Doku: `docs/EFFECT_GRAMMAR.md` (Autorenreferenz inkl. v1-Nichtkönnen),
+      `CSV_ONLY_READINESS` je Fläche neu bewertet, `FEATURE_COMPLETE_GAPS`
+      (S40 UMGESETZT; Concentration-Save → S42), `CSV_CONTENT_GUIDE`
+      (§4.4/§4.7/§4.8a/§7, conditions.csv), AGENT_GUIDE (effectops + net-Loop
+      + Testkarte), MANUAL_BROWSER_CHECKLIST (D111), DECISIONS D111.
+- [x] `tests/test_d111_effects.py`: 21 echte Integrationstests über die
+      REST/WS-Pfade (Validator/Kanon, Hooks, Katalog-Override + Cache,
+      clean_props, No-Rekursion, Zauber/Talent/Item/Equip/On-Hit/On-Damaged
+      inkl. Replay-Idempotenz, Preflight-Kosten, Ping-Pong, Cross-Room,
+      cond_catalog). Keine neuen Skips, keine Source-Pins.
+- [x] Kanon: `docker compose run --build --rm test` — **852 passed,
+      1 skipped, 0 failed** (Basis 831 + 21; der 1 Skip bleibt die gepinnte
+      Altlast aus Sprint 24).
+
+## Done — Sprint 39: D110 End-to-End-Integration & Feature-Complete-Readiness (D110)
+
+- [x] **Strategie-Beschluss (DECISIONS D110):** kein „Back Backlog“ für
+      DnDTable (Regel stammte aus anderem Projekt) — Ziel = zügige
+      Feature-Vollendung, danach CSV-Content + Betrieb.
+- [x] Funktionsmatrix aus Code-/Test-Belegen (nicht TODO-Texten):
+      `docs/FEATURE_MATRIX.md` — 16 Kategorien, Status A/B/C/D/E mit
+      Datei:Zeile; fehlende Kernfunktionen als Restarbeit ausgewiesen.
+- [x] CSV-only-Readiness-Bewertung je Datenfläche: `docs/CSV_ONLY_READINESS.md`
+      (Spalte ≠ Mechanik: species/creatures datenführend isoliert; Executor
+      kennt keine Bewegungs-/Probe-/Dauer-Effekte; Zustandskatalog hartcodiert).
+- [x] Vollständige Restarbeitsplanung mit Sprintreihenfolge:
+      `docs/FEATURE_COMPLETE_GAPS.md` (S40 Generik → S41 Opposed/Hehlerei →
+      S42 Auto-Magie → S43 Kampf-R-P1 → S44 Datenprojektion → S45+ CSV/Betrieb);
+      TODO-Backlog-Sektion entsprechend umgewidmet.
+- [x] E2E-Integrationstest über die echten REST/WS-Pfade:
+      `tests/test_d110_e2e.py` — eine durchgehende A→F-Kette
+      (Registrierung→Pack-Import→2024-Characters inkl. Origin/Apply/Gear→
+      Bewegung/Wand/Tür/Fog/LOS/View-as/Floors→Kampf mit mehreren
+      Masteries (Cleave/Topple/Graze/Vex)+Bedingungen→NPC 0 HP→atomarer
+      Loot mit Adjacency+Replay→Fluch set/reveal/whisper mit Besitzer-only
+      Zustellung→Reconnect-Snapshots+Replay-Idempotenz) + 4 Wächter-Tests
+      (Fremd-Token-/Cond-Kontrolle, View-as=Ausschnitt+DM-only, Content-
+      Isolation über Räume, Whisper-Historie-Leak). 5 Tests grün.
+- [x] **Engine-Fix 1 (P1, Würfel-Pfad):** abgewiesene Angriffe (verstecktes
+      Ziel, out of reach, zu große Push-Last, fehlerhaftes Cleave-Paar)
+      verbrannten bisher die Turn-Action, weil der Slot-Verbrauch VOR der
+      Zielvalidierung lief — Konsumtion/ Nick-Buchhaltung hinter alle
+      Pre-Roll-Validierungen verschoben (`app/room/dice.py`). Ein falsch
+      gesetzter Angriff kostet ab sofort keinen Action-Slot mehr.
+- [x] **Engine-Fix 2 (P1, Fluch-Kanal):** `curse`-Aktion `whisper` fiel in
+      den reveal/conceal-Zweig und führte `curse_reveal(False)` aus — ein
+      Whisper enthüllte den Fluch still wieder (D106-Latenz; d106-Suite
+      erwischte es nie, weil dort nie reveal→whisper kombiniert wurde).
+      `whisper` mündet jetzt in keinen Mutation-Zweig mehr
+      (`app/room/inv.py`); Whispern liefert Text aus, ohne den
+      Enthüllungsstatus anzufassen.
+- [x] Doku: `docs/SATURDAY_ACCEPTANCE.md` (Browser-Abnahmeleitfaden A–F,
+      Sa 17.10.), AGENT_GUIDE/Testkarte + MANUAL_BROWSER_CHECKLIST-Eintrag,
+      DECISIONS D110, Feature-/Readiness-/Gap-Dokus wie oben.
+- [x] Kanon: `docker compose run --build --rm test` — **831 passed,
+      1 skipped, 0 failed** (Basis 826 + 5; der 1 Skip bleibt die gepinnte
+      Altlast aus Sprint 24; keine neuen Skips, keine Source-Pins).
+
+## Done — Sprint 38: D109 Weapon-Masteries (2024, R-P0)
+
+- [x] Drei-Gatter-Modell serverautoritativ: Waffen-Prop `items.mastery`,
+      Build-Ledger `characters.build.masteries` (grants/pending, NUR forward:
+      Level-Anwendung via `classes.mastery_gain`/`mastery_options` oder
+      DM-Grant-Route — nie rückwirkend), explizite Absicht im roll-Request;
+      alles vor dem ersten Würfelwurf validiert.
+- [x] Alle acht SRD-5.2.1-Masteries ohne zweite Engine: Graze/Cleave/Nick im
+      Angriffsauflöser, Push via `apply_forced_move` (Truncation an
+      Hindernissen), Topple via Rettungs-/Prone-Pfad, Sap/Slow/Vex als
+      Condition-Marker mit `src`-Anker (Ablauf NUR in der D80-Turn-Lifecycle),
+      `slowed` als −10-ft-Hook im `_speeds`-Pflegestück, adv+dis-Konfusion
+      wiederverwendet; Cleave/Nick Einmal-pro-Turn über m_cleave/m_nick.
+- [x] Off-Hand für Light-Waffen geöffnet (2024-Zwei-Waffen-Voraussetzung für
+      Nick); additiver Zweig in `gear.can_equip`.
+- [x] Audit-Nebenbefunde behoben: `apply_origin` und `apply()` laufen je in
+      EINEM `db.tx()` (Check-then-write-Fenster geschlossen); Reach/Range
+      misst jetzt Footprint-Zellen ×5 ft statt Pixel-Deltas (latenter
+      D93-Bug: jedes entfernte Ziel war "out of reach").
+- [x] API/UI: `GET/POST /api/build/{code}/{cid}/mastery`, DM-Grant-Route;
+      Mastery-Badge + Opt-in-Checkbox + Zweitziel + Nick-Slot + 🎖-Karte in
+      30_room.js.
+- [x] Demo-Pack additiv erweitert (dagger_surge=nick, sword_versatile=topple,
+      axe_great=cleave, bow_long=vex; Scout/Warden L1 mastery_gain=1);
+      Generator byte-idempotent (Test im kanonischen Image, Dockerfile
+      test-Stage kopiert jetzt scripts/).
+- [x] Doku: RULES_AUDIT_2024 §8 (Modell + dokumentierte Abweichungen:
+      Damage>0-Gate, Initiative-Pflicht für Marker, Spell-Angriffs-Grenze),
+      CSV_CONTENT_GUIDE §11, DECISIONS D109, MANUAL_BROWSER_CHECKLIST.
+- [x] Kanonisch: 826 passed, 1 skipped, 0 failed (tests/test_d109_mastery.py,
+      29 neue Tests, keine neuen Skips).
+
+## Done — Sprint 37: D108 SRD-5.2.1-Korrektur + Charakterursprung (2024)
+
+- [x] D107-Audit gegen das offizielle SRD-5.2.1-PDF korrigiert (K1–K9 im
+      Audit §1): Proficiency Dice gestrichen (Engine konform), Concentration-
+      DC max(10, halb), Origin Feats aus dem Background, Feat-Kategorien inkl.
+      General-Wertboni, Death Saves 3✓/3✗ bestätigt konform, Short-Rest-HD
+      Spielerwahl bestätigt konform, Mastery-Liste (Cleave/Graze/Nick/Push/
+      Sap/Slow/Topple/Vex) sauber von Properties getrennt, Conditions/K9-
+      Korrekturen (Incapacitated fehlt; Passive Perception existiert 2024
+      nicht → Abwesenheit = konform).
+- [x] R-L0 gelöst: SRD 5.2.1 offiziell CC BY 4.0 — Quelle + wörtliche
+      Attribution in ATTRIBUTION.md.
+- [x] Schema additiv: backgrounds.asi_abilities/origin_feat, feats.category
+      (registriert in content.SCHEMAS; alte Packs lesbar, 2014er Werte gelten
+      nicht stillschweigend als 2024 — sichtbare Verweigerung).
+- [x] Demo-Packs neu erzeugt: beide Demo-Backgrounds mit 2024-Ursprung +
+      zwei projekt-eigene Demo-Origin-Feats, house-rule-markiert.
+- [x] charbuild.apply_origin + origin_options: serverseitig gegen Raum-
+      Content validiert, nur Verteilung aus Client, 20-Obergrenze ablehnend,
+      Wiederverwendung von _apply_feat (Kategorie-Check), Ledger-Eintrag
+      characters.build.origin als Herkunftsnachweis, Replay im D96-Voll-
+      recompute (exakt einmal, reload-/replay-/parallel-sicher), keine
+      Auto-Migration, keine HP/AC/Slot-/Ressourcen-Anfasstung, Start-
+      ausrüstung über getrennten Claim-Pfad unberührt.
+- [x] REST GET/POST /api/build/{code}/{cid}/origin (Authz = Build-API).
+- [x] UI: 🧬-Origin-Karte in der Raumvorbereitung (Report, +2/+1 vs. +1×3,
+      Vorschau, Apply; englisch; Server autoritativ).
+- [x] tests/test_d108_origin.py: 22 echte Integrationstests (beide
+      Verteilungen, falsche Ziele/gleiche Ziele/Cap 20, Kategorie, fehlende
+      Defs, 2014-Hintergrungsverweigerung, Cross-Room, Owner/DM/Foreign,
+      Replay/Doppelklick/paralleles Posten, Reload/Ledger, keine Auto-
+      Migration, Species-Stats, Startausrüstung doppelfrei, Build vor/nach
+      Origin ohne Verdopplung, PUT-Fälschungsschutz). Keine neuen Skips.
+- [x] Kanonischer Lauf: siehe kanonischer Stand unten.

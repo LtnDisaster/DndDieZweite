@@ -23,14 +23,16 @@ from .visibility import send_property_to_interested
 
 
 def _reach_cells(room_id, user_id, mp, floor=""):
-    """WORLD cells under any token this user owns OR controls (D82: the
-    controller relationship is operational authority — authz SSOT).
-    D88: reach is SAME-PLANE."""
+    """WORLD cells where any token this user owns OR controls has a physical
+    BODY (D82: the controller relationship is operational authority — authz
+    SSOT). D88 keeps reach plane-scoped; D114 adds a body protruding through a
+    fully open column. A shaft provides line of sight, not reach."""
+    from . import vertical3d
     cells = set()
+    maps = vertical3d.maps_for(room_id)
+    lm = vertical3d.level_map(room_id)
     for tok in authz.controlled_rows(room_id, user_id):
-        if (tok.get("floor") or "") != floor:
-            continue
-        cells |= footprint.occupied_cells(mp, tok)
+        cells |= vertical3d.body_cells(room_id, tok, floor, maps, lm)
     return cells
 
 
@@ -68,7 +70,12 @@ async def handle_interact(ws, room_id, user, is_dm, msg):
         it = obj.get("interact")
         near = set()
         if not is_dm:
-            planes = {(t.get("floor") or "") for t in authz.controlled_rows(room_id, user["id"])}
+            from . import vertical3d
+            maps = vertical3d.maps_for(room_id)
+            lm = vertical3d.level_map(room_id)
+            planes = set()
+            for t in authz.controlled_rows(room_id, user["id"]):
+                planes.update(vertical3d.body_planes(room_id, t, maps, lm))
             if fl not in planes:
                 return                                  # elsewhere: nothing is here
             if obj.get("dm_only"):
@@ -92,7 +99,7 @@ async def handle_interact(ws, room_id, user, is_dm, msg):
             st = dict(obj.get("state") or {})
             st["on"] = not st.get("on")
             obj["state"] = st
-            set_map(room_id, mp)
+            set_map(room_id, mp, fl)   # D102: save the plane the lever lives on
         elif kind == "door":
             door = _linked_door(mp, op)
             if door is None:

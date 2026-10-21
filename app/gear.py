@@ -1,6 +1,7 @@
 """Magic items, armor, potions: schema validation, AC computation, unidentified masking."""
 import re
 
+from . import content as _content
 from . import db
 
 KINDS = ("armor", "shield", "potion", "scroll", "wand", "staff", "ring",
@@ -35,7 +36,167 @@ def _clampi(v, lo, hi, dflt=0):
         return dflt
 
 
-def clean_items(items):
+# ---- D98: single canonical item-prop vocabulary (used by gear AND the content
+# importer, which projects through inventory.clean_def -> gear.clean_props).
+# No second validator elsewhere: one place decides what a prop may be.
+_BONUS_DICE_RE = re.compile(r"^[+-]?\d{1,3}d\d+$", re.I)      # extra damage "+1d8"
+_DICE_PROPS = ("damage_dice", "damage_dice_two_handed", "heal_dice")
+_BOOL_PROPS = ("proficient", "mod_to_damage", "two_handed", "versatile",
+               "finesse", "attune", "magic", "light")
+_INT_PROPS = {
+    "attack_bonus": (-10, 10), "damage_bonus": (-10, 10),
+    "range_ft": (0, 600), "range_long_ft": (0, 600), "reach_ft": (0, 60),
+    "ac_bonus": (-5, 10), "ac_base": (0, 40), "ac_max_dex": (-1, 99),
+    "darkvision_ft": (0, 999), "speed_bonus_ft": (-99, 999),
+    "hit_dice_bonus": (-10, 10), "charges": (-1, 999), "hands": (0, 2),
+    "carry_bonus": (0, 9999),        # D99: extra carrying capacity, pounds
+}
+
+
+def _norm_list(v, allowed):
+    """Normalise a comma/semicolon string OR a list into an ordered, de-duplicated
+    list of allowed keys (skill / save / expertise grants). Tolerant of the legacy
+    comma-string form already stored in DB rows."""
+    if isinstance(v, str):
+        parts = re.split(r"[,;]", v)
+    elif isinstance(v, (list, tuple)):
+        parts = list(v)
+    else:
+        return []
+    out = []
+    for p in parts:
+        p = str(p).strip().lower()
+        if p in allowed and p not in out:
+            out.append(p)
+    return out
+
+
+def _norm_attr_set(v):
+    """A 'set this score to a fixed value' grant (gloves/belt). Accepts
+    {"ability","value"}, ["dex",15] or "dex,15"/"dex=15". -> {"ability","value"}."""
+    if isinstance(v, dict):
+        a, val = str(v.get("ability", "")).lower(), v.get("value")
+    elif isinstance(v, (list, tuple)) and len(v) >= 2:
+        a, val = str(v[0]).lower(), v[1]
+    elif isinstance(v, str):
+        m = re.split(r"[,=:]", v)
+        if len(m) < 2:
+            return None
+        a, val = m[0].strip().lower(), m[1]
+    else:
+        return None
+    if a not in ABILITIES:
+        return None
+    val = _clampi(val, 1, 30, 0)
+    return {"ability": a, "value": val} if val >= 1 else None
+
+
+def _norm_attr_bonus(v):
+    """A '+/- delta to a score' grant (headband, toad cloak). Accepts dict
+    {"wis":2}, "wis+2,cha+2" or [["wis",2]]. -> {ability: delta} (0 dropped)."""
+    out = {}
+
+    def add(a, d):
+        a = str(a).lower()
+        if a in ABILITIES:
+            d = _clampi(d, -10, 10, 0)
+            if d:
+                out[a] = out.get(a, 0) + d
+    if isinstance(v, dict):
+        for a, d in v.items():
+            add(a, d)
+    elif isinstance(v, (list, tuple)):
+        for tok in v:
+            if isinstance(tok, (list, tuple)) and len(tok) >= 2:
+                add(tok[0], tok[1])
+    elif isinstance(v, str):
+        for tok in re.split(r"[,;]", v):
+            m = re.match(r"^\s*([a-z]+)\s*([+-]\d+)\s*$", tok, re.I)
+            if m:
+                add(m.group(1), int(m.group(2)))
+    return out or None
+
+
+# ---------- D106: secret per-instance curse metadata (DM-only by default) ----------
+# A curse lives INSIDE the item entry (characters.items / containers.items JSON):
+# instance identity only exists within one inventory — stack_add() re-issues
+# entry ids on every transfer — so a side table could not follow the instance,
+# while the entry dict rides along through transfer, container move and loot
+# for free. clean_items() STRIPS this field by default (fail-closed: every
+# read path, /state render and client PUT that predates D106 stays clean
+# without knowing about curses); only server-internal mutation paths pass
+# keep_curse=True, and only gear.curse_view() decides per viewer who sees what.
+
+CURSE_NAME = 48
+CURSE_DESC = 200
+CURSE_WHISPER = 1000
+CURSE_EFFECTS = 4000            # same ceiling as one effect-grammar cell
+
+
+def clean_curse(c):
+    """Sanitise one stored curse dict. None = no curse (an all-empty dict is
+    the same as no dict at all). Values are re-sanitised on EVERY trusted read,
+    so a hand-edited DB row can never smuggle a control char or an overlong
+    field into a DM view or a whisper. 'revealed' is the DM's disclosure flag
+    for the CURRENT owner — gear.curse_view() gates it.
+
+    D113 adds the AUTOMATIC-EFFECT trio, kept STRICTLY orthogonal to 'revealed':
+      'trigger' — which item event arms the curse (a subset of effectops
+                  TRIGGERS; '' = none);
+      'effects' — the effect-grammar cell that event runs (same grammar as a
+                  magic item's props.effects, never a second engine);
+      'active'  — whether the armed curse currently fires at all.
+    All three are OMITTED when at their default (no trigger / no cell / not
+    active), so every curse stored before D113 round-trips BYTE-IDENTICALLY and
+    is DORMANT by default — a schema extension can never switch an old curse on.
+    The DM is the only one who activates a curse, and reveal/conceal/whisper
+    never touch any of these (they only move text knowledge)."""
+    if not isinstance(c, dict):
+        return None
+    name = str(c.get("name", "")).strip()[:CURSE_NAME]
+    desc = str(c.get("desc", "")).strip()[:CURSE_DESC]
+    whisper = str(c.get("whisper", "")).strip()[:CURSE_WHISPER]
+    from . import effectops
+    trigger = str(c.get("trigger", "")).strip().lower()[:16]
+    if trigger not in effectops.CURSE_TRIGGERS:
+        trigger = ""
+    effects = str(c.get("effects", "")).strip()[:CURSE_EFFECTS]
+    active = bool(c.get("active"))
+    if not (name or desc or whisper or trigger or effects):
+        return None
+    out = {"name": name, "desc": desc, "whisper": whisper, "revealed": bool(c.get("revealed"))}
+    if trigger:
+        out["trigger"] = trigger
+    if effects:
+        out["effects"] = effects
+    if active:
+        out["active"] = True
+    return out
+
+
+def curse_view(items, mode="strip"):
+    """THE single per-viewer disclosure filter for curse metadata.
+    'dm'     — trusted passthrough (the caller already loaded with keep_curse).
+    'owner'  — the owning character learns ONLY a revealed curse's name+desc;
+               the whisper text never rides a sheet (it arrives via chat only).
+    'strip'  — default, fail-closed: every hint of a curse vanishes."""
+    out = []
+    for it in items:
+        curse = it.get("curse") if isinstance(it, dict) else None
+        if curse is None or mode == "dm":
+            out.append(it)
+            continue
+        it = dict(it)
+        curse = clean_curse(curse)
+        if mode == "owner" and curse and curse["revealed"]:
+            it["curse"] = {"name": curse["name"], "desc": curse["desc"]}
+        else:
+            it.pop("curse", None)
+        out.append(it)
+    return out
+
+
+def clean_items(items, keep_curse=False):
     out = []
     if not isinstance(items, list):
         return out
@@ -48,13 +209,20 @@ def clean_items(items):
         kind = it.get("kind", "other")
         if kind not in KINDS:
             kind = "other"
+        props = clean_props(it.get("props"))          # canonical once; feeds the fields below
         heal = str(it.get("heal", ""))[:16]
         if heal and not HEAL_RE.match(heal):
             heal = ""
+        if not heal and props.get("heal_dice"):       # D98: a content potion's heal_dice is usable
+            heal = props["heal_dice"]
         recharge = it.get("recharge")
         if recharge not in RECHARGES:
             recharge = None
+        if recharge is None and props.get("recharge") == "long":
+            recharge = "long"
         charges = _clampi(it.get("charges", -1), -1, 999, -1)
+        if charges < 0 and _clampi(props.get("charges", -1), -1, 999, -1) >= 0:
+            charges = _clampi(props.get("charges"), -1, 999, -1)   # D98: content wand charges
         charges_max = charges if charges >= 0 else 1
         if recharge and charges < 0:
             charges = charges_max
@@ -63,36 +231,52 @@ def clean_items(items):
             weight = max(0.0, min(9999.0, round(float(weight), 1)))
         except (TypeError, ValueError):
             weight = 0.0
+        val = it.get("value", 0)
+        try:
+            val = max(0.0, min(999999.0, round(float(val), 2)))
+        except (TypeError, ValueError):
+            val = 0.0
         try:
             qty = max(1, min(9999, int(it.get("qty", 1))))
         except (TypeError, ValueError):
             qty = 1
+        attunable = bool(it.get("attunable")) or bool(props.get("attune"))   # D98
         out.append({
             "id": str(it.get("id", ""))[:16],
             "name": name,
             "kind": kind,
             "ac": _clampi(it.get("ac", 0), 0, 40),
-            "light": bool(it.get("light")),
+            "light": bool(it.get("light")) or bool(props.get("light")),
             "acBonus": _clampi(it.get("acBonus", 0), -5, 10),
             "heal": heal,
             "charges": charges,
             "chargesMax": charges_max,
             "recharge": recharge,
-            "magic": bool(it.get("magic")),
-            "attunable": bool(it.get("attunable")),
-            "attuned": bool(it.get("attunable")) and bool(it.get("attuned")),
-            "identified": bool(it.get("identified", True)) or not bool(it.get("magic")),
+            "magic": bool(it.get("magic")) or bool(props.get("magic")),
+            "attunable": attunable,
+            "attuned": attunable and bool(it.get("attuned")),
+            "identified": bool(it.get("identified", True)) or not bool(bool(it.get("magic")) or bool(props.get("magic"))),
             "desc": str(it.get("desc", ""))[:200],
             # D92: inventory fields. qty defaults to 1 → every pre-sprint entry
             # IS a one-item stack; behaviour byte-identical for old rows.
             "qty": qty,
             "weight": weight,
+            "value": val,
             "stackable": bool(it.get("stackable")),
             "def_id": str(it.get("def_id", ""))[:24],
-            "props": clean_props(it.get("props")),
+            "grip": "two" if str(it.get("grip", "")).lower() in ("two", "2h", "two-handed") else "one",
+            "props": props,
+            # D112: a DM-set "on a thief's person / stealable" authorization flag.
+            # It is DATA (which items a thief MAY attempt to lift), never a rule;
+            # the pickpocket handler reads it to bound what a steal can reveal.
+            "pick": bool(it.get("pick")),
         })
         if not out[-1]["id"]:
             out[-1]["id"] = f"it{len(out)}"
+        if keep_curse:                            # D106 trusted read only
+            curse = clean_curse(it.get("curse"))
+            if curse:
+                out[-1]["curse"] = curse
     return out
 
 
@@ -101,43 +285,106 @@ def clean_items(items):
 # generic scalar semantics. A wrongly-typed combat key is DROPPED, never
 # coerced: a corrupted prop must not manufacture an attack bonus.
 _DMG_DICE_RE = re.compile(r"^\d{1,3}d\d+([+-]\d{1,3})?$", re.I)
-_PROP_BOOLS = ("proficient", "mod_to_damage")          # two_handed also bool, used by D92 rules
-_PROP_INTS = {"attack_bonus": 10, "damage_bonus": 10, "range_ft": 600, "reach_ft": 60}
+_PROP_BOOLS = _BOOL_PROPS                                   # back-compat aliases
 
 
 def clean_props(props):
-    """D92: generic mechanical properties — DATA, never rules. Keys map to
-    scalars (bool / number / short string); the named combat keys (D93) are
-    type-validated. Anything structured, oversized or wrongly typed is dropped."""
+    """D92/D98: THE single canonical item-prop validator — DATA, never rules. Used
+    for DM definitions (inventory.clean_def) and content imports alike, so a prop
+    means the same thing everywhere. Named keys are typed and range-clamped; a
+    wrongly-typed value is DROPPED (never coerced — a corrupt prop must never
+    manufacture a bonus). Unknown keys keep D92's generic scalar behaviour."""
     out = {}
     if not isinstance(props, dict):
         return out
-    for k, v in list(props.items())[:20]:
+    for k, v in list(props.items())[:24]:
         k = str(k).strip()[:24]
         if not k:
             continue
-        if k == "damage_dice":
+        if k in _DICE_PROPS:
             d = str(v).strip().lower()[:16]
             if _DMG_DICE_RE.match(d):
                 out[k] = d
             continue
-        if k == "damage_type":
+        if k == "extra_damage_dice":
+            d = str(v).strip().lower()[:16]
+            if _BONUS_DICE_RE.match(d):
+                out[k] = d
+            continue
+        if k in ("damage_type", "extra_damage_type"):
             if isinstance(v, str) and v.lower() in DAMAGE_TYPES:
+                out[k] = v.lower()
+            continue
+        if k == "mastery":                     # D109: the SRD 5.2.1 property name
+            if isinstance(v, str) and v.lower() in _content.MASTERIES:
+                out[k] = v.lower()
+            continue
+        if k == "effects":                     # D111: canonical op-list JSON or drop
+            from . import effectops
+            try:
+                # A "duration" marker is deliberately NOT resolved here: an item's
+                # live props.duration may later be edited, and execution resolves it.
+                c = effectops.canon(str(v or ""), preserve_duration=True)
+            except effectops.EffectError:
+                continue                       # never execute a corrupt definition
+            if c:
+                out[k] = c
+            continue
+        if k == "trigger":                     # D111: firing mode of an item's ops
+            from . import effectops
+            if isinstance(v, str) and v.lower() in effectops.TRIGGERS:
                 out[k] = v.lower()
             continue
         if k == "ability":
             if isinstance(v, str) and v.lower() in ABILITIES:
                 out[k] = v.lower()
             continue
-        if k == "two_handed" or (k in _PROP_BOOLS and isinstance(v, bool)):
-            out[k] = bool(v)
+        if k == "tool":                    # D163-3: the tool key this item is
+            if isinstance(v, str) and v.strip():
+                out[k] = tool_key(v)
             continue
-        if k in _PROP_INTS:
+        if k == "tool_ability":            # D163-3: ability for its use check
+            if isinstance(v, str) and v.lower() in ABILITIES:
+                out[k] = v.lower()
+            continue
+        if k == "prof_group":              # D163-4: simple|martial|light|medium|heavy|shield
+            v2 = str(v or "").strip().lower()
+            if v2 in ("simple", "martial", "light", "medium", "heavy", "shield"):
+                out[k] = v2
+            continue
+        if k == "recharge":
+            if str(v or "").lower() in ("long",):
+                out[k] = "long"
+            continue
+        if k in _BOOL_PROPS:
+            out[k] = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            continue
+        if k in _INT_PROPS:
             if isinstance(v, bool):
                 continue
             if isinstance(v, (int, float)):
-                out[k] = _clampi(v, -_PROP_INTS[k] if k.endswith("bonus") else 0,
-                                 _PROP_INTS[k])
+                lo, hi = _INT_PROPS[k]
+                out[k] = _clampi(v, lo, hi)
+            continue
+        if k in ("skill_prof", "expertise"):
+            vals = _norm_list(v, SKILLS)
+            if vals:
+                out[k] = vals
+            continue
+        if k == "save_prof":
+            vals = _norm_list(v, ABILITIES)
+            if vals:
+                out[k] = vals
+            continue
+        if k == "attribute_set":
+            aset = _norm_attr_set(v)
+            if aset:
+                out[k] = aset
+            continue
+        if k == "attribute_bonus":
+            ab = _norm_attr_bonus(v)
+            if ab:
+                out[k] = ab
             continue
         if isinstance(v, bool):
             out[k] = v
@@ -149,11 +396,14 @@ def clean_props(props):
 
 
 def weapon_profiles(ch):
-    """D93: SERVER-derived attack profiles — equipped items (main/off hand)
-    carrying a valid props.damage_dice. THE single source for sheet display
-    AND the attack path; clients render these numbers and attack by item_id,
-    they never carry a bonus of their own. to_hit adds each modifier exactly
-    once: ability mod + proficiency (if props.proficient) + props.attack_bonus."""
+    """D93/D98: SERVER-derived attack profiles — equipped items (main/off hand)
+    carrying a valid props.damage_dice. THE single source for sheet display AND
+    the attack path; clients render these numbers and attack by item_id, they
+    never carry a bonus of their own. Every modifier is applied EXACTLY once:
+    ability mod + proficiency (if props.proficient) + props.attack_bonus. D98 adds
+    the grip-aware dice (versatile), finesse/ranged ability choice, extra damage
+    dice, and the attunement gate (an unequipped-attuned magic weapon is just the
+    plain weapon: its attack/damage bonus and extra dice go inert)."""
     equip = clean_equipment(ch.get("equipment"), ch.get("items"))
     by_id = {i.get("id"): i for i in ch.get("items") or [] if isinstance(i, dict)}
     out = []
@@ -161,25 +411,51 @@ def weapon_profiles(ch):
         it = by_id.get(equip.get(slot))
         if not it:
             continue
-        p = it.get("props") or {}
+        p = clean_props(it.get("props"))
         dice = str(p.get("damage_dice") or "")
+        two = str(p.get("damage_dice_two_handed") or "")
+        grip_two = (bool(p.get("two_handed"))
+                    or (bool(p.get("versatile")) and str(it.get("grip", "one")) == "two"))
+        if two and grip_two and _DMG_DICE_RE.match(two):
+            dice = two                                   # two-handed grip uses the versatile dice
         if not _DMG_DICE_RE.match(dice):
             continue
-        ability = p.get("ability") if p.get("ability") in ABILITIES else "str"
+        ranged = (_clampi(p.get("range_ft", 0), 0, 600) > 0
+                  or _clampi(p.get("range_long_ft", 0), 0, 600) > 0)
+        ability = p.get("ability") if p.get("ability") in ABILITIES else ("dex" if ranged else "str")
+        if (not ranged) and p.get("finesse") and ability == "str" \
+                and stat_mod(ch, "dex") > stat_mod(ch, "str"):
+            ability = "dex"                              # finesse: the wielder's better mod
+        gated = bool(it.get("attunable")) and not bool(it.get("attuned"))
+        trained = weapon_proficient(ch, p.get("prof_group"), bool(p.get("proficient")))
         to_hit = (stat_mod(ch, ability)
-                  + (prof_bonus(ch) if p.get("proficient") else 0)
-                  + _clampi(p.get("attack_bonus", 0), -10, 10))
-        dmg_bonus = _clampi(p.get("damage_bonus", 0), -10, 10)
-        if p.get("mod_to_damage"):
+                  + (prof_bonus(ch) if trained else 0)
+                  + (0 if gated else _clampi(p.get("attack_bonus", 0), -10, 10)))
+        dmg_bonus = (0 if gated else _clampi(p.get("damage_bonus", 0), -10, 10))
+        if p.get("mod_to_damage", True):                 # a weapon attack adds its ability mod
             dmg_bonus += stat_mod(ch, ability)
+        extra = "" if gated else str(p.get("extra_damage_dice") or "")
         out.append({"slot": slot, "item_id": it.get("id"),
                     "name": str(it.get("name", "Weapon"))[:48],
-                    "ability": ability, "proficient": bool(p.get("proficient")),
+                    "ability": ability, "proficient": bool(trained),
+                    "prof_group": str(p.get("prof_group") or ""),
+                    "untrained": bool(p.get("prof_group")) and not trained,
                     "to_hit": to_hit, "dmg": dice.lower(), "dmg_bonus": dmg_bonus,
                     "dmg_type": p.get("damage_type") or "",
                     "range_ft": _clampi(p.get("range_ft", 0), 0, 600),
+                    "range_long_ft": _clampi(p.get("range_long_ft", 0), 0, 600),
                     "reach_ft": _clampi(p.get("reach_ft", 0), 0, 60),
-                    "two_handed": bool(p.get("two_handed"))})
+                    "ranged": ranged, "two_handed": bool(p.get("two_handed")),
+                    "versatile": bool(p.get("versatile")), "grip": "two" if grip_two else "one",
+            "finesse": bool(p.get("finesse")), "gated": gated,
+            "extra_dmg": extra.lstrip("+").lower(),
+            "extra_dmg_type": p.get("extra_damage_type") or "",
+            # D109: the weapon's mastery property (content prop) — owning it
+            # on the weapon unlocks NOTHING; the entitlement is checked
+            # separately against the build ledger (charbuild.masteries).
+            "mastery": p.get("mastery") or "",
+            "light": bool(p.get("light")),
+            "mod_to_dmg": bool(p.get("mod_to_damage", True))})
     return out
 
 
@@ -213,10 +489,24 @@ def clean_equipment(equip, items):
     return out
 
 
+def wields_two_handed(item):
+    """D98: does this ITEM occupy both hands right now? True for a fixed
+    two-hander (`props.two_handed`, or the explicit `props.hands` count), or a
+    VERSATILE weapon currently gripped two-handed (per-instance 'grip' the owner
+    chose). The single rule used by both can_equip and inventory.equip_slot /
+    set_grip."""
+    if not isinstance(item, dict):
+        return False
+    p = item.get("props") or {}
+    return (bool(p.get("two_handed")) or _clampi(p.get("hands", 0), 0, 2, 0) == 2
+            or (bool(p.get("versatile")) and str(item.get("grip", "one")) == "two"))
+
+
 def can_equip(item, slot, equipment=None, items=None):
     """May THIS item occupy THIS slot? props.slot overrides the generic table
-    (a string must match; false/empty bans equipping entirely). props.two_handed
-    is the only cross-slot rule: a two-hander leaves the off hand empty."""
+    (a string must match; false/empty bans equipping entirely). A two-handed
+    weapon (fixed, or a versatile weapon gripped two-handed — D98) leaves the
+    off hand empty and can never share it with a shield."""
     if slot not in SLOTS or not isinstance(item, dict):
         return False
     ps = (item.get("props") or {}).get("slot")
@@ -226,12 +516,20 @@ def can_equip(item, slot, equipment=None, items=None):
         if ps is False or ps in ("", 0):
             return False                         # explicit: never equippable
         return str(ps) == slot                   # explicit: exactly this slot
+    # D109 (Nick): a LIGHT weapon may occupy the off hand — the 2024 two-weapon
+    # fighting precondition. Additive branch; every other kind/slot pairing and
+    # the non-light refusal stay exactly as before.
+    if slot == "off_hand" and item.get("kind") == "weapon":
+        return bool(item.get("light") or (item.get("props") or {}).get("light")) \
+            and not wields_two_handed(item)
     if item.get("kind") not in SLOT_KINDS.get(slot, ()):
         return False
-    if (item.get("props") or {}).get("two_handed") and slot == "off_hand":
+    if wields_two_handed(item) and slot == "off_hand":
+        return False
+    if slot == "off_hand":
         for s, iid in (equipment or {}).items():
             other = next((i for i in (items or []) if i.get("id") == iid), None)
-            if s == "main_hand" and other and (other.get("props") or {}).get("two_handed"):
+            if s == "main_hand" and other and wields_two_handed(other):
                 return False
     return True
 
@@ -250,13 +548,10 @@ def compute_ac(char, items=None):
     equip = char.get("equipment") if isinstance(char.get("equipment"), dict) else {}
     worn = [v for v in equip.values() if v]
     if worn:
-        by_id, active, seen = {i.get("id"): i for i in items if isinstance(i, dict)}, [], set()
-        for v in worn:
-            i = by_id.get(v)
-            if i is not None and v not in seen:
-                seen.add(v)
-                active.append(i)
-        return _ac_from_set(char, active)
+        # D98: only EQUIPPED and (where required) ATTUNED items count; their AC comes
+        # from the props the content importer wrote (ac_base/ac_bonus/ac_max_dex),
+        # dexterity is the EFFECTIVE score (a headband of charisma raises AC too).
+        return _ac_from_set(char, effective_gear(char)["active"])
     armor = next((i for i in items if i.get("kind") == "armor" and i.get("ac")), None)
     if armor:
         total = armor["ac"] + (max(0, dex_mod(char)) if armor.get("light") else 0)
@@ -272,21 +567,47 @@ def compute_ac(char, items=None):
     return max(1, min(40, total))
 
 
-def _ac_from_set(char, active):
-    """AC from ONE authoritative item set (equipped mode). Same arithmetic as
-    the legacy path — one formula, two admission rules."""
-    armor = next((i for i in active if i.get("kind") == "armor" and i.get("ac")), None)
+def _ac_from_set(char, pairs):
+    """AC from the authoritative equipped set (attune-gated upstream). One formula,
+    two admission rules vs. the legacy path. Entry-level ac/acBonus keep D84's
+    identified-gate for legacy items; CONTENT bonuses live in props (ac_base = the
+    armour's own base, ac_bonus = a flat/enhancement bonus, ac_max_dex = the dex cap)
+    and, per D98, apply while worn+attuned regardless of identification."""
+    armor = None
+    for it, p in pairs:
+        if it.get("kind") == "armor" and (it.get("ac") or p.get("ac_base")):
+            armor = (it, p)
+            break
+    if armor and not armor_proficient(char, armor[1].get("prof_group"), False):
+        armor = None                                   # D163-4: no benefit from armour one cannot wear
     if armor:
-        total = armor["ac"] + (max(0, dex_mod(char)) if armor.get("light") else 0)
+        it, p = armor
+        base = it.get("ac") or _clampi(p.get("ac_base", 0), 0, 40, 0)
+        dm = dex_mod(char)
+        if "ac_max_dex" in p:
+            cap = _clampi(p.get("ac_max_dex"), -1, 99, -1)
+            add = dm if cap < 0 else (min(dm, cap) if dm > 0 else 0)
+        else:
+            add = max(0, dm) if it.get("light") else 0
+        total = base + add
     else:
         total = _clampi(char.get("ac", 10), 1, 40, 10)
-    for i in active:
-        if not i.get("identified", True):
+    for it, p in pairs:
+        prop_ac = _clampi(p.get("ac_bonus", 0), -5, 10, 0)
+        if armor and it is armor[0]:
+            total += prop_ac                            # armour enhancement
             continue
-        if i.get("kind") == "shield" and i.get("ac"):
-            total += _clampi(i["ac"], 0, 10)
-        elif i.get("acBonus"):
-            total += i["acBonus"]
+        ident = it.get("identified", True)
+        if it.get("kind") == "shield":
+            if not armor_proficient(char, p.get("prof_group"), False):
+                continue                                # D163-4: untrained shield: nothing
+            if ident:
+                total += _clampi(it.get("ac", 0), 0, 10, 0)   # legacy shield ac
+            total += prop_ac
+        else:
+            if ident:
+                total += _clampi(it.get("acBonus", 0), -5, 10, 0)   # legacy ring bonus
+            total += prop_ac
     return max(1, min(40, total))
 
 
@@ -311,16 +632,121 @@ def mask_items(items, mask):
     return out
 
 
-# ---------- skills ----------
+# ---------- D98: the equipment overlay (DERIVED, transient, never persisted) --
+# Everything a character gets from what it wears/wields is computed FROM the base
+# columns + items + equipment on EVERY read, so equipping, unequipping, attuning
+# or a restart can never double-apply or go stale: there is nothing stored to go
+# stale. Base stats are NEVER mutated; effective stats live only here. Identification
+# affects the DISPLAY of unknown properties, but not the passive mechanic of an
+# equipped+attuned item (D98 decision 1), so this overlay reads the REAL props.
 
-def _stat_mod(char, ability):
+def _base_score(char, ability):
     stats = char.get("stats") if isinstance(char.get("stats"), dict) else {}
     try:
         v = int(stats.get(ability, 10))
     except (TypeError, ValueError):
         v = 10
-    v = max(1, min(30, v))                                 # sane-score range, then classic math
-    return (v - 10) // 2
+    return max(1, min(30, v))
+
+
+def _active_gear(char):
+    """Equipped items whose passive effect is live: occupying a slot AND (when
+    attunable) currently attuned. Returns [(item, normalised_props), ...]."""
+    items = char.get("items")
+    if not isinstance(items, list):
+        items = []
+    equip = clean_equipment(char.get("equipment"), items)
+    by_id = {i.get("id"): i for i in items if isinstance(i, dict)}
+    out = []
+    for iid in equip.values():
+        it = by_id.get(iid)
+        if it is None:
+            continue
+        if it.get("attunable") and not it.get("attuned"):
+            continue                             # attunement required and not met → inert
+        out.append((it, clean_props(it.get("props"))))
+    return out
+
+
+def effective_gear(char):
+    """One derivation for every gear-driven character value. Recomputed fresh per
+    call — no memo on a mutable dict, so it can never be stale after equip/unequip.
+    attribute_set applies first (a score becomes the item's value unless it is
+    already higher — a belt/gloves never LOWER a score), then attribute_bonus
+    (stacking deltas); skill/save grants and expertise are SETS (no double
+    proficiency); darkvision is the max granted, speed_bonus the sum."""
+    active = _active_gear(char) if isinstance(char, dict) else []
+    stats = {a: _base_score(char, a) for a in ABILITIES}
+    bonus, skill_prof, expertise, save_prof = {}, set(), set(), set()
+    darkvision, speed, carry, hit_dice = 0, 0, 0, 0
+    for _it, p in active:
+        aset = p.get("attribute_set")
+        if aset:
+            a = aset.get("ability")
+            if a in ABILITIES:
+                stats[a] = max(stats[a], _clampi(aset.get("value"), 1, 30, stats[a]))
+        for a, d in (p.get("attribute_bonus") or {}).items():
+            if a in ABILITIES:
+                bonus[a] = bonus.get(a, 0) + d
+        for k in p.get("skill_prof") or []:
+            if k in SKILLS:
+                skill_prof.add(k)
+        for k in p.get("expertise") or []:
+            if k in SKILLS:
+                expertise.add(k)
+        for a in p.get("save_prof") or []:
+            if a in ABILITIES:
+                save_prof.add(a)
+        darkvision = max(darkvision, _clampi(p.get("darkvision_ft", 0), 0, 999, 0))
+        speed += _clampi(p.get("speed_bonus_ft", 0), -99, 999, 0)
+        carry += _clampi(p.get("carry_bonus", 0), 0, 9999, 0)
+        hit_dice += _clampi(p.get("hit_dice_bonus", 0), -10, 10, 0)
+    hit_dice = max(-99, min(99, hit_dice))
+    for a, d in bonus.items():
+        stats[a] = max(1, min(30, stats[a] + d))
+    return {"stats": stats, "skill_prof": skill_prof, "expertise": expertise,
+            "save_prof": save_prof, "darkvision_ft": darkvision,
+            "speed_bonus_ft": speed, "hit_dice_bonus": hit_dice,
+            "carry_bonus": carry, "active": active}
+
+
+# ---------- skills ----------
+
+def _stat_mod(char, ability):
+    ability = str(ability or "").lower()
+    score = effective_gear(char)["stats"].get(ability, 10)     # base + worn/wielded items
+    return (score - 10) // 2
+
+
+def exhaustion_level(char):
+    lvl = int((char or {}).get("exhaustion") or 0)
+    return max(0, min(6, lvl))
+
+
+def exhaustion_roll_mod(char):
+    lvl = exhaustion_level(char)
+    return -2 * lvl
+
+
+def exhaustion_speed_penalty_ft(char):
+    lvl = exhaustion_level(char)
+    return -5 * lvl
+
+
+def casting_slot(casting_time):
+    """D131 (AP-017): map a spell's CASTING TIME text onto the turn slot the
+    cast spends in an active initiative. 'bonus' and 'reaction' win over the
+    plain word 'action'; minute/hour/ritual cast times are OUT of turn tempo
+    (None = no slot is spent, casting outside combat stays free anyway).
+    Anything else — including empty, the SRD default — is 'action'."""
+    t = str(casting_time or "").strip().lower()
+    if "bonus" in t:
+        return "bonus"
+    if "reaction" in t:
+        return "reaction"
+    if "minute" in t or "hour" in t or "ritual" in t:
+        return None
+    return "action"
 
 
 def stat_mod(char, ability):
@@ -338,8 +764,10 @@ def stat_mod(char, ability):
 # strings, and _stat_mod correctly treats a non-dict as missing, which is how
 # "ability modifier is silently 0" production bugs are born (2026-10 sprint).
 _JSON_COLUMNS = ("stats", "skills", "saves", "items", "spells", "spell_slots",
-                 "defenses", "resources", "abilities", "class_levels", "equipment")
-_JSON_LIST_DEFAULTS = ("items", "spells", "resources", "abilities")
+                 "defenses", "resources", "abilities", "class_levels", "equipment",
+                 "build", "tool_profs", "weapon_profs", "armor_profs")
+_JSON_LIST_DEFAULTS = ("items", "spells", "resources", "abilities",
+                       "tool_profs", "weapon_profs", "armor_profs")
 
 
 def as_sheet(char):
@@ -388,6 +816,8 @@ def clean_speeds(char):
         except (TypeError, ValueError):
             return dflt
     walk = ft("speed") or ft("walk") or 30
+    if isinstance(char, dict) and char.get("equipment"):     # D98: worn/wielded speed bonus
+        walk = max(5, walk + effective_gear(char)["speed_bonus_ft"])
     return {"walk": walk, "fly": ft("fly"), "swim": ft("swim"), "climb": ft("climb")}
 
 
@@ -419,11 +849,19 @@ def clean_skills(skills):
 
 
 def skill_bonus(char, skills, key):
-    """Return (total_bonus, is_proficient) for a skill on this character."""
+    """Return (total_bonus, is_proficient). D98: a skill the character is merely
+    EQUIPMENT-proficient (or expert) in counts once — the grant never stacks with
+    itself and never downgrades a higher existing level."""
     if key not in SKILLS:
         return 0, False
+    eg = effective_gear(char)
     lvl = skills.get(key, 0) if isinstance(skills, dict) else 0
-    return _stat_mod(char, SKILLS[key][1]) + prof_bonus(char) * lvl, lvl > 0
+    if key in eg["expertise"]:
+        lvl = max(lvl, 2)
+    elif key in eg["skill_prof"]:
+        lvl = max(lvl, 1)
+    score = eg["stats"].get(SKILLS[key][1], 10)
+    return (score - 10) // 2 + prof_bonus(char) * lvl, lvl > 0
 
 
 def clean_saves(saves):
@@ -446,7 +884,9 @@ def save_bonus(char, saves, ability):
     ability = str(ability or "").lower()
     if ability not in ABILITIES:
         return 0
-    return _stat_mod(char, ability) + (prof_bonus(char) if clean_saves(saves).get(ability) else 0)
+    eg = effective_gear(char)
+    prof = clean_saves(saves).get(ability) or ability in eg["save_prof"]
+    return (eg["stats"].get(ability, 10) - 10) // 2 + (prof_bonus(char) if prof else 0)
 
 
 def hit_dice_max(char):
@@ -484,6 +924,79 @@ def clean_resources(resources):
             reset = "manual"
         out.append({"id": rid, "name": name, "current": cur, "max": mx, "reset": reset})
     return out[:20]
+
+
+# ---------- proficiency axes (D163-3 / D163-4) ----------
+
+def tool_key(text):
+    """One canonical tool key: 'Thieves' tools' == 'thieves tools' ==
+    'THIEVES_TOOL'. CSV tool_prof sources and the item prop `tool` meet at
+    this key — no substring rules anywhere else."""
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()[:24]
+
+
+def _axis_list(char, col):
+    raw = (char or {}).get(col)
+    if isinstance(raw, str):
+        raw = db.j(raw, [])
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(x).strip().lower() for x in raw if str(x).strip()]
+
+
+def tool_profs(char):
+    return _axis_list(char, "tool_profs")
+
+
+def tool_trained(char, key):
+    key = tool_key(key)
+    return bool(key) and key in {tool_key(k) for k in tool_profs(char)}
+
+
+def tool_available(char, word):
+    """Carries a tool whose prop key (or legacy name/def id) contains `word`."""
+    word = str(word or "").strip().lower()
+    items = (char or {}).get("items")
+    if isinstance(items, str):
+        items = db.j(items, [])
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        props = it.get("props") if isinstance(it.get("props"), dict) else {}
+        hay = (tool_key(props.get("tool")),
+               tool_key(it.get("name")), tool_key(it.get("def_id") or it.get("id")))
+        if any(word in h for h in hay if h):
+            return True
+    return False
+
+
+def weapon_profs_axes(char):
+    return _axis_list(char, "weapon_profs")
+
+
+def armor_profs_axes(char):
+    return _axis_list(char, "armor_profs")
+
+
+def weapon_proficient(char, group, prop_flag=False):
+    """D163-4: trained = explicit item prop (legacy DM flag) OR the character's
+    weapon axis covers the item's prof_group. No group data at all (pre-D163
+    packs) keeps the legacy flag-only semantics."""
+    if prop_flag:
+        return True
+    group = str(group or "").strip().lower()
+    if not group:
+        return False
+    return group in set(weapon_profs_axes(char))
+
+
+def armor_proficient(char, group, prop_flag=False):
+    if prop_flag:
+        return True
+    group = str(group or "").strip().lower()
+    if not group:
+        return True                       # no data -> untouched legacy
+    return group in set(armor_profs_axes(char))
 
 
 # ---------- damage types and defenses ----------
@@ -562,6 +1075,12 @@ def clean_spells(spells):
             "school": str(s.get("school", ""))[:24], "cast": cast, "ability": ability,
             "dmg": dmg, "save": save,
             "range": str(s.get("range", ""))[:24], "duration": str(s.get("duration", ""))[:24],
+            "casting_time": str(s.get("casting_time", ""))[:24],
+            "targeting": str(s.get("targeting", "single")).strip().lower()[:12] or "single",
+            # D138 (audit C3): data-driven preparation. A list containing any
+            # spell with prep=true is PREP-GATED; only prepared entries above
+            # level 0 may be cast. No class names, no hardcoding.
+            "prep": bool(s.get("prep")), "prepared": bool(s.get("prepared")),
         })
     seen = set()
     for it in out:
@@ -607,3 +1126,130 @@ def spell_save_dc(char, ability, bonus=0):
 
 def has_spellbook(items):
     return any(i.get("kind") == "spellbook" for i in items or [])
+
+
+# ---------- D99: currency (integer copper) + encumbrance (pounds) ----------
+# Single source of truth. EVERY balance is stored as an integer number of COPPER
+# PIECES (cp) — never a float, never a per-coin dict that could go negative per
+# denomination. A purse is ONE non-negative integer; the per-coin split below is
+# DISPLAY ONLY (greedy from the richest denomination down, so electrum change at
+# 50 cp always divides exactly). Rates and coin weight are DATA, not rules: edit
+# this table (later a content row) to reshape the economy, not the engine.
+COIN_BASE = "cp"
+COIN_WEIGHT = 0.02                      # pounds per coin (5e: 50 coins = 1 lb)
+CURRENCIES = (
+    {"id": "cp", "name": "Copper",   "value_cp": 1,    "coin_weight": COIN_WEIGHT},
+    {"id": "sp", "name": "Silver",   "value_cp": 10,   "coin_weight": COIN_WEIGHT},
+    {"id": "ep", "name": "Electrum", "value_cp": 50,   "coin_weight": COIN_WEIGHT},
+    {"id": "gp", "name": "Gold",     "value_cp": 100,  "coin_weight": COIN_WEIGHT},
+    {"id": "pp", "name": "Platinum", "value_cp": 1000, "coin_weight": COIN_WEIGHT},
+)
+_BY_ID = {c["id"]: c for c in CURRENCIES}
+_DENOMS = sorted(_BY_ID.values(), key=lambda c: -c["value_cp"])   # richest first
+WALLET_MAX = 10_000_000                 # cp ceiling, far above any plausible hoard
+
+CARRY_PER_STR = 15                      # lb a MEDIUM character carries per STR point
+SIZE_CARRY = {"tiny": 0.5, "small": 0.5, "medium": 1.0,
+              "large": 2.0, "huge": 4.0, "gargantuan": 8.0}
+
+
+def clean_wallet(v):
+    try:
+        cp = int(v)
+    except (TypeError, ValueError):
+        cp = 0
+    return max(0, min(WALLET_MAX, cp))
+
+
+def clean_size(v):
+    s = str(v or "medium").strip().lower()
+    return s if s in SIZE_CARRY else "medium"
+
+
+def currency_table():
+    """Read-only view of the currency definitions (UI + docs render this)."""
+    return [dict(c) for c in CURRENCIES]
+
+
+def to_cp(amount, coin_id):
+    """One denomination -> integer copper. Rejects unknown coins, booleans,
+    non-integers and out-of-range amounts. The engine NEVER trusts a copper
+    total sent by a client — it always derives it from an integer + coin id."""
+    c = _BY_ID.get(str(coin_id or "").strip().lower())
+    if c is None:
+        raise ValueError("Unknown currency")
+    if isinstance(amount, bool):
+        raise ValueError("Bad amount")
+    if isinstance(amount, float) and amount != int(amount):
+        raise ValueError("Bad amount")             # fractional coin is not allowed
+    try:
+        n = int(amount)
+    except (TypeError, ValueError):
+        raise ValueError("Bad amount")
+    if n < 0 or n > 1_000_000:
+        raise ValueError("Bad amount")
+    return n * c["value_cp"]
+
+
+def cp_breakdown(cp):
+    """Greedy display split, richest first. Deterministic; the sum of
+    value_cp*count always equals the input."""
+    rem = clean_wallet(cp)
+    out = []
+    for c in _DENOMS:
+        n, rem = divmod(rem, c["value_cp"])
+        out.append({"id": c["id"], "name": c["name"], "count": n,
+                    "coin_weight": c["coin_weight"]})
+    return out
+
+
+def cp_label(cp):
+    """Human string for the chronicle, e.g. '1 gp 2 sp 3 cp'."""
+    parts = [f"{b['count']} {b['id']}" for b in cp_breakdown(cp) if b["count"]]
+    return " ".join(parts) if parts else "0 cp"
+
+
+def coins_weight(cp):
+    """Pounds the coins in a purse weigh — from the SAME greedy split the sheet
+    shows, so the displayed pile and its weight can never disagree."""
+    return round(sum(b["count"] * b["coin_weight"] for b in cp_breakdown(cp)), 2)
+
+
+def carry_capacity(char):
+    """Max pounds: effective STR * per-STR * size modifier, plus any carry_bonus
+    from WORN gear. effective_gear is the ONLY source (no second gear read)."""
+    eg = effective_gear(char) if isinstance(char, dict) else {"stats": {}, "carry_bonus": 0}
+    str_score = max(1, int(eg.get("stats", {}).get("str", 10) or 10))
+    mult = SIZE_CARRY.get(clean_size(char.get("size") if isinstance(char, dict) else None), 1.0)
+    return int(round(str_score * CARRY_PER_STR * mult + eg.get("carry_bonus", 0)))
+
+
+def inventory_weight(char, wallet_cp=0):
+    """Pounds carried: for every DISTINCT stack qty*weight (equipped items live
+    INSIDE items[], so they count exactly once — no double counting), plus coins."""
+    carried = 0.0
+    items = char.get("items") if isinstance(char, dict) else None
+    if not isinstance(items, list):
+        items = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            w = float(it.get("weight", 0) or 0)
+            q = int(it.get("qty", 1) or 1)
+        except (TypeError, ValueError):
+            continue
+        carried += max(0.0, w) * max(1, q)
+    return round(carried + coins_weight(wallet_cp), 2)
+
+
+def encumbrance(char, wallet_cp=None):
+    """Derived carrying report the sheet renders. carried/capacity in pounds.
+    overloaded is a WARN FLAG ONLY — D99 adds NO movement penalty until that
+    rule is fully specified and tested."""
+    wc = wallet_cp if wallet_cp is not None else (char.get("wallet", 0) if isinstance(char, dict) else 0)
+    carried = inventory_weight(char, clean_wallet(wc))
+    capacity = carry_capacity(char)
+    pct = round(100.0 * carried / capacity, 1) if capacity > 0 else (0.0 if carried <= 0 else 999.0)
+    return {"carried": carried, "capacity": capacity, "percent": pct,
+            "overloaded": carried > capacity, "coin_weight": COIN_WEIGHT}

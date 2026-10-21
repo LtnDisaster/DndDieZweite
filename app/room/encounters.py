@@ -2,7 +2,7 @@
 import hashlib
 
 from .. import db, footprint, npc
-from .net import broadcast, get_map, sys_msg
+from .net import broadcast, get_map, send_to, sys_msg
 from .visibility import broadcast_token_add
 
 PALETTE = ["#c0392b", "#2980b9", "#27ae60", "#8e44ad", "#d35400", "#16a085", "#b71540"]
@@ -20,7 +20,8 @@ def _spawn_origin(mp, room_id, token, x, y):
 
 
 async def handle_spawn_encounter(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     eid = msg.get("encounter_id")
     enc = db.q1("SELECT * FROM encounters WHERE id=? AND user_id=?", (eid, user["id"]))

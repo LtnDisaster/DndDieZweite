@@ -268,6 +268,11 @@ Darkness (DM candle button 🕯 in the brush bar):
 
 ## History
 
+- Sprint 30: D101 section added (room preparation screen, guided character build
+  from the room's CSV content, background starting-gear grant, and the apply→sheet
+  refresh fix). Canonical close: 694 passed + 1 skipped (node 22 runs the real-JS
+  tests). No real browser runtime — the guided UI is additionally pinned by source
+  asserts in `tests/test_d101_prep.py`; walk the checkboxes below in a real browser.
 - Sprint 20: D90 section added (caster-plane ability truth, plane-scoped AoE/ping,
   resize pin/elev carry). Canonical close: 499 passed + 17 skipped. The
   "browser flow" automation is a Node-vm harness — no real browser runtime
@@ -315,3 +320,603 @@ Darkness (DM candle button 🕯 in the brush bar):
 - [ ] Privacy: second player logs in → clicks first player's token: compact public card (HP/AC/Speed), no items/spells/stats. DM sees the full sheet.
 - [ ] Legacy: a character with a classic `weapons` entry still attacks by name exactly like before (no AC verdict).
 - [ ] D94: DM hides a monster (out of your vision) → you attack it by id (devtools): error is exactly „No target token" — same as a wrong id. DM still sees/attacks it normally.
+
+## Sprint 25 — CSV rule packages (D95)
+- [ ] DM → 🎲 DM tab → „📚 Rule packages": the counts line shows `0` for all kinds in a fresh room. Choose one CSV from `app/content_pack/` (e.g. `items.csv`) with mode **Preview** → Upload: report lists the file `· ok` (or `file/line/column` errors), and NOTHING is written yet (counts stay 0).
+- [ ] Switch to **Apply** → Upload `items.csv` → counts gain `item: N`. In the 🎒 Inv tab the DM can now grant `sword_plus1`; a character that equips it attacks with the +1 typed bonus (server profile, not a client claim).
+- [ ] Re-Apply the SAME file → report shows `=N` unchanged, `+0` new, no duplicates (counts unchanged). Import a file whose row has a bad `kind` → Preview names the file, line, and column; a good file uploaded in the same run is still reported independently.
+- [ ] **Replace** a changed row overwrites it; **Apply** on the same differing id instead reports a `⚠conflict` and keeps the old value.
+- [ ] Upload a **ZIP** of several `*.csv` (auto-detected): each kind imports independently; an unknown `notes.csv` inside is `· skipped`, not fatal.
+- [ ] ⬇ **CSV** exports the chosen kind as a download; ⬇ **All (ZIP)** downloads every kind. A value like `+1d8`/`=evil` re-imports byte-identically (export prefixes `'` to defuse spreadsheets; import reverses it).
+- [ ] A PLAYER (non-DM) sees no DM tab; calling `/api/content/<code>/kinds` without DM (or logged out) returns 403/401.
+- [ ] Persistence: import spells, then restart the container — the castable abilities are back (re-registered from the DB at startup).
+
+## Sprint 25 — Character build (D96)
+- [ ] Player opens their own token's sheet → „⬆️ Build / Level-up": class `scout`, level `1`, **Plan** → `plan ok · 1 levels` and `need: skills 4/…`. Fill 4 skills into the choices box → **Apply** → toast „Built to level 1"; sheet shows Lv 1, HP 14, the 4 skills ✓, saves DEX/INT ✓.
+- [ ] Build to `8` with `{"subclass":"tradition_stalker","levels":{"4":{"ability":{"dex":2}},"8":{"feat":"feat_keen"}}}`: success; DEX +2 (level-4 ASI) and WIS +1 (Keen Mind) show on the sheet; Perception/Investigation become proficient; subclass shows.
+- [ ] Missing a choice (empty choices, target 8): **Apply** shows „choices still needed" with the list (skills/subclass/level) and NOTHING changes (still the previous level/HP).
+- [ ] Repeat guard: Apply the SAME level again → refused (build is forward-only); a lower target likewise refused. Advancing 5→8 keeps the earlier level-4 ASI (recompute from base, not stacked twice).
+- [ ] DM opens the same player's sheet → can Build it too (room-DM). A different room member (not the owner, not DM) sees no Build controls and gets 403 from `/api/build/...`.
+- [ ] Restart the container: the sheet's Build ledger (class, „built to N", subclass, per-level features) is still shown — it lives in `characters.build`.
+
+## Sprint 25 — Spellcasting (Phase C, D97)
+First import `spells.csv` + `classes.csv` from `app/content_pack/` (DM → 🎲 Rule packages → apply) so `adept`/`warden`/`seer` and the scaling spells exist.
+- [ ] Known-caster choices: build `seer` to `1` with `{"skills":["persuasion","religion"],"levels":{"1":{"cantrips":["spark","mend","chill"],"spells":["arcane_ward","bolt","smite"]}}}` → Apply ok. Open the sheet: 📖 Spellbook lists the chosen spells and a slot line `L1 2/2`. Without the `spells` pick, Apply says „choices still needed" (kind `spells`) and writes nothing.
+- [ ] Slot TABLE not total-derived: build `warden` to `2` (choose 2 cantrips + 2 spells). The spellbook shows only `L1 2/2` and NO 2nd-level slot — a half caster. (A level-2 full `seer` shows `L1 3/3`; a level-5 one shows `L1 4/4 · L2 3/3 · L3 2/2`.)
+- [ ] Cast + upcast: with a `seer`, cast `spark` (cantrip, no slot) — a `✨ Use` button rolls; at character level ≥5 the cantrip die is larger. For a leveled single-target spell the row shows a slot-level selector; pick a higher level and Cast — the HIGHER slot's pip drops (`L3 0/1`), not the base one.
+- [ ] Duplicate guard: spam the same Cast (same request) fast — the slot decrements ONCE and the target takes damage ONCE (no double-fire).
+- [ ] Class resource: a `seer` built to N shows `Sorcery Points = N` (reset short). After spending, a **short** rest refills them; a **long** rest refills slots AND sorcery points.
+- [ ] Prepared vs known: an `adept` (prepared) shows its whole class list as castable and notes that daily re-preparing is a long-rest/DM step; a `warden`/`seer` (known) only shows the spells actually chosen.
+- [ ] Area spells (`bolt`) show `🎯 map` on the sheet — aim and cast them from the tactical map, not the sheet.
+- [ ] Existing legacy spellbooks are unaffected: a character with a 📖 spellbook item still casts its data-only spells as before.
+
+## Sprint 27 — Weapons, equipment & magic items (Phase D, D98)
+- [ ] DM → 🎒 Inv → „🧩 Item definition" editor: pick a kind (e.g. weapon), set dice `1d8`,
+      two-handed `1d10`, tick **ver**, set `rng`/`max` or `reach`, `atk`/`dmg` bonus,
+      AC base/bonus/max-dex, `wis+2` attribute bonus, `str=15` set, darkvision, speed,
+      skill/expertise/save lists, `chg`/rechg, **mag**/**att** → **💾 Save definition**.
+      Reopen the dropdown → **✎ Edit** reloads exactly those values back into the form (no loss).
+- [ ] Grant it to a character (Grant, qty) → the item appears in their Inventory with the right chips (✨ magic, 🔗 attunable).
+- [ ] Equip a **versatile** weapon → Attack section shows `⚔️ (one) … 1d8+…`; the Inventory row shows a grip button `🤲 one→two`; click it → the attack now reads `(two) … 1d10`, and a previously-equipped shield in the off hand is returned to the pack automatically.
+- [ ] Attunement gate: a 🔗 magic weapon with an attack bonus shows `🔒` and the plain bonus until you click **Attune**; after attuning, `🔒` disappears and `+atk`/`+dmg` apply (Attack profile changes).
+- [ ] Effective values on the sheet: wear **Goggles of the Night** → header shows `👁 60 ft`; a speed item shows `Speed 30 ft (→ 40 ft worn)`; a `+AC` ring shows in **AC** only while equipped, and vanishes on unequip (no leftover).
+- [ ] Attribute item: a `str=15` glove raises the STR modifier everywhere (skills/saves/AC-derived) while worn; unequip and it drops back exactly (nothing persisted).
+- [ ] Ranged tiers: shoot within `rng` → normal; beyond `rng` up to `max` → the roll prints `dis` (server-forced); beyond `max` → "beyond the weapon's maximum range".
+- [ ] Extra damage dice: a `+1d4 fire` weapon's damage line shows the base dice `+[1d4] fire = … → N total`.
+- [ ] Potion: a `2d4+2` **Draught** has a **Use** button; clicking heals once (re-sending the same action does not double-heal; charge/stack decrements once).
+- [ ] Invalid equip gives a clear error (e.g. a two-handed grip then "shield does not fit the off hand").
+- [ ] Legacy sheets without any equipped slot are unchanged (AC/attacks identical to before).
+- [ ] Restart the container: equipment, grip, and derived attack profiles recompute identically from the DB.
+
+## Sprint 28 — Currency, carrying & companions (Phase E, D99)
+- [ ] Open a player character's sheet → a **🪙 Wallet** collapsible shows the greedy
+      coin split (e.g. `3 gp`) and the rate legend `cp=1cp · sp=10cp · ep=50cp ·
+      gp=100cp · pp=1000cp`. A `0` balance reads `empty`.
+- [ ] As DM: in the Wallet's **DM · grant / deduct** row enter amount `5`, coin `gp`,
+      press **Grant** → chronicle `🪙 The DM gives <name> 5 gp.` and the wallet now
+      reads `5 gp`. Enter `10` `gp` → **Deduct** → an "Not enough coin" error and the
+      balance is UNCHANGED (the whole withdrawal rolled back). Press Grant twice with
+      the same button quickly → the wallet only gained 5 gp once (op_id replay).
+- [ ] As the player: Wallet → **Transfer to a room member** → amount `2` `gp`, pick the
+      member → **Send** → chronicle `🤝 <name> hands 2 gp to <other>`; open the other
+      character's sheet → their wallet shows `2 gp`; this sheet now shows `3 gp`.
+- [ ] Transfer more than owned → an "Not enough coin" error; neither purse changes.
+- [ ] DM → 🎒 Inv → place/inspect a **container**: add coin with the chest's **Add coin**
+      (amount `1` `pp`) → it shows `🪙 1000 cp`. As a player standing NEXT to it,
+      **Take** `4` `gp` → chest drops to `600 cp`, your wallet `4 gp`; take again
+      (double-click) → the scoop applies once. As a player, **Add coin** is refused
+      ("DM only").
+- [ ] **⚖️ Encumbrance** collapsible: a bar + `carried / capacity lb`. Grant a heavy
+      500 lb item → the bar turns red and reads **OVERLOADED**, but moving the token
+      is still allowed (warn only, no movement penalty yet). Equip/unequip does not
+      double-count a weight.
+- [ ] Wear a CSV item with `carry_bonus` (e.g. Bag of Loading) → the capacity number
+      rises by the bonus; unequip → it drops back exactly.
+- [ ] **🐾 Companions** collapsible: DM sees a **＋ Add for <name>** box → add a
+      companion → a new token owned by that player appears; the row shows owner /
+      `led by …` / `rides …`. As DM use the row's controller + mount selects and ✕
+      (remove). **As a player you see NO controller/mount/remove controls** — control
+      and ownership are DM-assigned; a player can never take a companion they don't own.
+- [ ] Coin + balance + carried weight all still correct after reloading the page
+      (state comes from the server, never recomputed in the client).
+
+## INTEGRATION HARDENING (Sprint 29, D100)
+
+These are the manual confirmations for the D100 fixes. Most are ALREADY covered by
+automated tests (`tests/test_d100_integration.py`); do them here to see the UX is honest.
+
+- [ ] **Autonomy lock.** As a PLAYER opening your own character sheet in the lobby
+      editor: changing Level, the spell list, or spell-slot maxima and saving must NOT
+      change those server-authorised values on reload (AC/HP/name/etc. ordinary fields
+      DO save). Level up / class via the in-room **Build** still works normally.
+- [ ] **Build stays open to the owner.** Player runs the Build (e.g. a level with a
+      skill/subclass choice) → it applies; the DM can also still advance a character
+      with the class control. Neither path is broken by the lock.
+- [ ] **Rest refusal.** A player triggering a long rest (which is DM-only) now sees a
+      clear "DM only" message instead of nothing happening; short-resting someone
+      else's token reports "Not your character".
+- [ ] **Cross-room item library (two rooms, DM in both).** Reusing one item-definition
+      id in a second room is refused with a clear message ("used by another room");
+      the first room's definition is unchanged. Item reads/grants in a room only ever
+      list that room's own definitions.
+- [ ] **Familiar cast.** A DM-created familiar carrying a registered ability (string id)
+      can still be cast by the player the DM assigned as its controller.
+
+> Note (not a browser step): the `node`-gated parity/diorama JS tests now execute in
+> the canonical Docker test run (node 22 added to the test stage), so the shipped
+> client JS — including `55_diorama.js`, which is only READ there — is verified in CI
+> rather than skipped.
+
+## ROOM PREPARATION & GUIDED BUILD (Sprint 30, D101)
+
+These confirm the D101 UX in a real browser (the flow itself is automated in
+`tests/test_d101_prep.py`, but the source-assert style cannot prove the CLICK
+PATHS render). Import a rule pack first (DM tab → 📚 Rule packages, or the prep
+screen's own upload) — with NO content the dropdowns are legitimately empty and
+the amber "no imported content" hint is the CORRECT behaviour, not a failure.
+
+### DM — preparation + rule pack status
+- [ ] Create a room → you land on the PREPARATION screen (not the canvas). Right card
+      shows the rule-pack badge counts and an import row. Upload the 8 shipped CSVs
+      (mode = Apply) → the badge counts rise and the report shows per-file ok/errors.
+- [ ] The DM roster lists every member with their character + built/unbuilt/at-table
+      badges; reload the page, reopen the room from the lobby → you land on prep again.
+- [ ] Click "Open the table" → the canvas + WS connect normally (Tactical and Diorama
+      both work). The topbar ⚙ and "← Prep" bring you back to the prep screen.
+
+### Player — guided create → build → seat → table (the core D101 path)
+- [ ] In a second browser (player, not DM): join by code → prep screen. The species /
+      class / background dropdowns list the DM's imported pack (e.g. Scout, Adept,
+      Scholar, Urchin) — NOT free-text and NOT raw ids. Pick name + species + class +
+      background → Create → the character appears selected.
+- [ ] Target level 1 → 🧭 Plan → the wizard shows a "Choose N skills" checkbox list (the
+      class's skill_options) and any subclass/level choices as selects. Pick 4 skills →
+      "All guided choices collected ✔". Leave one skill short → "Still missing: skills".
+- [ ] ⬆ Apply → success toast AND the sheet/checklist immediately reads
+      "built to 1" with the new skills — WITHOUT pressing F5 (this is the confirmed
+      D101 bug: previously it stayed "unbuilt" + old skills until a full reload).
+- [ ] "Seat character at the table" → a token appears at the table; reload the page,
+      reopen the room → still built to 1, still seated (server truth, not client state).
+- [ ] 🎒 Grant starting equipment (pick the Urchin background, which lists
+      "sword_plus1, coin purse") → "Granted: 1 × Sword +1" and an honest note that
+      "coin purse" has no item definition in this pack (nothing invented). Press it
+      AGAIN → "Already granted earlier — nothing duplicated" and the inventory still
+      holds exactly one Sword +1.
+
+### Player — level-up an existing character + refusals
+- [ ] Select the built character, set target level higher (e.g. 3), Plan → Apply → the
+      subclass/skill fields re-appear only for the NEW decisions; the level-1 skills are
+      remembered (no re-asking). Sheet updates without reload.
+- [ ] Open Expert mode, paste a garbage choices JSON, Apply → a red parse/server error is
+      shown and NOTHING is written (reload → the sheet is unchanged, still unbuilt/old).
+- [ ] A room member who is NOT the character's owner sees the guided flow but cannot
+      build/seat another player's private character (server refuses; the DM can for a
+      character assigned to the room).
+
+### Room without content + old rooms
+- [ ] Join a room whose DM imported NOTHING → prep shows the amber "no imported content"
+      hint; the dropdowns are empty by design; creating a character still works (identity
+      fields optional) and the build's Plan answers "no level-1 row in this room", not a
+      crash.
+- [ ] A room/character created BEFORE D101 opens in prep with its stored race/class/level
+      intact; the table behaves exactly as in the Sprint 29 checklist.
+
+## FLOORS / STOCKWERKE operable (Sprint 31, D102)
+
+These confirm the D102 floor UX in a real browser (the mechanics are automated in
+`tests/test_floors.py`, `tests/test_floor_maps.py`, `tests/test_d102_floors.py`).
+
+### DM — the Floors panel (was: no way to manage floors at all)
+- [ ] Open a table as DM → the side panel's **DM tab shows a "Floors" panel even
+      with only the primary floor**. Type a name → ＋ Add → the floor appears in the
+      list AND in the DM Tools "Viewing plane" select (which now also appeared).
+- [ ] Click a floor in the panel → the canvas switches to that plane's (blank) map
+      with "← viewing" on the row; nothing moved, no token teleported. The ✏️ on a
+      row renames inline (✓/✗, Enter/Escape) — try the same name as an existing
+      floor or a junk name → the server reason appears as a toast, nothing changed.
+- [ ] 🗑 on an EMPTY floor deletes it; with a token standing on it the delete refuses
+      with the honest reason ("Tokens still stand on this floor"); the primary row
+      says "fixed" — it can neither be deleted nor renamed.
+- [ ] Edit map while a named floor is being VIEWED (any brush) → only that plane
+      changes: switch back to ⬛ primary → its terrain/fog is exactly what it was.
+
+### DM — moving tokens between planes
+- [ ] Select a token → the sheet's Floor row (DM) has the picker + Go: move the token
+      to "crypt" → the token vanishes from the primary canvas; with the crypt VIEWED
+      it appears at the same coordinates on the crypt map. Bring it back → gone from
+      crypt, back on primary. (This channel is DM-only by decision.)
+- [ ] Author a stair: map editor on primary place an object whose interact op targets
+      the crypt → with the crypt viewed, tokens that stand on OTHER planes are not
+      rendered and not clickable on this canvas.
+
+### Player — plane truth without admin power
+- [ ] With your character ON the crypt (DM moved you): reload → you are delivered
+      on the crypt map directly (no manual switching); your sheet's Floor row is a
+      plain label now — no picker, no Go (players take the stairs).
+- [ ] Stand your token ON a stair object cell and interact → "🪜 … takes the
+      Stair to crypt", your view follows you to the crypt automatically.
+- [ ] While you are on the crypt, a fog brush stroke by the DM ON THE PRIMARY
+      floor does not paint anything into your crypt view (and vice versa).
+- [ ] A room created BEFORE D102 (everything on primary) is untouched: same map,
+      same fog, no floors listed, table behaves as in the Sprint 29/30 checklists.
+
+## D103 — Map editor truth + PNG display (manual browser acceptance)
+
+Automated tests (711/1/0) pin the server/registry/route semantics. They CANNOT pin
+what the human eye sees — walk this list in a real browser to ACCEPT or REJECT:
+
+### Map editor — floor, void, erase
+- [ ] ⬜ floor brush: drag a rectangle on blank ground → the cells VISIBLY change
+      (two-tone tiled floor vs the dark background) and the change survives a reload.
+- [ ] 🕳️ void brush: paint a 3-cell line across a corridor → dark hatched holes;
+      a token walked/teleported INTO the line refuses ("no path"/"invalid teleport"),
+      and a NEW token dropped on it lands on the nearest real floor cell beside it.
+- [ ] Sight passes the pit: with fog on, stand your token beside the void line with
+      an NPC/token directly behind it — you SEE it (and its cells explore), even
+      though nobody can walk through.
+- [ ] 🧹 erase on a trap/loot cell still clears THAT item and paints walkable
+      floor (old meaning — erase must never dig holes); ⬜ over void restores floor
+      and the token can cross again.
+- [ ] Walls/doors/traps elsewhere are byte-untouched by any brush stroke; the void
+      line on a NAMED floor (view a floor in the Floors panel, paint, save) never
+      appears on ⬛ primary or another floor — and vice versa.
+- [ ] Diorama view: the void cells render as flat floor (known cosmetic limit —
+      NOT a bug to report); tactical view is the source of truth.
+
+### Token artwork (PNG) — display path
+- [ ] DM/player uploads a PNG for a token → the portrait renders as an IMAGE on the
+      canvas immediately (not the grey initial-disc fallback) — first try, no reload.
+- [ ] Hard-reload (Ctrl+Shift+R) → still the image; DevTools→Network: the
+      `/assets/<id>` request is 200 image/png (this request 404'd before D103).
+- [ ] A stranger account in ANOTHER room cannot load that url by pasting it (404,
+      no hint); a private asset un-assigned from any token only serves its owner;
+      the DM of a room the art rides in may load it.
+- [ ] Assign the same art on a token on a NAMED floor → renders there too.
+- [ ] A room/map/token untouched since before D103 behaves exactly as in the
+      Sprint 29/30/31 checklists (no migration happened; old maps have no 🕳️ cells).
+
+## D104 — Lights manageable + DM player-view peek (manual browser acceptance)
+
+Automated tests (725/1/0) pin the lamp channel, the light/LOS semantics and the
+peek's server-truth + purity. They CANNOT pin the felt usability — walk this to
+ACCEPT or REJECT:
+
+### DM — Lights panel (viewed plane)
+- [ ] 🕯 darkness on → the tactical canvas goes (nearly) black for players while
+      YOU still see everything (as designed: dark = no free sight). Your own
+      token still shows its ring — you always "feel" your cell.
+- [ ] DM tab "Lights": "＋ Lamp" drops a lit lamp at your view centre; the panel
+      lists it (💡 name, radius). Toggle the checkbox → 🌑: players lose the lit
+      area IMMEDIATELY (no reload needed), no chronicle entry for anyone.
+- [ ] Radius field 5→12 → the visible circle grows accordingly for players;
+      >30 is clamped; a lamp behind a wall does NOT shine through it (stand
+      your token behind the wall as a player and check).
+- [ ] ➜ move mode then click a cell → the lamp travels; its light moves with it;
+      a RELOAD keeps the new position. ✕ removes it (players see the area die).
+- [ ] The panel lists only the VIEWED plane: view a named floor → its lamps (or
+      the honest empty line); toggling there changes nothing on ⬛ primary and
+      vice versa. A player standing on the lit plane can click the lamp and
+      tend it themselves (chronicle message stays — player actions still speak).
+
+### DM — peek ("View as")
+- [ ] "Peek" panel → choose a player character → 👁 View as: banner
+      "👁 DM preview: sight of {name}" over a canvas showing EXACTLY what that
+      player's screen shows (compare side-by-side in a second browser — dark
+      areas, fog memory, visible tokens must match; unseen NPCs absent).
+- [ ] While previewing: token click / drag / right-click roll / interact /
+      double-click map / diorama switch — ALL refused with a hint; camera pan
+      works; Refresh re-fetches (walk the player somewhere first: the new
+      position appears only after Refresh — moment-image by design); ✕ Exit
+      restores the full DM view untouched.
+- [ ] Flip a light (panel) while previewing → nothing changes until Refresh
+      (honest), Exit → your DM view was never altered.
+- [ ] A character moved to another floor while previewed: Refresh follows the
+      character to that plane (banner names it).
+- [ ] Player-side sanity: while the DM peeks, the player's own screen changes
+      NOTHING (no flicker, no reveal, no fog edits in the room log).
+- [ ] Reconnect test: as a player in a dark room WITH a lamp — log out, log in:
+      you re-learn exactly the lamp's reach (explored = light + old memory),
+      no more; without lamp you re-learn only your footprint + old memory.
+- [ ] Old room (created before D104, never dark): "View as" works and matches
+      the player exactly; classic fog behaviour untouched (D101–103 checks
+      still pass).
+
+
+## D105 — Class kit, NPC gear, looting (manual browser acceptance)
+
+### Prep screen — Starting equipment
+- [ ] Character with class Scout: "🎒 Starting equipment" opens a report:
+      fixed items (Dagger of the Surge, 2 × Healing Draught) and the two
+      radio groups (weapon / kit). Nothing is granted yet.
+- [ ] "Grant equipment" without choosing → warns "Choose first: weapon, kit";
+      after choosing, grants exactly once; the result names both parts.
+- [ ] Click again → both parts answer already-granted; no duplicates appear
+      in the inventory tab. A character whose pack references a missing item
+      shows the error and grants NOTHING for the class part.
+
+### DM — NPC inventory
+- [ ] NPC sheet gains "🎒 Inventory": fill an item + coin, close/reopen —
+      contents persisted. Player's side tab shows no NPC data anywhere
+      (state/network log stays clean).
+- [ ] Player ws (devtools) sending npc_inv inspect → zero reply, sheet has
+      no NPC gear.
+
+### Looting
+- [ ] NPC at 0 HP: a player standing next to it sees "💰 Loot search" on the
+      token sheet → loot panel opens, Loot buttons move gear into the
+      character and the chronicle shows "💰 … loots …". Standing further
+      away: "Walk up to it first".
+- [ ] Heal the NPC above 0 → loot button answers "It isn't here."; heal to 0
+      again → lootable.
+- [ ] Delete the NPC token while its container has items → room stays
+      healthy, world chest containers unaffected, no phantom hoard returns
+      under a recreated token id (DB: containers row for tok:<id> gone).
+
+## D106 — Cursed items, secret metadata, DM whispers (manual browser acceptance)
+
+### DM — authoring a curse on ONE instance
+- [ ] DM inventory tab, a character carrying TWO identical daggers: each row shows a
+      "☠ curse" button. Curse ONE of them (name / secret description / whisper text).
+      The cursed row gains a "☠ <name>" line (+ "📜" marker for a stored whisper);
+      the twin row stays completely ordinary. Reload the page — the curse persists.
+- [ ] Cursing a STACK (e.g. 3 × potion): exactly one piece is carved out (potion ×2
+      ordinary + a new ×1 row with the curse). The cursed row offers no Split; combining
+      it into the ordinary stack answers "different items".
+- [ ] "☠ edit" changes the fields; "☠ ✕" removes the curse (row goes back to plain).
+
+### Secrecy (the core check)
+- [ ] Player (owner) view of the cursed item: NO curse text anywhere — sheet, inventory
+      tab, devtools WS frames (frames for /state/inv_contents contain no "curse", no
+      curse name), chronicle stays clean.
+- [ ] DM opens the same room in a second browser: only the DM sees the metadata.
+      "View as" (D104) shows the player's exact view — curse invisible there too.
+- [ ] Player ws (devtools) sending {type:"curse", action:"reveal", …} → "DM only".
+
+### Owner change
+- [ ] Transfer the cursed item to another player's character (inv_transfer) or let a
+      second character LOOT it from a corpse: the curse follows the item; nobody sees a
+      disclosure; the DM panel on the NEW holder still shows the curse (revealed: no).
+- [ ] Equip/unequip, use (charges), identify, recharge, DM long rest: the curse survives
+      all of it (DM panel; also survives a page reload).
+
+### Reveal + whisper
+- [ ] "☠ reveal": the OWNER's chat privately receives "☠ <item>: <name> — <description>"
+      (visible ONLY to owner + DM; other players: nothing, also nothing after reload —
+      history is filtered). The owner's sheet item now shows the revealed name+desc line.
+      The stored whisper text does NOT appear on the sheet.
+- [ ] "☠ conceal": the owner's sheet line and chat history view of the curse vanish for
+      them (re-reveal works); the DM still sees everything.
+- [ ] "☠ whisper": the owner's chat privately receives the stored whisper text verbatim;
+      other players see nothing.
+- [ ] Curse an item inside a world chest or a dead NPC's hoard: edit/clear works; the
+      whisper/reveal buttons are absent there (a container has no player owner), and a
+      hand-typed whisper message for a container item answers "needs a player owner".
+- [ ] DM of a DIFFERENT room cannot touch these ids (refused like "nothing exists").
+
+### NPC deletion (D105 gap closed)
+- [ ] Delete an NPC token that carries gear: token gone, its hoard gone (recreate the
+      same token id → hoard does NOT reappear), world chest containers unaffected.
+- [ ] Mount a rider on the NPC, then delete it: "Could not remove that token." — the NPC
+      AND its hoard both still exist (no half-deletion); clear the mount, delete works.
+
+## D108 — 2024 character origin (🧬 prep card)
+
+### Report + preview (player)
+- [ ] Room prep with an imported demo pack, a character with background **Scholar**:
+      "🧬 2024 Origin" shows the three allowed abilities (INT/WIS/CHA) with their
+      CURRENT sheet values, the Origin feat name, and mode options "+2 and +1" /
+      "+1 to all three" — nothing applied yet (checklist line "2024 Origin pending").
+- [ ] Switching the mode or the two +2/+1 selects updates the live preview
+      (10 → 12 style arrows); picking the SAME ability for +2 and +1 shows a red
+      "DIFFERENT abilities" hint and disables the Apply button.
+- [ ] A character whose sheet value is 19 on an allowed ability: preview shows
+      "→ 21 (>20!)" in red and Apply stays disabled.
+
+### Apply (owner)
+- [ ] Apply with +2/+1 → green "Origin granted", preview sheet values rise exactly
+      by the picked deltas, the feat's skill (Investigation for Quick Study) shows
+      as proficient on the character, and the checklist line flips to
+      "✅ 2024 Origin granted (bg_scholar)".
+- [ ] Click Apply twice / reload the page and reopen the card: report answers
+      "Origin already granted"; stats do NOT rise a second time.
+- [ ] Post a raw request with a forged feat id or an ability outside the list
+      (curl/devtools) → server refuses with a readable error; nothing changes.
+
+### Coexistence
+- [ ] Apply origin, then run the guided build through level 4 (Ability +2 STR):
+      the level-4 ASI lands AND the origin deltas are still exactly once.
+- [ ] Build first, origin second: the origin apply does not reset HP or re-level —
+      hp/max_hp visible in the sheet are unchanged.
+- [ ] "🎒 Starting equipment" before/after origin: the background items appear once;
+      a second gear request answers "already granted — nothing duplicated".
+- [ ] A room WITHOUT an imported rule pack: the origin card explains
+      "not in this room's rule pack" — no silent success.
+
+## D109 — Weapon masteries (🎖 attack lines + mastery card)
+
+- [ ] Import the demo pack, hand a player the Surged Dagger (Nick) and any
+      Light off-hand dagger, and grant Nick:
+      `POST /api/build/{code}/{cid}/mastery/grant` (DM) — the 🎖 card lists it.
+- [ ] Start initiative, take the Attack action, then tick "Nick" on the
+      off-hand line and roll: the extra attack resolves WITHOUT spending the
+      bonus slot (initiative panel: Bonus still "available"); a second Nick
+      the same turn answers "once per turn" before any dice appear.
+- [ ] Tick "Cleave" with the Great Cleaver against two adjacent dummies: one
+      attack roll plus one separate "Cleave vs …" line; the cleave damage
+      line has no ability bonus; a third target attempt the same turn is
+      refused "already used this turn" — pre-roll.
+- [ ] Vex with the Longbow: after a hit the target token shows the 🎯 vexed
+      marker; your next attack against it rolls with advantage and the
+      marker is gone. Outside initiative the same request refuses with
+      "needs active initiative".
+- [ ] Push with a Push weapon: the dummy slides up to 10 ft on the board and
+      the chronicle/roll line narrates it; with a body directly behind the
+      target the answer is "cannot be pushed — the way is blocked" and the
+      dummy does not move.
+- [ ] Topple (Versatile Sword): failed CON save → PRONE on the token and it
+      costs movement as usual; a High Constitution dummy "resists".
+- [ ] Graze on a miss adds exactly the ability modifier to the damage line;
+      on a hit the line is unchanged. Sap: victim's next attack rolls at
+      disadvantage and the 🩸 marker disappears with it.
+- [ ] A character WITHOUT the entitlement ticking any mastery: refused
+      "This character has no such mastery" — no dice in the log at all.
+- [ ] Manual "damage only" roll with a mastery field: refused; plain attacks
+      without the checkbox behave exactly like before D109.
+
+## D110 — End-to-End integration chain (see docs/SATURDAY_ACCEPTANCE.md for the full script)
+
+- [ ] A refused attack does NOT spend the turn's action: with initiative
+      open, attack a hidden/far target (refused "No target token"/"out of
+      reach"), then attack a legal adjacent target in the SAME turn — the
+      second attack rolls normally (before the D110 fix it answered "No
+      action left this turn").
+- [ ] Curse whisper keeps disclosure: reveal a curse (owner sees name on
+      the sheet, gets the ☠️ whisper), then DM sends "whisper" — owner
+      receives the stored text AND the sheet entry keeps its revealed name
+      (before the D110 fix the whisper silently un-disclosed it).
+- [ ] The full A→F chain from the acceptance guide runs without blockers.
+
+## D111 — Effect grammar & condition catalogue (conditions.csv, effect cells)
+
+- [ ] Import the demo pack: the status legend gains the catalogue entries
+      (🔥 Smouldering, 😰 Shaken, 💧 Slicked come from `conditions.csv`,
+      not from code) — a brand-new homebrew condition now needs only a CSV
+      row.
+- [ ] Cast Thunder Lure on a dummy near another one: damage line appears, a
+      STR save line follows; on a FAILED save the dummy slides 2 cells on the
+      board (obstacle-truncated), on a success it does not move. Re-clicking
+      the cast (same op) never pays the slot twice and never re-fires.
+- [ ] Use the Oil Vial (inventory "use"): the target token shows 💧 Slicked,
+      its effective speed drops by 10 ft, and the condition expires on its
+      own clock after 3 rounds.
+- [ ] Hit a dummy with Blade Quake (on_hit): the DUMMY shows 😰 Shaken until
+      end of turn; equip the Ring of Embers and take damage (on_damaged): a
+      temp-HP line appears; unequip/re-equip fires once per fresh op, a
+      replayed op whispers "already applied" and changes nothing.
+- [ ] The Martyr feat appears as a castable card (`feat_martyr`): casting it
+      grants temp HP once; double-cast (replay) never doubles it.
+- [ ] DM adds GRAPPLED: every move request now answers with the grappled
+      refusal outright (SRD "speed 0" — behaviour note D111); with grappled
+      removed but slicked still up, walking costs the slower speed.
+- [ ] A token that dies/gets deleted while SMOULDERING: the round tick ends
+      quietly — no traceback, room stays responsive (the D111 recursion fix).
+- [ ] Upload a test pack whose `effects` cell contains an unknown op (e.g.
+       "meteor"): the import report REFUSES the row by name; nothing half
+       loaded.
+
+## D112 — Contested primitive, 2024 special melee & pickpocket (🤼 Special & Stealth)
+
+Prep: one PC on its own token, an adjacent NPC (or a second PC) as the target.
+Both on the same plane, the target in reach (touching footprints) and visible.
+
+- [ ] Open the sheet of the acting token → the **🤼 Special & Stealth** card is
+      present (owner or DM). Pick a target in its dropdown. Everything below is
+      resolved SERVER-side; the sheet only names actor + target + a fresh op id.
+- [ ] **Grapple:** click Grapple. An attacker check line appears (private/self)
+      and a target STR/DEX **save** line (DM-visible) follows. On
+      a failed save the target token gains the **grappled** marker; the grapple
+      stores the DC on it. Re-clicking the SAME action (replay) neither spends a
+      second turn slot nor re-rolls.
+- [ ] **Grapple gates:** a target more than one size larger refuses with a size
+      message; a target you cannot touch (out of reach) refuses with "out of
+      reach"; an invisible / far-plane target refuses — and in every refusal
+      case NOTHING was spent (no roll, no slot).
+- [ ] **Action economy (in initiative):** with initiative running and your
+      action already used, Grapple/Shove/Pickpocket refuse ("spend the action");
+      outside initiative they are free. This matches the engine's action model.
+- [ ] **Escape:** with the target grappled, its sheet now shows an **Escape**
+      button (no target needed). Clicking it rolls Athletics OR Acrobatics vs
+      the stored DC and clears grappled on success. If you first REMOVE the
+      grappler token, Escape then auto-succeeds.
+- [ ] **Grapple ends on distance:** while grappled, force-move the grappled
+      token out of reach (DM push) OR walk the grappler away OR DM-teleport —
+      the grappled marker clears automatically (the `end_grapples_out_of_reach`
+      hook), on all three movement kinds.
+- [ ] **Shove:** Shove→Prone puts the target prone via the normal prone path;
+      Shove→Push moves it 5 ft through the forced-move path (obstacles truncate
+      it), and a push that leaves reach also drops the grapple.
+- [ ] **Pickpocket (Model A, DM-mediated):** click Pick on a victim. The THIEF
+      only ever sees a "made covertly" whisper — never the result. The DM sees
+      the hidden Sleight-of-Hand line plus the notice result (a fixed `notice_dc`
+      you can set, else a real Perception check; 2024 has no passive perception).
+      Discovery is reported to the DM SEPARATELY from whether the theft succeeds.
+- [ ] **DM authorises stealable items (Model B subset):** as DM, open an NPC
+      chest (or a character sheet) and toggle **🤝 steal** on one item. The
+      button flips to "🤝 steal ✓". (Char path refreshes the sheet; NPC path
+      re-inspects the chest.)
+- [ ] **Pickpocket (Model B, auto-take):** the thief takes the DM-authorised
+      `pick` item: on a clean success the item moves ATOMICALLY to the thief and
+      any curse on it is preserved + its `revealed` state reset. An item that is
+      NOT `pick`-flagged (or an unknown id) answers EXACTLY like a failed check —
+      the endpoint never reveals whether an item exists (no inventory oracle).
+- [ ] **Replay / concurrency:** re-sending the same pickpocket op id is a silent
+      no-op (nothing moved twice); two thieves racing are guarded by the same
+      claim, and a fresh `VTT_DATA_DIR` behaves identically.
+- [ ] Cross-room / cross-plane: a target in another room or on another plane is
+      refused with no leak, exactly like the other reach/visibility gates.
+
+---
+
+## D113 (Sprint 42) — Konzentration, automatische Flüche, `opposed`-Op
+
+**Konzentration (DM + Spieler):**
+- [ ] Ein Wirker castet einen Concentration-Zauber → das `concentrating`-Flag
+      erscheint; an verlinkten Conditions (z. B. `paralyzed`, `invisible`) steht
+      das `conc`-Token.
+- [ ] Ein Treffer auf den Wirker löst einen CON-Save mit `DC = max(10, halber
+      tatsächlicher Schaden)` aus (Temp-HP zählen NICHT in den DC). Cap: keiner.
+      Bestehen = Konzentration bleibt; Misslingen = Konzentration UND alle
+      `conc`-verlinkten Conditions enden raumweit.
+- [ ] Wirker fällt auf 0 HP ODER bekommt einen Inkapazitätszustand → Konzentration
+      bricht SOFORT, ohne Wurf.
+- [ ] Eine neue Concentration-Zauberei beendet die alte zuerst (alte Effekte weg).
+
+**Automatische Flüche (nur DM-Autoren, UI Englisch):**
+- [ ] Als DM auf einem Item `☠ edit` → Fluch anlegen; dann `⚙ arm` → Trigger
+      (`equip`/`use`/`on_transfer`/…) + Wirk-Cell (Grammatik-JSON) setzen. Ein
+      ungültiger Cell wird abgelehnt (Fehler-Whisper), nichts wird aktiv.
+- [ ] Der Schalter `💤 dormant` ↔ `🔮 active` schaltet die Aktivierung. Sie ist
+      UNABHÄNGIG von Enthüllung: `☠ reveal`/`conceal`/`whisper` lassen `active`
+      unverändert, und `activate`/`deactivate` ändern die Enthüllung nie.
+- [ ] Solange `dormant`, passiert beim Auslösen nichts. Erst `active` + passender
+      Trigger feuert.
+- [ ] Ein `on_transfer`-Fluch feuert exakt einmal pro echtem Besitzerwechsel
+      (Transfer/Loot/Taschendiebstahl), auch bei Doppelsendung derselben op-id.
+- [ ] **Kein Leak:** Ein verborgener Fluch verrät sich dem Besitzer weder in der
+      Inventaransicht (nur `revealed` Name/Beschreibung, nie `active`/`trigger`/
+      `effects`) noch im Chat — curse-origin-Texte sehen NUR der DM.
+- [ ] **Rückwärtskompatibilität:** Ein Fluch ohne `trigger`/`effects`/`active`
+      (alter Stand) round-tript unverändert und bleibt inaktiv.
+
+**Datengetriebene Fallen (DM-Autoren + Spieler-🔍/🔧):**
+- [ ] **Fallen-Autoren-Felder:** DM wählt den Fallen-Pinsel; neben Label/Save-DC/
+      Schaden gibt es jetzt `find DC`, `disarm DC`, `repeat` und ein JSON-Feld
+      `effects`. Ein leeres `effects`-Feld ⇒ die Falle nutzt weiterhin
+      Save-DC + Schaden (Alt-Verhalten, unverändert).
+- [ ] **Sprichwort-Falle (effects-Zelle):** DM setzt z. B. `{"v":2,"ops":[
+      {"op":"save","ability":"dex","dc":15,"success":[],"failure":[
+      {"op":"condition","key":"prone","target":"target"}]}]}`. Eine Kreatur, die
+      auf das Feld tritt, würfelt den DEX-Save über den EINEN Würfelkanal; bei
+      Misserfolg bekommt sie `prone`. Kein `random.randint`.
+- [ ] **Entdecken:** Spieler steht neben/ auf dem Feld und nutzt 🔍 Search. Bei
+      Erfolg erscheint die Falle für alle (Karte aktualisiert); bei Misserfolg
+      ODER wenn gar keine Falle da ist, kommt derselbe neutrale Text ("find
+      nothing") — die Suche ist keine Falle-Oracle. Eine Falle ohne `find DC` ist
+      nicht auffindbar.
+- [ ] **Entschärfen:** Auf einer ENTDECKTEN Falle mit `disarm DC` nutzt der
+      Spieler 🔧 Disarm (DEX-Wurf). Erfolg ⇒ `disarmed` + federt nicht mehr.
+      Auf einer noch versteckten Falle gibt es nur "nothing here to disarm".
+- [ ] **DM-Trigger:** DM kann eine Falle per `trigger` auf einer Ziel-Kreatur
+      zwingend auslösen.
+- [ ] **repeat:** `repeat`-Falle bleibt nach dem Auslösen scharf (für die nächste
+      Kreatur); eine normale Falle federt einmal.
+
+**Vertikale 10-ft-Skala (D113 Phase 7, Buchführung):**
+- [ ] Höhen-Bürsten (⛰️+/⛰️−) ändern weiter EINE EINHET pro Klick; die Engine
+      interpretiert 1 Einheit = exakt 10 ft und 1 Stockwerk-Ebene = 10 ft. Kein
+      Sturzschaden/kein Höhenkampf (bewusst aus).
+- [ ] Ein Token auf Ebene „Upper" (2. deklarierte Ebene) mit Boden-Höhe +3 liegt
+      geometrisch bei 2·10 + 3·10 = 50 ft (nur Anzeige/Buchführung; Ebenen
+      bleiben unabhängig, keine Kollision über die Höhe).
+
+## Nachtschicht 4.0 — Anschlusspunkte (2026-10-18, Regressions-Audit)
+
+Automatik ist grün (1115 Tests, E2E A–G2/G); diese Punkte bleiben Mensch:
+
+- [ ] **Massive-Grenze live:** Char mit vollem HP bekommt exakt max_hp
+      Schaden ⇒ sterbend (NICHT tot); erst Rest nach Fall ≥ max_hp ⇒ tot.
+      (Der alte Vermerk „20/20 stirbt bei exakt 20" ist überholt — D154.)
+- [ ] **G2-Gefühl:** DM-Browser mitten im Raid neu laden → Raum erneut
+      betreten → DM-/Game-/Inv-Tab: alle Griffe da? Kamera steht bewusst
+      nicht auf Tokens — stört das im Spielalltag?
+- [ ] **Regelentscheidung Kurze Rast (D155):** Sterbender Spieler macht
+      eigene kurze Rast mit Hit Dice ⇒ richtet sich auf. 2014-RAW würde
+      Bewusstsein verlangen. So lassen oder Regelarbeit beauftragen?
+- [ ] **Reload im Kampf:** offenes Sheet + laufende Initiative → Reload →
+      Re-Enter: Slot-Chips und Initiativ-Fenster korrekt?
+- [ ] **Floor-Adjazenz:** Stabilize von oben auf unten muss scheitern
+      („next to the patient"); gleiche Zelle, anderes Stockwerk zählt nicht.
+- [ ] **Trank-Verschwendung sichtbar:** ×3 bei vollem HP trinken ⇒ Chronik
+      zeigt Verbrauch pro Schluck, letzte Dosis verschwindet sichtbar.
+- [ ] Nicht automatisch prüfbar: Audio-Ausgabe, Mobile-Breite, echter
+      Netzabriss mit Reconnect, WebAuthn.

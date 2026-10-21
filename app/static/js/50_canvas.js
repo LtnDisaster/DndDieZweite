@@ -11,6 +11,13 @@ function renderFogToggle(){
 }
 const cv = $("map"), ctx = cv.getContext("2d");
 function cellSize(){ return state.grid ? state.grid.cell : 50; }
+// D104: THE accessor trio for what the canvas RENDERS. A DM preview replaces
+// the render DATA and nothing else: interaction is blocked at the input
+// handlers, and the live state keeps receiving WS updates underneath — the
+// preview is an honest moment-image of the server-side player sight.
+function viewG(){ return state.preview ? state.preview.grid : state.grid; }
+function viewTokens(){ return state.preview ? state.preview.tokens : state.tokens; }
+function viewGhosts(){ return state.preview ? state.preview.ghosts : state.ghosts; }
 /* D85 token artwork: t.image is ONLY ever a server-generated "/assets/<id>"
    URL (never client-typed), drawn inside the token's own rotate frame — one
    rotation, aspect preserved, clipped to the body ellipse. Loaded once per
@@ -206,7 +213,11 @@ function tick(){
   requestAnimationFrame(tick);
 }
 function visibleHere(i){
-  const g = state.grid; if (!g || i == null || i < 0) return false;
+  const g = viewG(); if (!g || i == null || i < 0) return false;
+  // D104: a DM preview is masked SERVER-side — cells the character may not
+  // see are null; the preview must be evaluated like a player, never like
+  // the DM's own unrestricted sight.
+  if (state.preview) return g.cells && g.cells[i] !== null && g.cells[i] !== undefined;
   if (state.room && state.room.role === "dm") return true;
   return g.cells && g.cells[i] !== null && g.cells[i] !== undefined;
 }
@@ -216,13 +227,14 @@ function visibleHere(i){
 function draw(){
   if (!ctx || !state.room) return;
   try {
-    if (state.viewMode === "diorama" && !state.editing){ drawDiorama(); return; }
+    if (state.viewMode === "diorama" && !state.editing && !state.preview){ drawDiorama(); return; }
     drawTactical();
   } catch (e){ dbgErr(e, state.viewMode); throw e; }   // visible in ?debug, still fatal (no silent breakage)
 }
 function drawTactical(){
   const { w, h } = view(), c = cellSize(), cam = state.cam;
-  const gm = state.editing && state.editMap ? state.editMap : state.grid;
+  const gm = state.preview ? state.preview.grid
+             : (state.editing && state.editMap ? state.editMap : state.grid);
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#0a0b10"; ctx.fillRect(0, 0, w, h);
   const ox = gm ? gridOrigin(gm)[0] : 0, oy = gm ? gridOrigin(gm)[1] : 0;
@@ -249,11 +261,30 @@ function drawTactical(){
       else if (ter === 4){ ctx.fillStyle = "#26231b"; ctx.fillRect(sx, sy, c, c);
         ctx.fillStyle = "#4a4232"; ctx.beginPath();
         ctx.arc(sx+c*0.35, sy+c*0.6, c*0.13, 0, 7); ctx.arc(sx+c*0.65, sy+c*0.42, c*0.16, 0, 7); ctx.fill(); }
-      else { ctx.fillStyle = "#151823"; ctx.fillRect(sx, sy, c, c); }
+      else if (ter === 5){                          // D103 void: a hole, not a wall
+        ctx.fillStyle = "#04050a"; ctx.fillRect(sx, sy, c, c);
+        ctx.strokeStyle = "#2b3145"; ctx.beginPath();
+        ctx.moveTo(sx+3, sy+c-9); ctx.lineTo(sx+c-9, sy+3);
+        ctx.stroke(); }
+      else if (ter === 6){                          // D159 air: open volume, no floor
+        ctx.fillStyle = "#12141d"; ctx.fillRect(sx, sy, c, c);
+        ctx.strokeStyle = "rgba(125,209,255,.28)"; ctx.setLineDash([3,3]);
+        ctx.strokeRect(sx+3.5, sy+3.5, c-7, c-7); ctx.setLineDash([]);
+        ctx.fillStyle = "rgba(125,209,255,.5)"; ctx.beginPath();
+        ctx.arc(sx+c/2, sy+c/2, Math.max(1.5, c*0.05), 0, 7); ctx.fill(); }
+      // D103: a plain floor cell must READ as painted floor — the old flat
+      // fill sat within two hex steps of the background, so the ⬜ brush
+      // looked like a no-op. Quiet two-tone tiling, tokens still stand out.
+      else { ctx.fillStyle = ((gx + gy) & 1) ? "#1d2433" : "#191f2c";
+        ctx.fillRect(sx, sy, c, c); }
       const el = gm.elev && gm.elev[i];
       if (el){ ctx.fillStyle = el > 0 ? "#8fb3ff" : "#b0785a";
         ctx.font = `${Math.max(8, c/4)}px sans-serif`;
         ctx.fillText((el > 0 ? "+" : "") + el, sx+3, sy+c-4); }
+      if (gm.openv && gm.openv[i]){
+        ctx.fillStyle = "#7fd1ff"; ctx.font = `${Math.max(9, c/3)}px sans-serif`;
+        ctx.fillText("↕", sx + c - 14, sy + 14);
+      }
       ctx.strokeStyle = "#232735"; ctx.strokeRect(sx+.5, sy+.5, c, c);
     }
     if (state.bg && state.bg.complete && state.bg.naturalWidth){
@@ -315,8 +346,8 @@ function drawTactical(){
     for (const pt of state.aoe.cells){ const rx = pt.x*c + cam.ox, ry = pt.y*c + cam.oy;   // WORLD cells
       ctx.fillRect(rx, ry, c, c); }
   }
-  for (const gh of state.ghosts){
-    if (!onPlane(gh)) continue;                   // D86: fog memories of the wrong plane stay put
+  for (const gh of viewGhosts()){
+    if (!state.preview && !onPlane(gh)) continue;   // D86/D104: preview arrives plane-filtered
     const gx = gh.x + cam.ox, gy = gh.y + cam.oy;
     if (gx < -40 || gy < -40 || gx > w+40 || gy > h+40) continue;
     ctx.save(); ctx.globalAlpha = .32;
@@ -348,8 +379,8 @@ function drawTactical(){
     ctx.strokeStyle = p.color || "#f1c40f"; ctx.lineWidth = 4; ctx.stroke();
     ctx.restore();
   }
-  for (const t of state.tokens){
-    if (!onPlane(t)) continue;                    // D86: other planes are elsewhere
+  for (const t of viewTokens()){
+    if (!state.preview && !onPlane(t)) continue;  // D86/D104: preview arrives plane-filtered
     // tw/th NEVER w/h: this loop's scope owns the viewport dimensions w/h —
     // shadowing them here made the culling check drop every token offscreen (15B).
     const [tw, th] = tokenSpan(t);
@@ -397,7 +428,7 @@ function drawTactical(){
       ctx.strokeStyle = "#c0392b"; ctx.lineWidth = 2; ctx.stroke(); }
     // D82 facing wedge: a rotated circle/square visual would otherwise be
     // indistinguishable — the gold nose shows where the creature faces.
-    if (state.grid && state.grid.dark && (t.light | 0) > 0 && !dth?.dead){
+    if (viewG() && viewG().dark && (t.light | 0) > 0 && !dth?.dead){
       // D87: an operating light is visible even in the dark it fights
       ctx.beginPath(); ctx.arc(0, 0, Math.min(r + 6, r + (t.light | 0) * 3), 0, Math.PI * 2);
       ctx.strokeStyle = "rgba(255,214,102,.5)"; ctx.lineWidth = 2; ctx.stroke();
@@ -417,6 +448,24 @@ function drawTactical(){
     ctx.fillText(dth && dth.dead ? "☠" : (hasArt ? "" : t.label.slice(0, 2).toUpperCase()), tx, ty + 4);
     ctx.font = "11px sans-serif";
     ctx.fillText(t.label, tx, ty + ey + 14);
+    const vertE = tokenElevationFt(t), vertH = t.height_ft != null;
+    if (vertE || vertH){
+      ctx.fillStyle = "#7fd1ff";
+      ctx.fillText(`${vertE ? "↑" + vertE + "ft" : ""}${vertE && vertH ? " " : ""}${vertH ? "↕" + tokenHeightFt(t) + "ft" : ""}`,
+                   tx, ty - ey - 18);
+    }
+    // D159: cross-plane badge — an absolute floor tag (E0/E+2/E−1) with the
+    // delta to the plane in view, drawn only when the token is NOT on it.
+    const xplan = tokenPlaneLabel(t);
+    if (xplan){
+      const by = ty - ey - (vertE || vertH ? 30 : 18);
+      ctx.save(); ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center";
+      const bpw = ctx.measureText(xplan).width + 10;
+      ctx.fillStyle = "rgba(125,209,255,.95)";
+      ctx.fillRect(tx - bpw / 2, by - 10, bpw, 14);
+      ctx.fillStyle = "#0d0f14"; ctx.fillText(xplan, tx, by);
+      ctx.restore();
+    }
     const m = state.room.members.find(x => x.user_id === t.owner_user_id);
     if (m && m.char){
       const ch = m.char, pct = Math.max(0, ch.hp/ch.max_hp);
@@ -454,21 +503,55 @@ function canMove(t){
   return state.room.role === "dm" || t.owner_user_id === state.me.id
       || t.controller_user_id === state.me.id;
 }
-/* D86 floors: the viewer stands on the plane of their own token. Tokens and
-   ghosts on other planes are elsewhere — not rendered, not clickable.
-   (The DM has no token and therefore sees every plane.) */
+/* D86/D114: the plane a viewer is considered to stand on. A DM browses the
+   explicitly viewed plane; a player normally follows their own token's plane.
+   Cross-plane tokens are not filtered locally: the server has already decided
+   which rows are legitimately observable to this viewer. */
 function viewerPlane(){
-  if (state.room && state.room.role === "dm") return null;
-  const mine = (state.tokens || []).find(t => state.me && t.owner_user_id === state.me.id);
-  return (mine && mine.floor) || "";
+  if (!state.room) return null;
+  if (typeof state.viewFloor === "string") return state.viewFloor;
+  if (state.room.role === "dm") return null;
+
+  const me = state.me && state.me.id;
+  const own = (state.tokens || []).find(t =>
+    t.owner_user_id === me || t.controller_user_id === me);
+
+  return own ? (own.floor || "") : null;
 }
+
+/* D86/D114: DM browsing remains plane-local. Players and character previews
+   may render/click exactly the rows delivered by the server — a second,
+   client-side visibility engine must not be introduced. */
 function onPlane(t){
+  if (state.preview || !state.room) return true;   // peek = exactly what was computed
+  // A player/preview renders exactly what the SERVER delivered — the delivery
+  // already applied every visibility/opening rule, so a second client filter
+  // must never hide a legitimate cross-plane observation.
+  if (state.room.role !== "dm") return true;
   const p = viewerPlane();
-  return p === null || (t.floor || "") === p;
+  if (p === null) return true;
+  // A DM browsing is plane-local by default (edit/paint safety: brushes always
+  // target the viewed plane, so hiding the rest is the honest default). "All
+  // visible floors" is an explicit, display-only reveal of other storeys.
+  if (viewFilterMode() === "all") return true;
+  return (t.floor || "") === p;
+}
+/* D159: a token a viewer sees on a plane OTHER than the one they stand on
+   (through an open column, or — for a DM browsing "all floors" — just another
+   storey). Pure presentation: it never gates what the server delivered. */
+function tokenPlaneLabel(t){
+  if (!state.room || state.preview) return null;
+  const vp = viewerPlane();
+  if (vp === null) return null;
+  const tf = t.floor || "";
+  if (tf === vp) return null;
+  const d = floorDelta(tf, vp);
+  return floorBadge(tf) + (d ? " " + d : "");
 }
 function tokenAt(x, y){
   const c = cellSize();
-  return [...state.tokens].reverse().find(t => {
+  // D102: off-plane tokens (invisible to this viewer) are also not clickable.
+  return state.tokens.filter(onPlane).reverse().find(t => {
     const [w, h] = tokenSpan(t), side = Math.max(w, h);
     const ox = t.x + ((w - 1) * c / 2), oy = t.y + ((h - 1) * c / 2);
     // D82/D83: clicking the visible ARTWORK selects the token — the hit area
@@ -490,6 +573,12 @@ function objectAt(x, y){
   if (!state.grid) return null;
   const c = cellSize(), cx = Math.floor(x / c), cy = Math.floor(y / c);
   return (state.grid.objects || []).find(o => o.x === cx && o.y === cy) || null;
+}
+function lootAt(x, y){
+  // D133: WORLD cell lookup for editor loot objects (glyph layer).
+  if (!state.grid) return null;
+  const c = cellSize(), cx = Math.floor(x / c), cy = Math.floor(y / c);
+  return (state.grid.loot || []).find(l => l.x === cx && l.y === cy) || null;
 }
 function ownToken(){
   if (!state.room) return null;
@@ -579,10 +668,16 @@ function paint(cx, cy){
   const b = state.brush;
   if (b === "wall") gm.cells[i] = 1;
   else if (b === "floor") gm.cells[i] = 0;
+  else if (b === "air") gm.cells[i] = 6;          // D159: open volume (no floor)
+  else if (b === "void") gm.cells[i] = 5;          // D103: no floor (impassable)
   else if (b === "rough") gm.cells[i] = 2;
   else if (b === "barrier") gm.cells[i] = 3;
   else if (b === "low") gm.cells[i] = 4;
-  else if (b === "erase"){ gm.cells[i] = 0;
+  else if (b === "erase"){
+    // D159: erasing restores the plane's OWN default surface — floor(0) on the
+    // ground floor, open AIR(6) on a named plane (which is air until floored).
+    gm.cells[i] = ((state.viewFloor || "") === "") ? 0 : 6;
+    if (gm.openv && gm.openv.length === gm.w * gm.h) gm.openv[i] = 0;
     gm.traps = gm.traps.filter(t => !(t.x===cx && t.y===cy));
     gm.loot = gm.loot.filter(l => !(l.x===cx && l.y===cy));
     gm.objects = (gm.objects||[]).filter(o => !(o.x===cx && o.y===cy)); }
@@ -594,17 +689,30 @@ function paint(cx, cy){
     gm.elev = gm.elev && gm.elev.length === gm.w * gm.h ? gm.elev : new Array(gm.w * gm.h).fill(0);
     gm.elev[i] = Math.max(-6, Math.min(6, (gm.elev[i] || 0) + (b === "raise" ? 1 : -1)));
   }
+  else if (b === "openv"){
+    gm.openv = gm.openv && gm.openv.length === gm.w * gm.h ? gm.openv : new Array(gm.w * gm.h).fill(0);
+    gm.openv[i] = gm.openv[i] ? 0 : 1;
+  }
   else if (b === "trap"){
     gm.traps = gm.traps.filter(t => !(t.x===cx && t.y===cy));
     const label = ($("trap-label").value || "").trim().slice(0,80) || "Trap";
     let dc = +$("trap-dc").value; if (!(dc >= 1 && dc <= 30)) dc = 13;
     const dmg = ($("trap-dmg").value || "").trim().slice(0,16) || "1d4";
-    gm.traps.push({ id: eid(), x:cx, y:cy, label, dc, dmg, discovered:false });
+    const t = { id: eid(), x:cx, y:cy, label, dc, dmg, discovered:false };
+    // D113 Phase 5: optional data-driven fields. Only added when set, so a plain
+    // trap stays byte-identical. `effects` (JSON grammar cell) wins at runtime.
+    const eff = ($("trap-effects") ? ($("trap-effects").value||"").trim() : "");
+    if (eff){ try { t.effects = JSON.parse(eff); } catch(e){ toast("Trap effect cell is not valid JSON"); return; } }
+    const sdc = +(($("trap-search")||{}).value||0); if (sdc >= 1 && sdc <= 30) t.search_dc = sdc;
+    const adc = +(($("trap-disarm")||{}).value||0); if (adc >= 1 && adc <= 30) t.disarm_dc = adc;
+    if (($("trap-repeat")||{}).checked) t.repeat = true;
+    gm.traps.push(t);
   }
   else if (b === "loot"){
     gm.loot = gm.loot.filter(l => !(l.x===cx && l.y===cy));
     const label = ($("loot-label").value || "").trim().slice(0,80) || "Loot";
-    gm.loot.push({ id: eid(), x:cx, y:cy, label, taken_by:null });
+    gm.loot.push({ id: eid(), x:cx, y:cy, label, taken_by:null,
+                   container: ($("loot-container") && $("loot-container").checked) ? 1 : 0 });
   }
   else if (b === "obj"){
     // D82: authored as pure DATA; the server only ever runs allowlisted ops.
@@ -619,8 +727,11 @@ function paint(cx, cy){
                      op: { kind:"lamp", bright: Math.max(1, Math.min(30, +$("obj-bright").value || 5)) } };
       o.state = { on: true };
     } else if ($("obj-op").value === "stair"){                  // D88 connector
-      const to = ($("obj-tfl").value || "").trim().slice(0,24);
-      if (!to){ toast("Stairs need a target floor name"); return; }
+      // D162-1: #obj-tfl is a SELECT of the room's real planes; value "" IS the
+      // primary plane — a legal target (server validates stairs at save time).
+      const sel = $("obj-tfl");
+      if (!sel || !sel.options.length){ toast("Floor list not ready — reopen the editor"); return; }
+      const to = String(sel.value).slice(0,24);
       o.interact = { label: act,
                      op: { kind:"stair", floor: to,
                            x: +$("obj-tx").value || 0, y: +$("obj-ty").value || 0 } };
@@ -635,6 +746,13 @@ function paint(cx, cy){
   }
   else if (b === "objrm"){
     gm.objects = (gm.objects||[]).filter(o => !(o.x===cx && o.y===cy));
+  }
+  // D162-6: targeted removal brushes — no re-paint-overwrite, no terrain touched.
+  else if (b === "traprm"){
+    gm.traps = (gm.traps||[]).filter(t => !(t.x===cx && t.y===cy));
+  }
+  else if (b === "lootrm"){
+    gm.loot = (gm.loot||[]).filter(l => !(l.x===cx && l.y===cy));
   }
 }
 function nearestDoor(gm, cx, cy){
@@ -703,8 +821,11 @@ function doorEdit(p){
   const locked = !!($("door-locked") && $("door-locked").checked);
   const dmOnly = !!($("door-dmonly") && $("door-dmonly").checked);
   const secret = !!($("door-secret") && $("door-secret").checked);
-  g.doors.push({ id: eid(), x: e.x, y: e.y, dir: e.dir, closed: true, locked,
-                 dm_only: dmOnly, secret, label: "Door" });
+  const lockdc = Math.max(5, Math.min(25, +(($("door-lockdc") || {}).value || 15) || 15));
+  const door = { id: eid(), x: e.x, y: e.y, dir: e.dir, closed: true, locked,
+                 dm_only: dmOnly, secret, label: "Door" };
+  if (locked) door.lock_dc = lockdc;                    // D162-4
+  g.doors.push(door);
 }
 function pinEdit(p){
   const g = state.editMap; if (!g) return;
@@ -790,6 +911,16 @@ function onDown(e){
   if (!state.room) return;
   const p = evtPos(e);
   if (e.button === 1 || e.button === 2){ state.pan = { x: p.x - state.cam.ox, y: p.y - state.cam.oy }; e.preventDefault(); return; }
+  // D104: the DM preview is INSPECTION ONLY — no selection, no drag, no
+  // roll, no interact, nothing reachable that the previewed player could
+  // not reach. (Camera panning above stays allowed: presentation only.)
+  if (state.preview){ toast("Preview is view-only — exit it to interact"); return; }
+  if (state.lightMoveId && state.room.role === "dm"){      // D104 lamp-move tool
+    const { cx, cy } = clickCell(p);
+    const id = state.lightMoveId; state.lightMoveId = null;
+    wsSend({ type: "lamp", action: "update", floor: state.viewFloor || "", id, x: cx, y: cy });
+    toast("Lamp moved"); return;
+  }
   // Armed DM tools take the click in BOTH views (resolved via the view-aware
   // clickCell); only unarmed diorama clicks are select/move gestures.
   const toolArmed = state.rulerArmed || state.aoeArmed || state.pingArmed ||
@@ -826,11 +957,8 @@ function onDown(e){
   }
   if (state.spawnCreature && state.room.role === "dm" && !state.editing){
     const { cx, cy } = clickCell(p); const c = state.spawnCreature, blk = c.block || {}, cs = cellSize();
-    wsSend({ type:"add_token", label:c.name, x:(cx+.5)*cs, y:(cy+.5)*cs, level:blk.level, stats:blk.stats,
-      hp:blk.hp, max_hp:blk.max_hp, ac:blk.ac, speed:blk.speed, attacks:blk.attacks,
-      spells:blk.spells, spell_slots:blk.spell_slots, saves:blk.saves, defenses:blk.defenses,
-      abilities:blk.abilities, resources:blk.resources, notes:blk.notes,
-      size:blk.size, disposition:blk.disposition });
+    wsSend({ type:"add_token", label:c.name, x:(cx+.5)*cs, y:(cy+.5)*cs, npc:blk,
+       size:blk.size, disposition:blk.disposition });
     state.spawnCreature = null; return;
   }
   const wx = p.x - state.cam.ox, wy = p.y - state.cam.oy;
@@ -842,7 +970,8 @@ function onDown(e){
   if (pin && !state.editing && !t){ showPin(pin); return; }
   if (!t){
     const d = doorHit(wx, wy);
-    if (d){ wsSend({ type:"door", x: d.x, y: d.y, dir: d.dir, action:"toggle" }); return; }
+    if (d){ wsSend({ type:"door", x: d.x, y: d.y, dir: d.dir,
+                     action: (e && e.shiftKey) ? "pick" : "toggle" }); return; }
     // D82: clicking an INTERACTABLE world object sends the intent; the server
     // validates reach/permission and runs the allowlisted operation. Objects
     // without an interact field are decoration — clicks pass through to move.
@@ -854,6 +983,10 @@ function onDown(e){
           return; }
         wsSend({ type:"interact", object_id: ob.id,
                  floor: state.viewFloor || "" }); return; }  // D88
+      const lo = lootAt(wx, wy);                         // D133: container loot
+      if (lo && lo.container){
+        if (typeof openLootObject === "function") openLootObject(lo);
+        return; }
     }
     // Keep the selected movable token while clicking an empty destination.
     // Clearing the sheet here used to clear state.sel before ownToken(), which
@@ -879,7 +1012,7 @@ function onMove(e){
   const d = state.drag; if (!d) return;
   const p = evtPos(e);
   if (d.paint){ const { cx, cy } = toCell(p.x, p.y);
-    if (["wall","floor","rough","erase","reveal","refog"].includes(state.brush)) paint(cx, cy); return; }
+    if (["wall","floor","air","void","rough","erase","reveal","refog"].includes(state.brush)) paint(cx, cy); return; }
   const t = state.tokens.find(t => t.id === d.id);
   if (!t) return;
   const wx = p.x - state.cam.ox, wy = p.y - state.cam.oy;
@@ -920,7 +1053,7 @@ function clickToken(p){
   return tokenAt(p.x - state.cam.ox, p.y - state.cam.oy);
 }
 function onDbl(e){
-  if (state.editing) return;
+  if (state.editing || state.preview) return;               // D104: preview is view-only
   const p = evtPos(e), { cx, cy } = clickCell(p);
   const g = state.grid;
   if (g && !inWorld(g, cx, cy)) return;
@@ -941,11 +1074,10 @@ window.addEventListener("mouseup", onUp); window.addEventListener("touchend", on
 window.addEventListener("resize", resize);
 window.addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
-  if (e.key === "?"){ const h = $("help-overlay");
-    if (h){ h.classList.toggle("hidden"); e.preventDefault(); } return; }
+  if (e.key === "?"){ if (typeof setHelp === "function") setHelp(!helpVisible());
+    e.preventDefault(); return; }   // D149: the overlay lives in 65_help.js
   if (e.key === "Escape"){
-    const h = $("help-overlay");
-    if (h && !h.classList.contains("hidden")){ h.classList.add("hidden"); return; }
+    if (typeof helpVisible === "function" && helpVisible()){ setHelp(false); return; }
     // D84: Escape = explicit deselect (plan, ruler, selection+sheet) — the
     // footprint outline is gone in normal gameplay without hunting a button.
     clearPlan(); state.ruler = null; state.sel = null; renderSheet(null); draw();
@@ -958,6 +1090,7 @@ window.addEventListener("keyup", e => state.keys.delete(e.key));
 function editorOpen(){
   state.editing = true; state.fogTouched = {};
   state.editMap = JSON.parse(JSON.stringify(state.grid));
+  state._editOrig = JSON.stringify(state.editMap);   // D158: unsaved-edits baseline
   document.querySelectorAll(".brush").forEach(b => b.classList.toggle("active", b.dataset.b === "wall"));
   state.brush = "wall";
   $("editor").classList.remove("hidden");
@@ -965,8 +1098,21 @@ function editorOpen(){
   $("door-fields").classList.add("hidden");
   const of = $("obj-fields"); if (of) of.classList.add("hidden");
   $("ed-w").value = state.editMap.w; $("ed-h").value = state.editMap.h;
+  if (typeof renderFloorRail === "function") renderFloorRail();   // D158: elevator on the active floor
+  if (typeof fillStairFloors === "function") fillStairFloors();   // D162-1: stair target list (incl. primary)
 }
-function editorClose(){ flushFogEdit(); state.editing = false; state.editMap = null; $("editor").classList.add("hidden"); }
+function editorClose(){ flushFogEdit(); state.editing = false; state.editMap = null; state._editOrig = null; $("editor").classList.add("hidden"); }
+// D158: after a floor-rail switch re-fetched the grid, point the edit buffer at
+// the newly viewed plane. Every brush then edits — and saves — exactly one floor.
+function rearmEditBuffer(){
+  if (!state.editing) return;
+  state.editMap = JSON.parse(JSON.stringify(state.grid));
+  state._editOrig = JSON.stringify(state.editMap);
+  state.fogTouched = {};
+  const w = $("ed-w"), h = $("ed-h");
+  if (w) w.value = state.editMap.w;
+  if (h) h.value = state.editMap.h;
+}
 function edResize(){
   const w = Math.max(8, Math.min(80, +$("ed-w").value || 40));
   const h = Math.max(6, Math.min(60, +$("ed-h").value || 26));
@@ -982,9 +1128,11 @@ function edResize(){
                objects: (old.objects||[]).filter(o => inW(o.x, o.y)),
                doors: (old.doors||[]).filter(d => inW(d.x, d.y) && (d.dir === "v" ? inW(d.x+1, d.y) : inW(d.x, d.y+1))) };
   gm.elev = new Array(w*h).fill(0);
+  gm.openv = new Array(w*h).fill(0);
   for (let y = 0; y < Math.min(h, old.h); y++) for (let x = 0; x < Math.min(w, old.w); x++){
     gm.cells[y*w+x] = old.cells[y*old.w+x];
     if (old.elev) gm.elev[y*w+x] = old.elev[y*old.w+x];   // row-wise carry (D70)
+    if (old.openv) gm.openv[y*w+x] = old.openv[y*old.w+x]; // D114 vertical openings
   }
   state.editMap = gm;
 }

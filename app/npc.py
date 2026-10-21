@@ -6,12 +6,124 @@ spell list and DM-tracked spell slots. The math reuses the same ``gear`` primiti
 that player sheets use, by handing them a lightweight "pseudo-character" via
 :func:`to_char` (``{"name", "stats", "level"}``) so spell attack / save DC / damage
 stay a single source of truth.
+
+``project_creature`` is the one-way CSV-content projection. It produces the same
+NPC block shape accepted by the existing DM editor and token path — no second
+monster engine.
 """
+import re
+
 from . import db, gear
 
 ABILITIES = gear.ABILITIES
 SIZES = ("Tiny", "Small", "Medium", "Large", "Huge", "Gargantuan")
 DISPOSITIONS = ("", "friend", "neutral", "hostile")
+_ATTACK_RE = re.compile(
+    r"(?P<name>[^;\n]+?)\s+(?P<hit>[+-]\d+)\s+to hit\b",
+    re.I)
+_DMG_RE = re.compile(r"\d{0,3}d\d+(?:[+-]\d+)?", re.I)   # first dice AFTER "to hit"
+
+
+def _content_list(value):
+    if isinstance(value, (list, tuple)):
+        return [str(x).strip().lower() for x in value if str(x).strip()]
+    return [x.strip().lower() for x in re.split(r"[,;]+", str(value or "")) if x.strip()]
+
+
+def _project_attack(text):
+    text = str(text or "").strip()
+    match = _ATTACK_RE.search(text)
+    if not match:
+        return None
+    try:
+        hit = int(match.group("hit"))
+    except (TypeError, ValueError):
+        return None
+    # D163-2: SRD attack lines put plain numbers between "to hit" and the dice
+    # ("+4 to hit, reach 5 ft: 1d4+6") — the old single regex anchored the dice
+    # directly after "to hit" and silently dropped exactly those lines.
+    dice = _DMG_RE.search(text, match.end())
+    reach = re.search(r"reach\s+(\d+)\s*ft", text, re.I)
+    return {"id": re.sub(r"[^a-z0-9]+", "_", match.group("name").lower()).strip("_")[:24] or "attack",
+            "name": match.group("name").strip()[:32] or "Attack",
+            "to_hit": hit, "dmg": (dice.group(0) if dice else "")[:16],
+            "reach": int(reach.group(1)) if reach else 5}
+
+
+def project_creature(row, spell_rows=()):
+    """Project one validated ``creatures.csv`` row into the existing NPC block.
+
+    Unsupported free-form text is preserved in notes. The projection never
+    invents mechanics that the existing NPC path cannot execute.
+    """
+    if not isinstance(row, dict):
+        raise ValueError("creature content row required")
+    raw_name = str(row.get("name") or "").strip()
+    if not raw_name:
+        raise ValueError("creature content row has no name")
+    by_spells = {str(r.get("id") or "").lower(): r for r in spell_rows if isinstance(r, dict)}
+    spells = []
+    for spell_id in _content_list(row.get("spells")):
+        spell = by_spells.get(spell_id)
+        if not spell:
+            continue
+        resolution = str(spell.get("resolution") or "").lower()
+        damage = spell.get("damage_dice") or spell.get("heal_dice") or ""
+        spells.append({
+            "id": str(spell.get("id"))[:16], "name": str(spell.get("name") or spell_id)[:48],
+            "level": int(spell.get("level") or 0), "school": str(spell.get("school") or "")[:24],
+            "cast": "attack" if resolution == "attack" else ("save" if resolution == "save" else "none"),
+            "ability": str(spell.get("casting_ability") or "int").lower(),
+            "dmg": str(damage)[:16], "save": str(spell.get("save") or "").lower(),
+            "range": str(spell.get("range_ft") or "")[:24],
+            "duration": str(spell.get("duration") or "")[:24],
+            "targeting": str(spell.get("targeting") or "single")[:12],
+        })
+    attacks = []
+    for part in str(row.get("attacks") or "").splitlines():
+        attack = _project_attack(part)
+        if attack:
+            attacks.append(attack)
+    skills = {s: 1 for s in _content_list(row.get("skills")) if s in gear.SKILLS}
+    saves = {s: True for s in _content_list(row.get("saves")) if s in ABILITIES}
+    manual = str(row.get("manual") or "").strip()
+    unsupported = []
+    if row.get("attacks") and not attacks:
+        unsupported.append(f"attacks: {row['attacks']}")
+    if row.get("abilities"):
+        unsupported.append(f"abilities: {row['abilities']}")
+    notes = " | ".join(unsupported + ([manual] if manual else []))[:1000]
+    defenses = {"resist": _content_list(row.get("resistances")),
+                "immune": _content_list(row.get("immunities")),
+                "vulnerable": _content_list(row.get("vulnerabilities"))}
+    cond_immune = _content_list(row.get("condition_immunities"))
+    resources = []
+    for part in re.split(r"[,;]+", str(row.get("recharge") or "")):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r"^(.*\S)\s+(\d{1,2})$", part)
+        if m:
+            resources.append({"name": m.group(1).strip()[:32], "max": int(m.group(2))})
+        else:
+            resources.append({"name": part[:32], "max": 1})
+    block = clean_npc({
+        "name": raw_name[:32], "level": 1, "stats": {a: row.get(a) for a in ABILITIES},
+        "hp": row.get("hp"), "max_hp": row.get("hp"), "ac": row.get("ac"),
+        "speed": row.get("speed_ft"), "fly": row.get("fly_ft"),
+        "swim": row.get("swim_ft"), "climb": row.get("climb_ft"),
+        "defenses": defenses, "cond_immune": cond_immune, "resources": resources,
+        "darkvision_ft": row.get("darkvision_ft"),
+        "attacks": attacks, "spells": spells, "saves": saves,
+        "skills": skills, "notes": notes, "size": row.get("size"),
+        "cr": row.get("cr"),
+        "disposition": "hostile" if str(row.get("type") or "").lower() != "beast" else "",
+        "companion": str(row.get("companion") or "").lower() in ("1", "true", "yes")
+    })
+    block["unsupported"] = unsupported
+    block["tags"] = str(row.get("tags") or "")[:120]
+    block["content_id"] = str(row.get("id") or "")[:32]
+    return block
 
 
 def _clamp(v, lo, hi, dflt):
@@ -31,7 +143,9 @@ def clean_attacks(raw):
 
     ``dmg`` is a free-form dice expression (rolled via the shared dice parser);
     ``to_hit`` is the flat attack bonus, ``dc`` an optional save DC, ``save`` the
-    ability a target rolls against. ``reach`` is advisory (measured in cells).
+    ability a target rolls against. ``reach`` is a measured distance in feet and
+    is enforced by ``room.dice.handle_npc_attack`` through the one vertical/footprint
+    range helper used by player attacks.
     """
     out = []
     for i, a in enumerate(raw if isinstance(raw, list) else []):
@@ -60,6 +174,20 @@ def clean_disposition(disposition):
     return disposition if disposition in DISPOSITIONS else ""
 
 
+def _clean_cr(v):
+    """D132: challenge rating as the SRD fraction/int string ('0', '1/8'..'30',
+    '' = unknown). Monster-sheet data for the DM's eye — the engine derives no
+    XP from it (2024 milestones), which is exactly why it must survive intact."""
+    s = str(v or "").strip()
+    if s in ("0", "1/8", "1/4", "1/2", "3/4"):
+        return s
+    try:
+        n = int(float(s))
+    except ValueError:
+        return ""
+    return str(n) if 0 <= n <= 30 else ""
+
+
 def clean_npc(d):
     """Normalise an arbitrary DM-supplied blob into a full, bounded NPC block."""
     d = d if isinstance(d, dict) else {}
@@ -79,23 +207,49 @@ def clean_npc(d):
         "swim": speeds["swim"],
         "climb": speeds["climb"],
         "speeds": speeds,
+        "darkvision_ft": _clamp(d.get("darkvision_ft", 0), 0, 999, 0),
+        "cr": _clean_cr(d.get("cr")),
         "attacks": clean_attacks(d.get("attacks", [])),
         "spells": gear.clean_spells(d.get("spells", [])),
         "spell_slots": gear.clean_slots(d.get("spell_slots", {})),
+        "skills": gear.clean_skills(d.get("skills", {})),
         "saves": gear.clean_saves(d.get("saves", {})),
         "defenses": gear.clean_defenses(d.get("defenses", {})),
+        "cond_immune": _clean_cond_immune(d.get("cond_immune")),
         "size": clean_size(d.get("size")),
         "disposition": clean_disposition(d.get("disposition")),
+        "companion": bool(d.get("companion", False)),
         "abilities": _clean_abilities(d.get("abilities")),
         "resources": _clean_resources(d.get("resources")),
         "notes": str(d.get("notes", ""))[:1000],
     }
 
 
+def _clean_cond_immune(v):
+    """D163-2: normalized condition-immunity keys (data from creatures.csv,
+    read by conditions.immune at every effect application)."""
+    out = []
+    for k in (v if isinstance(v, (list, tuple)) else []):
+        k = re.sub(r"[\x00-\x20]+", " ", str(k)).strip().lower()[:24]
+        if k and k not in out:
+            out.append(k)
+    return out[:12]
+
+
 def _clean_abilities(v):
-    """Prose action entries ({name, desc}) — the 'Multiattack/Breath' block."""
+    """A mixed action list: prose entries ({name, desc} — the DM editor writes
+    those) OR a bare registered-ability id string. Prose keeps the {name, desc}
+    shape; a bare string is normalised to a canonical ability id so an NPC granted
+    ids through the REAL add_token/update_npc path stays castable — _rollable_by
+    reads exactly this list (D100/G8b: previously string ids were dropped here,
+    so only DM-controlled casts worked). Anything else is dropped."""
     out = []
     for a in (v or [])[:12]:
+        if isinstance(a, str):
+            s = a.strip().lower()[:32]
+            if s:
+                out.append(s)
+            continue
         if not isinstance(a, dict):
             continue
         name = str(a.get("name", ""))[:32].strip()

@@ -1,7 +1,7 @@
 """DM token management (add / remove NPC tokens + edit NPC stat blocks)."""
 import re
 
-from .. import assets, db, footprint, floors, mapmodel, npc
+from .. import assets, db, footprint, floors, mapmodel, npc, vertical
 from . import movement
 from .net import broadcast, get_map, map_lock, send_to, sys_msg
 from .visibility import (broadcast_token_add, broadcast_token_step,
@@ -129,6 +129,37 @@ async def handle_token_visual(ws, room_id, user, is_dm, msg):
                                       {"token_id": tok["id"], "vw": vw, "vh": vh})
 
 
+async def handle_token_height(ws, room_id, user, is_dm, msg):
+    """D114: owner (or DM) sets the token's VERTICAL body — `height_ft` (physical
+    vertical extent; blank/unset = the size-category default, NOT a ceiling: a
+    Gargantuan dragon may be authored 30 ft+) and `elevation_ft` (its under-edge
+    above the standing surface, 0 = grounded). Both server-validated to a
+    technical band; a height change alone never moves, refits or re-planes the
+    token. Whether that body actually reaches another plane is gated by vertical
+    openings in the map (Phase 4/5) — this only records/validates the volume."""
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    if not (is_dm or tok["owner_user_id"] == user["id"]):
+        await send_to(ws, "error", {"msg": "Not your token"})
+        return
+    new_h = (vertical.clean_height_ft(msg.get("height_ft")) if "height_ft" in msg
+             else tok.get("height_ft"))
+    new_e = (vertical.clean_elevation_ft(msg.get("elevation_ft")) if "elevation_ft" in msg
+             else (tok.get("elevation_ft") or 0))
+    if (tok.get("height_ft"), (tok.get("elevation_ft") or 0)) == (new_h, new_e):
+        return                                   # idempotent, no broadcast storm
+    db.x("UPDATE tokens SET height_ft=?, elevation_ft=? WHERE id=?",
+         (new_h, new_e, tok["id"]))
+    tok["height_ft"], tok["elevation_ft"] = new_h, new_e
+    await send_property_to_interested(room_id, tok, "token_height",
+                                      {"token_id": tok["id"], "height_ft": new_h,
+                                       "elevation_ft": new_e})
+    from .visibility import reevaluate_visibility   # the body's plane join changed
+    await reevaluate_visibility(room_id)
+
+
 async def handle_token_image(ws, room_id, user, is_dm, msg):
     """D85 — server-side artwork assignment. The ONLY trusted input is an
     opaque asset id; the token field stores nothing but the canonical
@@ -163,18 +194,21 @@ async def handle_token_image(ws, room_id, user, is_dm, msg):
 
 
 async def handle_token_floor(ws, room_id, user, is_dm, msg):
-    """D86 — change a token's floor plane (stairs, ladders, teleporters).
-    Explicit vertical move: no pathfinding, no cost — the positioning games
-    happen WITHIN a floor. A mount's riders ride along. The visibility plane
-    recomputes itself: viewers on the old plane receive token_leave, viewers
-    on the new plane receive token_add (the re-broadcast step does that)."""
+    """D86 — change a token's floor plane. D102 tightened the channel to the
+    DM: a plane change is a WORLD decision, and the free self-service hop let
+    a player bypass every destination check that the validated stair object
+    (interact "stair") performs. Players change planes by WALKING TO THE STAIR
+    — that route stays open to them and lands them on a checked destination.
+    Explicit vertical move: no pathfinding, no cost. A mount's riders ride
+    along. The visibility plane recomputes itself: viewers on the old plane
+    receive token_leave, viewers on the new plane receive token_add."""
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
                 (msg.get("token_id", -1), room_id))
     if tok is None:
         return
-    if not (is_dm or tok["owner_user_id"] == user["id"]
-            or tok.get("controller_user_id") == user["id"]):
-        await send_to(ws, "error", {"msg": "Not your token"})
+    if not is_dm:
+        # D102: refuse before revealing anything about floors or tokens.
+        await send_to(ws, "error", {"msg": "Only the DM moves tokens between floors"})
         return
     name = str(msg.get("floor") or "")
     if not floors.exists(room_id, name):
@@ -440,7 +474,8 @@ async def handle_token_mount(ws, room_id, user, is_dm, msg):
 
 
 async def handle_add_token(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     label = str(msg.get("label", "NPC"))[:32]
     color = _clean_color(msg.get("color"))
@@ -450,16 +485,21 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
         "name": label,
         "level": base.get("level"), "stats": base.get("stats"),
         "hp": base.get("hp"), "max_hp": base.get("max_hp"), "ac": base.get("ac"),
-        "speed": base.get("speed"), "spells": base.get("spells"),
-        "attacks": base.get("attacks"), "spell_slots": base.get("spell_slots"),
-        "saves": base.get("saves"), "defenses": base.get("defenses"),
-        "abilities": base.get("abilities"), "resources": base.get("resources"),
-        "notes": base.get("notes"),
+        "speed": base.get("speed"), "fly": base.get("fly"), "swim": base.get("swim"),
+        "climb": base.get("climb"), "darkvision_ft": base.get("darkvision_ft"),
+        "attacks": base.get("attacks") or [],
+        "spells": base.get("spells") or [], "spell_slots": base.get("spell_slots") or {},
+        "skills": base.get("skills") or {},
+        "saves": base.get("saves") or {}, "defenses": base.get("defenses") or {},
+        "abilities": base.get("abilities") or [], "resources": base.get("resources") or [],
+        "companion": base.get("companion"), "notes": base.get("notes") or "",
+        "cr": base.get("cr"),
     })
     size = _clean_size(msg.get("size") or base.get("size"))
     fw, fh = _clean_span(msg, size)
     disposition = _clean_disposition(msg.get("disposition") or base.get("disposition"))
     fl = str(msg.get("floor") or "")        # D86/D88: plane for new tokens
+    darkvision = min(999, max(0, int(block.get("darkvision_ft") or 0) // 5))
     if fl and not floors.exists(room_id, fl):
         return await send_to(ws, "error", {"msg": "No such floor"})
     mp = get_map(room_id, fl)               # terrain of THAT plane decides placement
@@ -469,9 +509,35 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
         await send_to(ws, "error", {"msg": "No valid placement for that footprint"})
         return
     x, y = placed
-    tid = db.x("INSERT INTO tokens (room_id,label,color,x,y,npc,size,disposition,fw,fh,floor) "
-               "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-               (room_id, label, color, x, y, db.json_dumps(block), size, disposition, fw, fh, fl))
+    # D99: a COMPANION is just a token bound to a character and/or an owner —
+    # the SAME tokens table columns a player token uses, set here by the DM only.
+    # No new entity, no new engine: owner_user_id grants control like any owned
+    # token, character_id links a sheet, and token_controller (D82) hands out
+    # operational control independently. A plain monster/NPC leaves both NULL.
+    owner_uid = None
+    if msg.get("owner_user_id") not in (None, "", 0):
+        try:
+            owner_uid = int(msg["owner_user_id"])
+        except (TypeError, ValueError):
+            owner_uid = None
+        if owner_uid is None or db.q1("SELECT 1 AS hit FROM room_members "
+                                      "WHERE room_id=? AND user_id=?",
+                                      (room_id, owner_uid)) is None:
+            return await send_to(ws, "error", {"msg": "Owner is not a member of this room"})
+    char_id = None
+    if msg.get("character_id") not in (None, "", 0):
+        try:
+            char_id = int(msg["character_id"])
+        except (TypeError, ValueError):
+            char_id = None
+        if char_id is None or db.q1("SELECT 1 AS hit FROM room_members "
+                                    "WHERE room_id=? AND character_id=?",
+                                    (room_id, char_id)) is None:
+            return await send_to(ws, "error", {"msg": "No such character in this room"})
+    tid = db.x("INSERT INTO tokens (room_id,label,color,x,y,npc,size,disposition,fw,fh,floor,"
+               "owner_user_id,character_id,darkvision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (room_id, label, color, x, y, db.json_dumps(block), size, disposition, fw, fh, fl,
+                owner_uid, char_id, darkvision))
     tok = db.q1("SELECT * FROM tokens WHERE id=?", (tid,))
     sys_msg(room_id, f"DM added token '{label}'.")
     await broadcast_token_add(room_id, tok)
@@ -479,7 +545,8 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
 
 async def handle_update_npc(ws, room_id, user, is_dm, msg):
     """DM edits an NPC token's stat block (abilities, HP/AC, spells, slots)."""
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None or tok["owner_user_id"] is not None or tok["character_id"] is not None:
@@ -488,12 +555,15 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
     base = msg.get("npc") if isinstance(msg.get("npc"), dict) else msg
     merged.update({k: base[k] for k in
                    ("level", "stats", "hp", "max_hp", "ac", "speed", "fly", "swim", "climb",
-                    "attacks", "spells",
-                    "spell_slots", "saves", "defenses",
-                    "abilities", "resources", "notes") if k in base})
+                    "darkvision_ft", "attacks", "spells",
+                     "spell_slots", "saves", "defenses", "size", "companion",
+                     "abilities", "resources", "notes") if k in base})
     label = str(msg.get("label", tok["label"]))[:32]
     merged["name"] = label
+    if "darkvision_ft" not in merged:
+        merged["darkvision_ft"] = int(tok.get("darkvision") or 0) * 5
     block = npc.clean_npc(merged)
+    darkvision = min(999, max(0, int(block.get("darkvision_ft") or 0) // 5))
     color = _clean_color(msg.get("color", tok["color"]))
     size = _clean_size(base.get("size", tok.get("size", "Medium")))
     fw, fh = _clean_span(base, size, tok)
@@ -518,22 +588,61 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
             return
         x, y = footprint.origin_pixels(origin, footprint.token_span(candidate), mp["cell"])
     db.x("UPDATE tokens SET npc=?, label=?, color=?, size=?, disposition=?, x=?, y=?, "
-         "fw=?, fh=? WHERE id=?",
-         (db.json_dumps(block), label, color, size, disposition, x, y, fw, fh, tok["id"]))
+         "fw=?, fh=?, darkvision=? WHERE id=?",
+         (db.json_dumps(block), label, color, size, disposition, x, y, fw, fh,
+          darkvision, tok["id"]))
     await broadcast(room_id, "snapshot", None)
 
 
-async def handle_del_token(ws, room_id, user, is_dm, msg):
+async def handle_token_drop(ws, room_id, user, is_dm, msg):
+    """D162-3: the DM lets go — a held flyer or a carried body falls from here.
+    Loud refusal for players (D162-11 posture); the physics decision lives
+    ENTIRELY in room/fall.py, this is only the trigger."""
     if not is_dm:
+        await send_to(ws, "error", {"msg": "DM only"})
+        return
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    from .fall import resolve_fall
+    if not await resolve_fall(room_id, tok["id"], forced=True, tag="drop"):
+        await send_to(ws, "whisper", {"text":
+            "Nothing to drop — the token stands on solid ground or holds the "
+            "air, and the column below is not a fall."})
+
+
+async def handle_del_token(ws, room_id, user, is_dm, msg):
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:
         return                      # already deleted — idempotent, no error, no ghost
-    if tok["owner_user_id"] is not None:
-        db.x("UPDATE room_members SET character_id=NULL WHERE user_id=? AND room_id=?",
-             (tok["owner_user_id"], room_id))
-    db.x("DELETE FROM tokens WHERE id=?", (tok["id"],))
-    sys_msg(room_id, f"DM removed token '{tok['label']}'.")
+    # D106: the D105 container cleanup ("tok:<id>" dies with the carcass, see
+    # room/inv.py) and the token row itself now share ONE transaction — the
+    # seat un-assign, the container DELETE, the token DELETE and the chronicle
+    # line commit together or not at all. Before this, a failing token DELETE
+    # (e.g. FOREIGN KEY: a rider still mounts it) could leave the loot gone
+    # while the corpse stayed on the map. Still exactly that one container row
+    # — world chests sharing the table are never touched, and the delete
+    # permission (DM only, room-scoped) is unchanged.
+    label = tok["label"]
+    try:
+        with db.tx() as c:
+            if tok["owner_user_id"] is not None:
+                c.execute("UPDATE room_members SET character_id=NULL WHERE user_id=? AND room_id=?",
+                          (tok["owner_user_id"], room_id))
+            c.execute("DELETE FROM containers WHERE room_id=? AND object_id=?",
+                      (room_id, f"tok:{tok['id']}"))
+            c.execute("DELETE FROM tokens WHERE id=?", (tok["id"],))
+            c.execute("INSERT INTO messages (room_id,type,body) VALUES (?,'system',?)",
+                      (room_id, f"DM removed token '{label}'."))
+    except Exception:
+        # ROLLBACK done by db.tx — nothing was removed; answer like the classic
+        # handler failure path (generic, reveals no schema details).
+        await send_to(ws, "error", {"msg": "Could not remove that token."})
+        return
     await movement._cancel_walk(tok["id"])
     # Gone is a TRANSIENT sync event, not a stored state: forget_token clears the
     # server-side last-seen memory and broadcasts token_gone; the row itself is

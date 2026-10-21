@@ -637,7 +637,8 @@ def test_use_item_atomic(client):
     after = state_of(client, player, code)
     me_char = next(m["char"] for m in after["members"] if m["user_id"] == after["me"] and m["char"])
     assert me_char["hp"] > 10
-    assert me_char["items"][0]["charges"] == 0
+    # D146: a potion's LAST dose is consumed — the entry is gone, no shell.
+    assert me_char["items"] == []
 
 
 def test_attunement_cap(client):
@@ -974,8 +975,15 @@ def test_massive_damage_on_drop_blow_kills(client):
     client.post(f"/api/rooms/{code}/assign", json={"character_id": ch["id"]}, headers=H(dm))
     tok_id = next(t for t in state_of(client, dm, code)["tokens"]
                   if t.get("character_id") == ch["id"])["id"]
+    # D154: massive means the REMAINDER at 0 HP meets max_hp. −20 on 20/20
+    # leaves 0 remainder: dying, not dead. −40 leaves exactly 20: dead.
     with ws_connect(client, dm, code) as ws:
         ws.send_json({"type": "hp", "token_id": tok_id, "delta": -20})
+        recv_until(ws, "snapshot")
+    d = _death_state(client, dm, code, ch["id"])
+    assert d and d["dead"] is False
+    with ws_connect(client, dm, code) as ws:
+        ws.send_json({"type": "hp", "token_id": tok_id, "delta": -40})
         recv_until(ws, "snapshot")
     d = _death_state(client, dm, code, ch["id"])
     assert d and d["dead"] is True
@@ -1000,7 +1008,7 @@ def test_npc_attack_resolves_vs_target_ac(client):
     dm = reg(client, "dm")
     code = client.post("/api/rooms", json={"name": "Smash"}, headers=H(dm)).json()["code"]
     with ws_connect(client, dm, code) as ws:
-        ws.send_json({"type": "add_token", "label": "Squire", "x": 300, "y": 300, "ac": 10})
+        ws.send_json({"type": "add_token", "label": "Squire", "x": 450, "y": 300, "ac": 10})
         def_id = recv_until(ws, "token_add")["payload"]["id"]
         ws.send_json({"type": "add_token", "label": "Brute", "x": 400, "y": 300, "max_hp": 20, "hp": 20,
                       "attacks": [{"id": "bite", "name": "Bite", "to_hit": 30, "dmg": "1d6"},

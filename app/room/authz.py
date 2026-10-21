@@ -18,7 +18,8 @@ re-implemented per-module, so the rule can never drift twice.
 """
 from .. import db
 
-TOKEN_COLS = "id, x, y, owner_user_id, controller_user_id, size, fw, fh, floor"
+TOKEN_COLS = ("id, x, y, owner_user_id, controller_user_id, size, fw, fh, floor, "
+              "height_ft, elevation_ft")
 
 
 def controls(tok, user_id, is_dm):

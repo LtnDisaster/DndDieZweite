@@ -209,6 +209,21 @@ def get_asset(aid: str, request: Request, user=Depends(require_user)):
                              "Cache-Control": "private, max-age=86400"})
 
 
+# D103 — the canonical BROWSER url. tokens.image stores the "/assets/<id>"
+# form and clients load it verbatim (<img src="/assets/<id>">); that form is
+# the DB canon since D85 and cannot change without breaking stored rows.
+# Before D103 this exact path was never routed — artwork read fine over the
+# /api prefix and 404'd in every real browser, where the cache then blacklisted
+# the url for the session. Same handler, same auth, same no-oracle 404, same
+# PNG headers; the /api form stays the documented REST surface.
+media_router = APIRouter()
+
+
+@media_router.get("/assets/{aid}")
+def get_asset_media(aid: str, request: Request, user=Depends(require_user)):
+    return get_asset(aid, request, user)
+
+
 @router.delete("/assets/{aid}")
 def delete_asset(aid: str, request: Request, user=Depends(require_user)):
     if not ID_RE.fullmatch(aid or ""):

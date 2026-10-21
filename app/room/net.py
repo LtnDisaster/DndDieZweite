@@ -27,12 +27,17 @@ def clients(room_id):
 
 
 def attach_ws(ws):
+    # D111: the owning loop lives ON the socket — id(ws) can be REUSED by CPython
+    # after a TestClient websocket session ends; a stale dict entry then either
+    # routes a send to a dead loop (hang) or detach_ws(old) pops the NEW entry.
     """Call from the socket's own pump task right after accept()."""
-    _ws_loops[id(ws)] = asyncio.get_running_loop()
+    ws._iio_loop = asyncio.get_running_loop()
+    _ws_loops[id(ws)] = ws._iio_loop
 
 
 def detach_ws(ws):
-    _ws_loops.pop(id(ws), None)
+    if _ws_loops.get(id(ws)) is getattr(ws, "_iio_loop", None):
+        _ws_loops.pop(id(ws), None)
 
 
 async def _deliver(ws, msg):
@@ -41,12 +46,15 @@ async def _deliver(ws, msg):
 
 async def _send(ws, msg):
     cur = asyncio.get_running_loop()
-    tgt = _ws_loops.get(id(ws))
+    tgt = getattr(ws, "_iio_loop", None)
     if tgt is None or tgt is cur:
         await _deliver(ws, msg)
         return
-    await asyncio.wrap_future(
-        asyncio.run_coroutine_threadsafe(_deliver(ws, msg), tgt))
+    if not tgt.is_running():
+        raise RuntimeError("socket owner loop stopped")
+    await asyncio.wait_for(
+        asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(_deliver(ws, msg), tgt)), 10)
 
 
 def notify(room_id, kind, payload):
@@ -63,12 +71,15 @@ async def close_to(ws, code=1000):
     """Close a socket on the event loop that OWNS it (same cross-loop rules
     as _send)."""
     cur = asyncio.get_running_loop()
-    tgt = _ws_loops.get(id(ws))
+    tgt = getattr(ws, "_iio_loop", None)
     if tgt is None or tgt is cur:
         await _deliver_close(ws, code)
         return
-    await asyncio.wrap_future(
-        asyncio.run_coroutine_threadsafe(_deliver_close(ws, code), tgt))
+    if not tgt.is_running():
+        return                                   # owner loop gone — unreachable
+    await asyncio.wait_for(
+        asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(_deliver_close(ws, code), tgt)), 10)
 
 
 async def _room_deleted_and_close(ws, code):
@@ -92,7 +103,7 @@ def purge_room_nowait(room_id, code, token_ids=()):
     socks = [ws for users in list(_clients.get(room_id, {}).values())
              for ws in list(users)]
     for ws in socks:
-        tgt = _ws_loops.get(id(ws))
+        tgt = getattr(ws, "_iio_loop", None)
         if tgt is not None and tgt.is_running():
             asyncio.run_coroutine_threadsafe(_room_deleted_and_close(ws, code), tgt)
     for tid in token_ids:
@@ -134,6 +145,16 @@ def sys_msg(room_id, body):
     db.x("INSERT INTO messages (room_id,type,body) VALUES (?,'system',?)", (room_id, body))
 
 
+async def dm_whisper(room_id, text):
+    """Send a whisper to the room's DM only. D113: a HIDDEN curse's effect may
+    fire a fragment the players must not see (it would betray a curse the owner
+    has not been told about) — every curse-origin announcement uses this, so a
+    secret never leaks through a chat line, a UI field or a broadcast payload."""
+    dm = db.q1("SELECT dm_id FROM rooms WHERE id=?", (room_id,))
+    if dm is not None and dm.get("dm_id"):
+        await send_user(room_id, dm["dm_id"], "whisper", {"text": text})
+
+
 def get_map(room_id, floor="") -> dict:
     """D88 — the PRIMARY floor ("") keeps reading room_state.map_json exactly
     as before (zero migration, byte-identical behaviour for every old room).
@@ -146,9 +167,9 @@ def get_map(room_id, floor="") -> dict:
     row = db.q1("SELECT map_json FROM floor_maps WHERE room_id=? AND floor=?",
                 (room_id, str(floor)))
     if row is None:
-        blank = mapmodel.load(None)
-        blank["fog_off"] = False                    # room-wide flag lives on primary
-        return mapmodel.fit(blank, base)
+        # D159: a never-edited non-primary plane is open VOLUME (air), not a
+        # fresh floor slab. The primary still returns the floor-filled base.
+        return mapmodel.blank_map(base, mapmodel.AIR)
     mp = mapmodel.fit(mapmodel.load(row["map_json"]), base)
     mp["fog_off"] = bool(base.get("fog_off"))     # room-wide flag lives on primary
     return mp
@@ -164,20 +185,28 @@ def set_map(room_id, mp, floor=""):
 
 
 def plane_viewers(room_id, floor):
-    """user_ids who legitimately STAND on a plane: every DM, and everyone with
-    a token (owned or operated) there (D88). Plane-scoped broadcasts (fog,
-    object state, door reveals) must never wake sockets that are elsewhere —
-    a client would happily paint another plane's cells into its own grid."""
+    """user_ids who legitimately STAND on a plane: every DM, everyone whose
+    token home is there, and every token whose BODY protrudes there through a
+    fully open column (D114). Plane-scoped broadcasts (fog, object state, door
+    reveals) must never wake sockets that are elsewhere — a client would happily
+    paint another plane's cells into its own grid."""
+    from . import vertical3d
+    fl = str(floor)
     uids = set()
     for m in db.q("SELECT user_id, role FROM room_members WHERE room_id=?", (room_id,)):
         if m["role"] == "dm":
             uids.add(m["user_id"])
-    for t in db.q("SELECT owner_user_id, controller_user_id FROM tokens "
-                  "WHERE room_id=? AND floor=?", (room_id, str(floor))):
-        if t["owner_user_id"]:
-            uids.add(t["owner_user_id"])
-        if t["controller_user_id"]:
-            uids.add(t["controller_user_id"])
+    rows = db.q("SELECT * FROM tokens WHERE room_id=? AND "
+                "(owner_user_id IS NOT NULL OR controller_user_id IS NOT NULL)",
+                (room_id,))
+    maps = vertical3d.maps_for(room_id)
+    lm = vertical3d.level_map(room_id)
+    for t in rows:
+        if fl in vertical3d.body_planes(room_id, t, maps, lm):
+            if t.get("owner_user_id"):
+                uids.add(t["owner_user_id"])
+            if t.get("controller_user_id"):
+                uids.add(t["controller_user_id"])
     return uids
 
 
@@ -209,8 +238,11 @@ async def send_to_plane_viewed(room_id, floor, kind, payload):
             await send_to(sock, kind, payload)
 
 
-def fog_patch(mp, newly):
-    return {"cells": newly, "terrain": {str(i): mp["cells"][i] for i in newly}}
+def fog_patch(mp, newly, floor=""):
+    # D102: the patch carries its plane — a client guards on it so a wrong-plane
+    # patch can never paint cells/explored into the grid the viewer is looking at.
+    return {"cells": newly, "terrain": {str(i): mp["cells"][i] for i in newly},
+            "floor": str(floor or "")}
 
 
 def save_map_and_notify(room_id, mp, floor=""):

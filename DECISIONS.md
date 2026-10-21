@@ -1630,3 +1630,2346 @@ lines name conditions by design (public table record, D90).
   guard, documented in `test_duplicate_op_id_changed_payload_is_silent`).
   DM-side damage dice caps remain DM-trust territory (a DM can author any
   NPC bonus anyway — D92 doctrine).
+
+## D95 — CSV content packages are DATA read by the existing engines, never code; a generic room-scoped `content` table is the round-trip source of truth
+
+- **Context:** Sprint 25 asks for hand-editable rule content (weapons, armour,
+  spells, species, classes/subclasses, backgrounds, feats, creatures) without a
+  second combat/dice/character/spell engine and without ever executing code from
+  a file. The engines (gear/abilities/progression/health/dice) already own the
+  MECHANICS; what was missing is a place to describe WHAT exists and its
+  PARAMETERS, editable by a DM and versionable as text.
+- **Decision:**
+  - ONE CONTENT ENGINE (`app/content.py`). It PARSES and VALIDATES CSV against a
+    per-kind column schema (spec = key/required/vtype/default) and stores the
+    validated row as JSON in a generic `content(kind, room_id, id)` table — that
+    JSON is the round-trip source of truth for export. It NEVER evaluates code;
+    anything no engine implements is carried as `manual`/`needs_choice` TEXT and
+    only displayed. Validation reports file/line/column; one bad row refuses only
+    its own file; unknown files are skipped; size/row/zip-uncompressed caps stop
+    zip-bombs. Import modes preview/apply/replace; apply is IDEMPOTENT (an
+    identical row re-imports as `unchanged`, a DIFFERENT existing id is a
+    CONFLICT that apply refuses and replace overwrites).
+  - REUSE, NOT REPLACE. Content only projects into the LIVE systems where a
+    mechanic already exists: an `item` row becomes an `item_defs` row (D92/D93
+    DM library — `gear.weapon_profiles` reads the TYPED combat props, and
+    `range_normal_ft` maps to the single `range_ft` that profile consumes); a
+    `spell` row `abilities.register`s as a castable ability whose `level` sets the
+    slot cost (D41 deduction path unchanged). Species/classes/subclasses/
+    backgrounds/feats/creatures are read back from `content` by the sheet and the
+    Phase-B build engine. `main.startup` re-registers spell abilities from the DB,
+    so a restart repopulates the in-memory registry.
+  - TRANSPORT IS MULTIPART-FREE. The pinned image has no `python-multipart`, so
+    the DM tool POSTs a file's RAW BYTES (or a whole `.zip`, auto-detected by the
+    `PK\003\004` signature) to `/api/content/{code}/import`; the frontend reads
+    bytes with `FileReader`/`fetch(File)` exactly as the map upload already does.
+    No new dependency, no build step (D1). Export escapes spreadsheet formula
+    injection (`= + - @ TAB/CR` get a leading `'`) and the importer reverses ONLY
+    that escape, so export→import is byte-true.
+  - ROOM SCOPING + GLOBAL LIBRARY. Content keys on `(kind, room_id, id)`;
+    `room_id` 0 is a reserved GLOBAL library read by every room. Class/subclass
+    ids repeat across levels, so `store_key` encodes `"<id>#L<level>"` to avoid a
+    false duplicate. Authorization mirrors D92: only this room's DM may
+    import/export/read counts.
+- **Consequences:**
+  - The projection reuses the DM library's EXACT insert (global `id` PK, same
+    `ON CONFLICT DO UPDATE`, same `clean_def`); because that update does not move
+    `room_id`, the FIRST room to author a def id keeps the library row while every
+    room keeps its OWN authoritative copy in `content`. Tests therefore read the
+    projected `item_defs` by its global id and assert the CONTENT row is the one
+    scoped to the room.
+  - Slot progression stays a TABLE owned by class rows (`slot_progression`) and is
+    explicitly NOT derived from total level (D58). Cantrip/upcast dice scaling,
+    currency (`value_gp`) and encumbrance (`weight`, STR-derived) are columns that
+    already import cleanly but are deferred to Phases C–E and marked accordingly.
+  - SHIPPED pack uses ORIGINAL names (`scout`, `sword_plus1`, `kin_fey`) so no
+    protected text is committed; real rule packages are authored by humans
+    (ATTRIBUTION.md). `tests/test_content_examples.py` imports every documentation
+    example through the SAME code path, so docs and importer cannot drift apart.
+
+## D96 — Character build is a chronology that DRIVES the existing columns, and the per-level ledger is bookkeeping — never a second source of level/HP/abilities
+
+- **Context:** Sprint 25 Phase B needs a Stufe 1–20 build (subclass on its
+  unlock level, ASI/feat on theirs, skill choices) built from the D95 CONTENT,
+  without a second character/level/slot engine and without breaking D53
+  (multiclass entries + derived total) or D58 (slot progression is a TABLE,
+  never derived from total level).
+- **Decision:**
+  - `app/charbuild.py` is a PURE operation module (like `progression`). `plan()`
+    reads `content.class_levels/class/load` and returns the strict chronology
+    (level 1..to) plus the decisions still required — it mutates nothing.
+    `apply()` advances a class FORWARD and performs only the mutations the
+    engines already own: `progression.set_class_levels` (single entry per build;
+    `level` stays derived), HP from the rows' `hp_base`/`hp_per_level` (fixed
+    documented formula, not a roll), `gear.clean_saves`/`clean_skills` for
+    proficiencies, and ASI/feat `ability_boost` written into `stats`. Anything
+    no engine implements (subclass features, granted spells) is recorded as TEXT
+    in the ledger and shown, never re-implemented (D95 boundary).
+  - LEDGER, not truth. The build state (class id, `applied_through`, subclass,
+    per-level choices, and a `base_stats` snapshot) lives in the new additive
+    `characters.build` column. It drives the forward-only guard and the sheet;
+    level/HP/abilities remain the columns the rest of the app reads.
+  - IDEMPOTENT FORWARD BUILD. `apply()` RECOMPUTES levels 1..to from the content
+    rows + accumulated decisions each time, starting ability deltas from the
+    snapshot `base_stats` (never from the already-mutated row, which would
+    re-stack each ASI). Guard: a rebuild to a level `<= applied_through` is
+    refused; a different class once started is refused. Missing choices return
+    `needs_choice` and write NOTHING.
+  - ONE auth rule, ONE transport. `app/charbuild_api.py` (room-scoped) copies
+    the `class_levels` authorization EXACTLY: owner always, DM only for a
+    character in `room_members` of that room; the frontend lives in the room
+    sheet (owner/DM), not the lobby, so there is a single owner-or-room-DM rule
+    rather than a second unauthenticated lobby path.
+- **Consequences:** the wizard is fully generic — the client renders the
+  chronology and POSTs a choices object, and `charbuild` re-validates every
+  rule, so no class logic ships to the browser and no rule can be bypassed by a
+  hand-edited payload. Multiclass is untouched (build writes one entry;
+  `progression` still accepts several). `base_stats` means later item/stat edits
+  by other systems are NOT clobbered by a rebuild of the build-owned deltas.
+
+## D97 — Class spellcasting is DATA the build reads and the ONE ability engine executes; slots stay a per-class TABLE, never derived from total level
+- **Decision:** Phase C closes the spell axis D58 left open, with NO new engines:
+  - **Consumer, not creator.** The class-row spell columns
+    (`spellcasting_ability`, `cantrips_known`, `spells_known`, `prepared`,
+    `slot_progression`, `upcast_scaling`) were validated in D95 but read by
+    nothing; `charbuild` is now that consumer. It derives the castable ability
+    ids (`characters.abilities`), a sheet display pool (`characters.spells`) and
+    the slot table (`characters.spell_slots`) straight from the rows + the
+    build ledger. Known-model classes CHOOSE at each level where the cumulative
+    totals rise (`needs_choice`); prepared-model classes take the whole class
+    list and re-prepare as a DM/long-rest step — that daily activity is NOT
+    auto-faked.
+  - **Slots are a TABLE, still never a derivation.** `slot_progression` is
+    `level:count;…` for THAT class level; a 2nd-level half caster has two 1st-level
+    slots and no 2nd-level slot, which a naive total-level lookup would never
+    produce. This is the concrete realisation of the D58 trap.
+  - **One cast op, now scaled and replay-safe.** Casting routes through
+    `abilities.execute` (D55) — for both PACT (`cast` legacy rows) and registered
+    content spells the SAME engine. `cast_level` finally does something:
+    `upcast_step` raises the base dice per slot level above base; a cantrip's
+    `scale_tiers` raises it by character level — generically, folded into the ONE
+    base dice term (added dice must share the base die's sides, else the roll is
+    left at base and `manual` covers it; nothing is fabricated). `execute` now
+    claims a client `op_id` up-front inside the write transaction, so a repeated
+    request consumes one slot AND applies effects once (closes the D93 gap for
+    the ability path; the sheet sends `op_id` like the legacy path does).
+  - **Class resources ride the generic system.** `class_resource[:spec]` +
+    `class_resource_reset` become a normal resource (e.g. sorcery points,
+    `short` reset); `handle_long_rest` was corrected to also refill short-reset
+    resources (a long rest is never less than a short one). Slots/resources use
+    the EXISTING `{max,used}` consume/restore semantics unchanged.
+- **Honest limits (not faked):** choosing each new spell is a build `needs_choice`
+  step; `spell_replace` swaps, daily re-preparation for prepared casters, and
+  AREA/POINT aiming of a spell (cast from the tactical map, not the sheet) are
+  table/DM decisions, shown as such.
+- **Consequences:** the shipped technical pack gains original-name caster
+  templates (`adept` prepared, `warden` half-known, `seer` known + sorcery
+  points) with SRD-style — not copied — tables, and `spells.csv` demonstrates
+  `scale_tiers`/`upcast_step`. Existing non-caster builds and legacy sheet
+  spellbooks are untouched (a non-caster build writes none of the spell columns;
+  a sheet spell not in `abilities` still casts via the legacy path). Cantrip
+  scaling by total character level is legitimate (unlike SLOTS, D58 only forbade
+  deriving SLOTS from total level). Tests: `tests/test_spells.py` pins the models,
+  the slot table, choice-gating, resource reset, upcast/cantrip scaling and the
+  duplicate-`op_id` guard.
+
+## D98 — Gear is a DERIVED overlay consumed by the existing math, never a second equipment engine or a persisted stat
+- **Decision:** Phase D closes the weapon/armor/magic-item axis WITHOUT a second
+  engine. The item SCHEMA already carried almost every column; what was missing was
+  the CONSUMERS, which ignored `attribute_*`, `ac_base/ac_bonus/ac_max_dex`,
+  `skill_prof/save_prof/expertise`, `darkvision_ft`, `speed_bonus_ft`,
+  `extra_damage_dice`, `finesse`, versatile grip, `range_long_ft`, `attune` gating.
+  - **One derivation, transient.** `gear.effective_gear(char)` computes effective
+    scores + skill/save/expertise sets + darkvision + speed FROM the base columns +
+    `items` + `equipment` on EVERY read, and NOTHING is memoised on a mutable dict
+    or written back. `attribute_set` applies first (`max(base, value)` — an item
+    never lowers a score), then `attribute_bonus` (stacking deltas); `_stat_mod`,
+    `dex_mod`, `skill_bonus`, `save_bonus`, `compute_ac`, `clean_speeds` and
+    `weapon_profiles` all read it, so base stats are never mutated and equipping,
+    unequipping, attuning or restarting can neither double-apply nor go stale.
+  - **One prop vocabulary.** `gear.clean_props` is THE validator for DM definitions
+    (`inventory.clean_def`) AND the content importer (which projects through it), so
+    a prop means the same thing everywhere — no second validator. Typed keys are
+    range-clamped and wrongly-typed values are DROPPED (never coerced).
+  - **Five bonus scopes, distinguished exactly.** per-weapon (`attack_bonus`,
+    `damage_bonus`, `extra_damage_dice`) → the server attack profile only; general
+    (`attribute_bonus`/`attribute_set`) → every derived value; while-equipped (all
+    gear bonuses live only in a slot; a slotless legacy sheet is byte-identical);
+    while-attuned (an `attune` item that is not attuned is INERT, even its weapon
+    bonus); on-consume (`heal_dice`, `op_id`-guarded).
+  - **Weapon mechanics ride `weapon_profiles`.** versatile `grip` is per-instance
+    (`inv_grip`, off-hand cleared atomically for two-handed grip; shield conflict
+    resolved) and picks `damage_dice` vs `damage_dice_two_handed`; finesse/ranged
+    choose the ability; a weapon attack adds its ability mod to damage by default
+    (a legacy DM weapon can opt out with `mod_to_damage=false`); long range is
+    server-tiered (≤normal ok, ≤long disadvantage — advantage cancels it, beyond
+    invalid).
+  - **Identification ≠ inertness.** Unidentified gear still applies its passive
+    mechanic while worn+attuned (it gates only the DISPLAY of unknown properties);
+    blindly USING an unidentified magic item still needs identification (D98).
+  - **Additive only.** `characters` gains no new column; grip is a field on the
+    inventory entry, `hands`/`charges`/`recharge` are additive item columns; legacy
+    sheets and pre-Phase-A items (no props / no equipment) are unchanged.
+- **Honest limits:** long-rest is the only charge recharge (short-rest recharge
+  deferred); `duration`/`trigger`/`hit_dice_bonus`/`properties` remain table notes;
+  creatures use the SAME overlay only when they carry the compatible item/equipment
+  model (no NPC-specific engine).
+- **Consequences:** DMs author any item in the browser (item-definition editor with
+  kind/grip/dice/range/AC/attribute/grant/magic fields, `✎ Edit` to reload a
+  definition), see effective values on the sheet (darkvision, effective walk speed,
+  server-derived attack profiles with extra dice + tiers + grip + 🔒 when gated).
+  Tests `tests/test_weapons_gear.py` pin grip dice + hand/shield occupancy, ranged
+  tiers + finesse, the attunement gate, AC base/bonus/max-dex, attribute set/bonus
+  feeding AC + initiative + stats, skill/save grants + expertise (never double
+  proficiency), darkvision/speed, heal-once, equip persistence, grip replay +
+  main-hand precondition. `tests/test_content_examples.py` gains importable ranged,
+  attribute-bonus, attribute-set and multi-effect item examples.
+
+## D99 — Money is one integer of copper; carrying is derived; a companion is just a token with an owner/controller
+- **Decision:** Phase E finishes currency, encumbrance and companions WITHOUT a new
+  engine. **Currency** is stored on the character as ONE non-negative INTEGER of
+  copper pieces (`characters.wallet`) — never a float, never a per-coin dict that
+  could go negative per denomination. `gear.CURRENCIES` is the single data table
+  (cp/sp/ep/gp/pp, value in copper, coin weight 0.02 lb); the per-coin purse split
+  (`cp_breakdown`) is DISPLAY ONLY and greedy richest-first, so electrum change at
+  50 cp divides exactly. A client can only ever send `(integer amount, coin id)`
+  through `gear.to_cp` — it can never post a copper total, so no request mints
+  gold. All purse and container-coin writes live in `app/inventory.py` reusing the
+  SAME transaction + `op_id` replay claim as items: atomic across sender/receiver,
+  refuse a shortfall before any store (so the whole op rolls back), namespace the
+  claim to the character/object acted on. DM grant/deduct; player→member transfer
+  (both must be THIS room's characters via `_validate_parties`); a DM fills hoards
+  and a character loots them (`coins_take`, one object-namespaced claim so a
+  double-click cannot duplicate the scoop).
+- **Carrying** is DERIVED, never persisted. `gear.encumbrance(char)` sums `qty ×
+  weight` over the character's DISTINCT stacks — equipped items live INSIDE
+  `items[]`, so equipping never double-counts weight — plus the coins' weight from
+  the same greedy split. Capacity = effective STR (`effective_gear`) ×
+  `CARRY_PER_STR` (15) × a SIZE_CARRY modifier (tiny/small ½, medium 1, large 2,
+  huge 4, gargantuan 8) + any `carry_bonus` from WORN gear (a new additive item
+  prop/column). The result rides `derived.encumbrance`; the sheet renders it and
+  the client never recomputes. `overloaded` is a WARN FLAG ONLY — no movement
+  penalty is applied until that rule is fully specified and tested.
+- **Companions are the existing token model, surfaced not duplicated.** A companion
+  is a `tokens` row with `owner_user_id` and/or `character_id` set by the DM
+  (`add_token` now binds those, DM-only, validating room membership) — the same
+  columns a player token already uses. Control is handed out ONLY through the D82
+  `token_controller` (DM-only; the target must be a room member), and riding stays
+  the D82 acyclic `token_mount`. A player can therefore never seize a foreign
+  companion through a forged message; a player sees companions only among the
+  tokens already visible to them (owner/controller = them), so no hidden token or
+  other-plane token is ever named.
+- **Additive only.** New columns: `characters.wallet`, `characters.size`,
+  `containers.coins`; new additive item column/prop `carry_bonus`. `CharIn`, item
+  defs and every pre-Phase-E row read defaults; nothing is migrated destructively.
+- **Honest limits:** currencies are a documented code table (a content-configurable
+  rate table is a later step); coin recharge/interest, minting rules, and the
+  overload MOVEMENT penalty are deferred; the DM item-definition editor does not
+  yet expose the `carry_bonus` field (author it via CSV or an ad-hoc grant).
+- **Consequences:** sheet collapsibles render Wallet (rates + greedy coins + DM
+  grant/deduct + owner transfer), Encumbrance (bar + OVERLOADED warn) and
+  Companions (list + DM controller/mount/add/remove reusing existing ops); the
+  container chest shows and loots coin. `tests/test_money_encumbrance.py` pins the
+  integer/range strictness of `to_cp`, the lossless greedy split, grant/deduct +
+  persistence, the no-negative rollback, `op_id` replay, DM-only grants, member
+  transfers (atomic, insufficient, replay), stranger refusal, container fill→take
+  (adjacent, atomic, replay), quantity/equipment non-double-counting, size + carry
+  bonuses, the overload warn, companion/controller authorisation, and
+  reload-stable derived state. `tests/test_content_examples.py` gains an importable
+  `carry_bonus` example.
+
+## D100 — Integration hardening: atomic resource spend, server-authorised progression fields, room-scoped item library, real-JS testing via a pinned node
+
+- **Decision:** Sprint 29 was an audit, not a feature. An adversarial read of the
+  D95–D99 subsystems surfaced five real defects and one legitimate design tension;
+  each is closed with a REAL regression test (no xfail, no new skips), and the
+  remaining non-issues are documented as honest limits.
+- **G7 — the ONE ability engine is now atomic about cost.** `_consume_cost` read,
+  checked and incremented a slot/resource across SEPARATE autocommit statements, so
+  two concurrent casts of the same caster could both pass the "slots left?" check and
+  LOSE an increment (probe: 91/120 rounds cast 4 against `max=3`). The legacy `cast`
+  path was already single-tx; D97's `ability_cast` path was the outlier. `op_id` claim
+  + cost now happen inside ONE `db.tx()` (`_cast_gate`, `app/abilities.py`), and a
+  refused cost ROLLS the claim back so a genuine retry is not swallowed. The fix is
+  pinned by a synchronous thread-hammer invariant (`tests/test_d100_integration.py`):
+  N concurrent `_cast_gate` calls against `max=1` yield EXACTLY 1 success, never more.
+- **Autonomy lock (design).** The raw character-editor `PUT /characters/{cid}` no
+  longer writes the SERVER-AUTHORISED fields `level` / `spells` / `spell_slots` — a
+  sheet owner can neither refill consumed slots, self-grant a spell list, nor set
+  their own level by hand. The raw `class_levels` WS transport is DM-only. The
+  SELF-SERVICE progression the players keep is the VALIDATED path: `charbuild.apply`
+  (`/api/build/{code}/{cid}/apply`, owner- or room-DM-authorised) plus the DM's WS
+  advance. Nothing was migrated: existing characters are untouched; only the unauthorised
+  write doors closed. Ordinary sheet fields (name, AC, HP, stats, items, skills, …) stay
+  editable by the owner, and DM/server-side progression is fully preserved.
+- **G8b — a granted NPC ability id survives the real editor path.** `npc.clean_npc`
+  dropped bare STRING ability ids (it only kept `{name,desc}` prose), so a familiar
+  created through the real `add_token`/`update_npc` path could never be cast by its
+  controller — the existing tests masked this by writing the block straight to the DB.
+  `_clean_abilities` now preserves a bare string as a canonical id alongside prose
+  entries, which is exactly the list `_rollable_by` reads.
+- **G9/A13 — the DM item library is room-scoped, and a shared id is refused, never
+  clobbered.** Reads/deletes/grants already filtered `WHERE room_id=?`; the two
+  `item_defs` UPSERTs (editor create + CSV projection) silently rewrote ANOTHER room's
+  row on an id collision. Because `item_defs.id` is a GLOBAL primary key (a per-room
+  key needs a destructive table rebuild, which is off-limits), a cross-room collision
+  is now REFUSED with a clear message instead of overwriting — the authoritative
+  room-scoped `content` row is still stored, so no content is lost. This is the honest
+  resolution the schema permits without a migration.
+- **G5 — a non-DM rest answers.** A player-initiated `long_rest`/`short_rest` on a
+  token they may not rest returned silently; it now sends an explicit error, matching
+  every other refusal.
+- **Real-JS testing.** The `test` Docker stage copies the pinned `node:22-slim` binary
+  (no npm, no node_modules, nothing fetched at run time — `python:3.12-slim` already
+  ships its only extra lib, `libstdc++.so.6`) so the ~17 node-gated tests run the
+  ACTUAL shipped client JS (and the diorama parity) instead of skipping. The runtime
+  image is unchanged and never sees node.
+- **Consequences:** the canonical suite is `682 tests, 0 failed, 0 errors` (node-less it
+  reports the ~18 node skips; with node in the image those become real runs).
+  `tests/test_d100_integration.py` pins all of the above plus a green end-to-end flow
+  (import → build → cast → consume → money → companion → reload → consistency);
+  `tests/test_progression.py` and `tests/test_sprint23_combat.py` were updated to stage
+  the server-authorised fields through the legitimate writers instead of the now-locked
+  editor PUT; `test_content.py` reads `item_defs` BY ROOM+id and run-unique ids.
+  Remaining honest limits: `POST /characters` stays the trusted authoring/seed surface
+  (used to create a blank sheet and by tooling); ability SCORES / saves remain
+  owner-editable sheet fields (lower-severity, no confirmed exploit, the build is the
+  intended author of a fresh sheet's scores); and the global `item_defs` id means two
+  rooms independently choosing the same item id collide by design and are refused.
+
+## D101 — Room preparation screen, guided character build, background starting gear, apply-refresh fix
+
+- **Context:** browser findings (12.10.2026): DnDTable worked but presented like a test
+  tool — joining landed directly on the canvas, species/class/background were free-text
+  fields, the build demanded raw class ids and hand-written choices JSON, and after a
+  SUCCESSFUL build apply the sheet kept showing `unbuilt` + old skills until a full
+  browser reload. Goal: the flow Login → room → room preparation → table must read like
+  a usable app WITHOUT a second character/content/auth engine, without stockwerk/map
+  editor work, and without new mechanics.
+- **Decision — one new screen, everything else re-used.** `#view-prep` +
+  `app/static/js/80_prep.js` is the landing screen for create/join/room-click;
+  "Open the table" IS the existing `openRoom()`, the table's back button is now
+  `backToPrep()`, and the legacy lobby "Bring" shortcut still enters the table
+  directly. The DM block re-uses `ctPost/ctRender` (D95) for CSV import and the DM-only
+  `kinds` counts; the player block re-uses `/rooms/{code}/state`, `POST /assign`,
+  `/characters` CRUD and `charbuild.plan/apply` exactly as they are. No room "phase"
+  was invented server-side — preparation is a client view over existing truth.
+- **Dropdowns are data, never lists.** New `GET /api/content/{code}/options` gives every
+  ROOM MEMBER the id+name catalogue of the room's rule pack (species/class/background/
+  subclass/feat/spell/item; class level-rows collapse per id). The wizard derives every
+  field from `charbuild.plan`'s `needs` (skill options, subclass, per-level feat/ASI,
+  spell picks) and never hardcodes classes or skills; decision types the guided form
+  cannot show are surfaced explicitly with an expert-mode JSON field — never skipped.
+- **Background is a column; starting gear is one authorised route.** Additive
+  `characters.background` (D101); `CharIn.background=None` means "keep stored value",
+  so legacy lobby PUTs cannot wipe it. `POST /api/rooms/{code}/starting-gear` grants the
+  background's `starting_items` through `app/inventory.py` only, resolves each CSV token
+  strictly against THIS room's item definitions (grants what is unambiguous, REPORTS the
+  rest — nothing is invented), and is idempotent by D94 `inv_ops` (deterministic
+  `starting-gear-<bg>` op → a replay answers "already", never doubles). Authz mirrors
+  the build API exactly (owner, or DM of an assigned character).
+- **The reload bug had TWO causes and got BOTH fixes.** Server: `charbuild.apply` over
+  REST broadcast NOTHING, so open sheets on every client aged silently — it now emits
+  `snapshot` (the `class_levels` precedent). Client: even the apply caller's own
+  `refreshRoom()` never re-rendered an OPEN sheet (only the WS `snapshot` handler did)
+  — the handler now re-renders the selected token's sheet itself, mirroring
+  `40_ws.js`. Pinned by `tests/test_d101_prep.py` (server broadcast + client source).
+- **Found and fixed on the way:** re-seating a user's second character (any assign with
+  an existing token) 500'd — `assign_char` passed a raw `sqlite3.Row` into
+  `footprint.*`, which read it via `.get()`. Now `dict(tok)`; the exact preparation-
+  screen path that exposed it is pinned as a test.
+- **Consequences:** the canonical suite is `694 passed, 1 skipped` (Docker, node 22
+  included; baseline 682 + `tests/test_d101_prep.py` 13). UI text stays English as
+  decided for this sprint (the task's "UI Deutsch" was scoped down by the operator);
+  internal ids and CSV fields were always English. No DB migration data — one additive
+  column with defaults; every old room/character/URL keeps working.
+- **Honest limits:** the lobby editor stays the legacy trusted surface (free-text
+  race/class, now background-preserving); species rows are still bookkeeping only
+  (ability bonuses from `species.csv` are not mechanically applied — that is an
+  existing engine decision D101 did not touch); starting gear covers only what a
+  background lists AND this room's import projected (D100's global `item_defs` id can
+  refuse a second room's projection, and then those items surface as skipped); a
+  background change after a grant only re-grants under a DIFFERENT background id
+  (the replay guard is per background, 1-day `inv_ops` TTL otherwise); the guided
+  form covers skills/subclass/feat/ASI/known-spells — anything new a future pack
+  introduces falls back to the visible expert-mode hint until a form exists.
+
+## D102 — Floors become operable: plane-integrity fixes, DM-only plane changes, the floor manager
+
+- **Context:** browser findings repeated floor after floor — "Stockwerke funktionieren
+  nicht / sind nicht bedienbar". The D86/D88 foundation (named planes, per-plane maps,
+  validated stair connectors) was sound, but three server defects corrupted data across
+  planes (trap/toggle saves wrote the viewed PLANE's map into the PRIMARY blob; WS
+  connect and character seats revealed fog on the primary map regardless of the token's
+  floor), reveals/fog edits reached every client without naming their plane (the DM's
+  browser painted another plane's terrain into the grid it was looking at), and the
+  management UI was a chicken-and-egg trap: floors could only be CREATED from a token
+  sheet, the "Viewing plane" select appeared only once ≥2 floors existed, rename/delete
+  had no UI at all — and renaming was impossible without dangling every stair that
+  pointed at the old name.
+- **Integrity first — one rule: a save carries the floor of the map it holds.**
+  `set_map(room_id, mp)` means the PRIMARY map; the trap branch
+  (`room/movement.py`) and the `toggle` op (`room/interact.py`) now pass the token's/
+  object's floor. Connect reveal groups tokens by floor and reveals each on ITS map;
+  `assign_char` loads and writes the token's plane map (same fit/blank semantics as the
+  `net.get_map` seam). No migration — the primary floor stays the legacy blob.
+- **Visibility isolation is double-keyed.** Every reveal/fog patch now carries
+  `payload.floor` (server `fog_patch` gains the argument) and the client applies it
+  only while it equals `state.viewFloor`; delivery itself is plane-scoped
+  (`send_to_plane_viewed` for walks/connects — token holders + DM + token-less
+  observers on primary). The DM canvas obeys the VIEWED plane (`viewerPlane()` returns
+  `viewFloor` for the DM): browsing one floor shows exactly that floor's tokens — no
+  more sprites floating over another plane's map.
+- **Plane changes are a DM/stairs decision (operator decision).** Players may no
+  longer hop planes via `token_floor` ("Only the DM moves tokens between floors") —
+  the free self-service hop skipped every destination check. The validated STAIR
+  object stays their route (terrain + occupants checked on the target plane, view
+  follows the mover via `grid_reveal`). The sheet's floor row became read-only for
+  players. D88/Sprint-20 tests that encoded the old policy were updated, not deleted.
+- **The missing manager got built.** New DM side panel "Floors" (own panel in the
+  DM tab): list with active-plane highlight, add, view (browse without moving
+  anyone), rename, delete — delete refuses with the server's reason (primary,
+  occupied). New `PATCH /api/rooms/{code}/floors/{name}`: registry, `floor_maps`
+  row and `tokens.floor` move atomically in `FLOOR.rename`, then stair
+  destinations naming the OLD floor are retargeted across ALL plane maps —
+  otherwise renaming silently dangles every stair. The view is re-labelled
+  client-side BEFORE the fetch so no in-flight refresh can request a floor that
+  stops existing mid-request. `openRoom` now honours the server's `view_floor`
+  (a player joining a token on a named floor is delivered ON that plane and the
+  plane guards address the right one from the first frame).
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **703 passed, 1 skipped, 0 failed** (baseline 694 + `tests/test_d102_floors.py`
+  9; two node-harness tests updated because `tokenAt` now filters by `onPlane`).
+  Two D101-relevant behaviours stay intact and are pinned: join lands in prep, and
+  `map_changed`/`refreshRoom` remain the view SSOT (`state.viewFloor = s.view_floor`).
+- **Honest limits:** the ⬜ "floor" brush backlog (it paints cell 0, unrelated to
+  plane separation) was NOT touched — it does not block per-floor separation;
+  renaming while an editor session holds a stale snapshot can re-introduce the old
+  name through that snapshot's objects (editor merge caveat, same class as D88's
+  stale-lamp case); floor rows carry no per-plane token counts in the panel; the
+  DM browse select and the panel share `state.viewFloor` but the panel intentionally
+  carries the management actions   — the canvas stays the single map surface.
+
+## D103 — The map editor paints truth: a real "no floor" state, and PNG artwork that loads in the browser
+
+- **Context:** browser findings named two broken surfaces. (1) Token artwork: uploads,
+  auth and serving all worked — yet every portrait stayed a grey disc in a real browser.
+  (2) The map editor: "Boden malen/löschen funktioniert nicht" and the missing answer
+  to the most basic map question — what does a cell with NO FLOOR even mean here?
+- **PNG root cause: the url the browser was told to load was never routed.** The DB
+  canon for `tokens.image` is `/assets/<id>` (since D85, stored in rows — immutable
+  without touching data) and the canvas loads it verbatim (`img.src = t.image`), but
+  FastAPI only ever routed `/api/assets/<id>`; the asset router's prefix hides it. So
+  artwork looked perfect in REST tests (they use the /api form) and 404'd in browsers —
+  where the onerror handler then BLACKLISTED the url in the session's art cache, making
+  even later successes stay grey. Fix is one second router WITHOUT the prefix delegating
+  to the same `get_asset` handler: identical auth (`serve_allowed`), identical
+  no-oracle 404, identical clean-re-encode + `nosniff` headers. The `/api` form stays
+  the documented REST surface. No pipeline rework — the pipeline was sound.
+- **"No floor" was a missing STATE, not a broken brush.** The cell mechanics (save,
+  per-plane isolation, fog) were intact (D102 pinned them); but the terrain registry
+  had no impassable-but-visible cell: the eraser and ⬜ both paint 0 (always walkable),
+  and floor 0 rendered at #151823 on a #0a0b10 page — two hex steps from the
+  background, so even correct painting LOOKED like nothing happened. Decision (asked,
+  approved): extend the D69 registry with **5 = void** — blocks movement, NOT climbable,
+  sight passes over it (a pit is not a wall). Because every engine (path, LOS,
+  footprint placement, collision, preview) already asks the registry, the refusal
+  propagates with zero engine edits. Old maps cannot contain a 5, `terrain(None)`
+  stays floor (fog semantics untouched), sanitize clamps 6+ to 5 and still rejects fog
+  nulls — byte-compatibility is the invariant, no migration.
+- **Editor:** new 🕳️ brush paints 5 (drag included); ⬜ keeps painting 0 and now
+  RENDERS as floor (quiet two-tone tiling); 🕳️ renders as a dark hatched hole. 🧹
+  keeps its old meaning (0 + clear trap/loot/objects at the cell) — erase must not
+  silently create impassable world edges. The diorama file is untouched (D97 rule):
+  a void simply extrudes as a flat tile there — cosmetic only.
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **711 passed, 1 skipped, 0 failed** (baseline 703 + `tests/test_d103_editor_assets.py`
+  8; two D69 vocabulary-clamp tests updated — 5 is now legitimate, 6+ clamps). One
+  discovery for the toolbox: FastAPI 0.142 defers `include_router` into opaque
+  `_IncludedRouter` wrappers, so route-table scans are version-dependent — the asset
+  tests pin BEHAVIOUR (both urls serve, auth-gated) instead.
+- **Honest limits:** the diorama shows void as a flat floor tile until D97-territory
+  work happens; concurrent editors remain last-writer-wins on save (D88 class);
+  served artwork carries `max-age=86400`, so a revoked private asset may survive in a
+  warm browser cache for a day; "void kills a standing token" is intentionally NOT
+  automated — the server refuses occupancy of void but does not simulate falling.
+
+## D104 — Lights become manageable and the DM can stand in a player's eyes: the `lamp` channel and the read-only `view_as`
+
+- **Context:** browser findings: darkness renders the map black (and cannot be
+  diagnosed), light sources "cannot be sensibly placed or managed", and the DM has
+  no way to check what a specific player actually sees. Phase 1 found the premises
+  half wrong: the light MODEL existed since D87/D89 (`mp["dark"]` room flag, lamp
+  world-objects with `bright`/`state.on`, token `light`/`darkvision`, all
+  plane-local, all LOS-correct, pinned by `test_lighting2.py`) — what was missing
+  was the MANAGEMENT SURFACE (no move, no retune, no list; delete+replace silently
+  loses `state.on` because the id merge keys on id), and the PLAYER-VIEW PREVIEW
+  did not exist at all. "Darkness = black" is Rule-as-Designed for a dark plane
+  without light sources.
+- **No new entities, no second light rule.** The lamp IS the light source
+  (registry of INTERACT_OPS unchanged). New DM-only WS message `lamp`
+  (`room/lights.py`): add/update/remove by id ON A PLANE (`floor` arg, D102
+  save rule), same canon as the object sanitizer (bright 0..30, world-window
+  clamp, 16-char ids, uuid ids for adds), same state-merge survival, ending in
+  the SAME `reevaluate_visibility` the lamp-interact and map-edit already call.
+  Panel toggling is silent administration: players experience the WORLD result
+  via `map_changed`, never a fake chronicle action (player-driven lamp interact
+  keeps its chronicle, untouched). New DM panels "Lights" (per viewed plane:
+  label/radius/on-off/move-by-click/delete/add-at-centre) and "Peek".
+- **`GET /rooms/{code}/view_as/{character_id}` — the security promise is
+  structural.** The /state player branch was EXTRACTED into
+  `rooms._viewer_token_view` and `/state` itself now calls it; `view_as` calls
+  the SAME function with the character's owner. There is no second visibility
+  logic to drift: same LOS, same `_lit_cells` dark/lamp/darkvision decision,
+  same hidden-token strips, same fog masking. Pure read (explored bytes and
+  ghost memory are only read — pinned). DM-only; members get 404, non-members
+  the classic 403 membership gate; a character without a token in the room
+  answers 404 like a floor that does not exist.
+- **The client preview is a DATA swap, not a state fork.** `viewData` accessors
+  (`viewG/viewTokens/viewGhosts`) feed the tactical renderer; the live DM state
+  keeps receiving every WS event underneath (map_changed keeps the panels
+  honest). While a preview shows: ALL canvas input is dead (select/drag/roll/
+  interact/dblclick), diorama switching is blocked (its renderer reads live DM
+  data), the plane filter is skipped on preview payloads (server-filtered), and
+  the banner names the character ("👁 DM preview: sight of …"). Invisible
+  tokens are absent from the payload — they cannot be clicked, hovered or
+  listed because they were never sent. Snapshot + Refresh (decision): live
+  replay would mean a second render/state path (forbidden).
+- **Side bug found by the audit and fixed:** WS connect reveal used the classic
+  FOG_R radius REGARDLESS of darkness — a D87 light-budget bypass at reconnect
+  (dark rooms revealed 6 cells of memory from nothing). It now defers to
+  `viewer_visible_cells` (the one light-aware function) when the plane is dark.
+- **Rule-variant documentation (not implemented):** the model knows ONE
+  darkness — the ordinary kind that light defeats (D89's standing decision).
+  "Magical darkness that ignores light" does not exist as a state and was NOT
+  silently invented; darkvision remains a private sense that only matters
+  where light fails (D89), and gear-granted `darkvision_ft` stays sheet-level.
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **725 passed, 1 skipped, 0 failed** (baseline 711 + `tests/test_d104_lights_preview.py`
+  14; two source pins updated to the preview accessor loop head — D102
+  precedent; layout-z pin satisfied by reusing `--z-movehud`).
+- **Honest limits:** the preview is a moment-image (Refresh re-fetches; a
+  vanished character exits the preview honestly); managing lights while a
+  preview is open only affects the preview after Refresh; the panel cannot
+  express dm_only-lamps per plane yet (checkbox exists in the editor tool, not
+  in the panel); no falling/feeling mechanics for darkness; connect reveal in
+  dark rooms now reveals exactly the light's reach — a player whose lantern sat
+  lit before disconnecting may legitimately re-learn that map area.
+
+
+## D105 — Class kits, NPC gear and looting: all-or-nothing grants, `tok:<id>` containers, and the corpse as a loot source
+
+- **Context:** D101 granted background gear only; `classes.csv` had no kit
+  columns; NPC tokens carried no inventory; a downed monster could not be
+  looted — although the container (D92), currency (D99) and op-id replay
+  (D94) engines had long existed. D105 adds the missing *rules*, not a
+  second engine.
+- **Pack schema (additive):** level-1 class rows gain `starting_items`
+  (fixed tokens `id` or `id xN`, comma-separated) and `starting_choices`
+  (pick-one groups `Label=alt|alt xN;Label2=…`). Unknown-column tolerance
+  made the extension safe, but the exporter's byte-stability required the
+  pack rows themselves to carry the new columns — `DictReader` turns a
+  missing trailing column into `None`, and `None` silently stringifies.
+  Demo kits live in `scout` and `warden`.
+- **One grant path:** the D101 route is the only grant path. POST gains an
+  optional `class_choices`; a new GET `starting-gear/{cid}` resolves the
+  pack server-side (names + every error the grant would refuse on) so the
+  prep screen shows problems BEFORE anything is granted. The background
+  part keeps D101 semantics verbatim (skipped-but-reported, replay→already).
+- **Class part is ALL-OR-NOTHING (D105 addendum):** one malformed token,
+  one missing item definition or one unanswered group refuses the entire
+  class grant and writes NO idempotency claim — fixing the CSV stays
+  possible and a half-grant can never freeze behind a claim. Choices are
+  re-checked against the CSV's offered alternatives only; a client can
+  never name an arbitrary item id.
+- **Exactly-once (D105 addendum):** the claim key `class-gear-<class>` is
+  probed BEFORE the choices are even parsed — a later request answers
+  `already` whatever it carries, adds nothing and overwrites nothing.
+- **NPC inventory = the containers table, keyed `tok:<token_id>`:** no new
+  table, no migration. A DM-only `npc_inv` channel manages it (inspect /
+  fill / remove / coins_fill / coins_remove). Contents travel exclusively
+  through the requester's own inspect — never in a snapshot, token payload
+  or broadcast — so a living NPC's gear is structurally invisible to
+  players.
+- **Loot gate = server-side NPC hp == 0:** death saves remain PC-only (the
+  model "sits NPCs at 0 HP", D56); no new death state was invented. The
+  gate reads the live token row on every action, so healing above 0
+  re-locks the corpse instantly. PCs (death saves or not) are never loot
+  sources.
+- **Loot authorisation mirrors D82/D92 exactly:** same room, same plane,
+  controlled token adjacent to the body, receiving character is yours —
+  the DM may act for any seated character. `inspect` reveals, `take` and
+  `coins_take` move — each through ONE transaction with ONE op_id claim,
+  so a replay after a reconnect can never duplicate, and two players
+  racing for the last dagger serialise on BEGIN IMMEDIATE with the loser
+  re-checking (and failing) inside the transaction.
+- **New SSOT primitives (`app/inventory.py`):** `container_give` forces
+  container→character — `container_move` decides direction by WHERE THE
+  ITEM IS, so a looter already carrying the same stack would have silently
+  PUT INTO the corpse. `container_remove_coins` lets the DM take coin out
+  of a container without minting a purse.
+- **Token deletion cleans exactly its own container** (`tok:<id>` of that
+  room): no orphan hoard outlives the carcass, world containers in the
+  same table are untouched (D105 addendum).
+- **Side bug found by the tests:** token `x/y` are PIXELS while map-object
+  coordinates are CELLS — the first reach check compared pixels against
+  cells and every looting attempt died at "Walk up to it first". Reach now
+  converts via `map.cell`.
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **749 passed, 1 skipped, 0 failed** (baseline 725 +
+  `tests/test_d105_gear_loot.py` 24, of which 2 are UI source pins).
+  classes.csv exports gain the two columns everywhere (byte-stable).
+- **Honest limits:** NPC death is HP==0 — there is no dying/revive
+  distinction for monsters and no corpse state; looting is standing
+  adjacency, no search time; a class kit is one row (level 1) — multi-
+  class kits were not invented; the prep screen's gear step grants what the
+  pack lists and never lets a player choose outside it; NPC inventories are
+  DM knowledge only — a DM who wants to reveal a corpse's exact gear to the
+  table uses the same loot panel.
+
+## D106 — Secret per-instance curses: metadata inside the item entry, per-viewer disclosure, DM-gated whispers (+ atomic token delete)
+
+- **Why the entry, not a table:** there is no stable GLOBAL item-instance id —
+  `inventory.stack_add` re-issues entry ids on every transfer/chest/loot move
+  (ids are only unique inside one inventory). A side table keyed by instance id
+  would lose the instance at the first transfer. The entry dict inside
+  `characters.items` / `containers.items` IS the instance and rides every
+  existing atomic move (`dict(it)` copy) for free — so `curse`
+  (`{name, desc, whisper, revealed}`) lives there. **No schema change, no
+  migration**: old items simply have no field; the JSON columns are the
+  existing storage of instance truth.
+- **Fail-closed by default:** `gear.clean_items` STRIPS the field unless the
+  caller explicitly passes `keep_curse=True`. Every pre-D106 read path
+  (client PUT sanitising, /state renders, container peeks, legacy tests) is
+  byte-identical and structurally incapable of leaking; the engine's mutation
+  round-trips (`_load`, `container_load`, `room/items.py`, long rest) read
+  trusted so a plain mutation can never wipe the secret. `PUT /characters` is
+  covered both ways: client-authored curses are stripped (cannot forge,
+  cannot flip `revealed`), stored curses are re-attached by entry id (a sheet
+  round-trip cannot wipe them) — `_preserve_curses`.
+- **Instance identity = the curse itself:** a cursed entry never stacks
+  (`_stack_key` → None) and can never be split (refused) — marking a qty>1
+  stack ATOMICALLY carves one qty=1 piece (DM decision confirmed: carve, not
+  reject). Minting a second cursed instance via merge/split/replay is
+  structurally impossible; op_id claims guard the metadata writes like every
+  other mutation.
+- **One disclosure gate:** `gear.curse_view(items, mode)` — `dm` sees
+  everything, `owner` sees ONLY a revealed curse's `name` + `desc` (the
+  whisper text never rides any sheet payload — DM decision confirmed), every
+  other mode strips. Applied at the sheet serializer (`_char_row`), the
+  container replies (`container_peek(curse=is_dm)`), and nothing else; WS
+  broadcasts carry no inventory payload at all (the client refetches its own
+  entitled `/state`). No HTML-hiding anywhere in the path.
+- **Owner change resets knowledge, never touches the curse:** transfer,
+  container put/take and loot clear `revealed` on the MOVING copy (the curse
+  itself survives every move and every reload — it is stored data). A new
+  holder learns nothing from the previous holder's revelation; the DM must
+  reveal again. Internal operations (equip, use, rest, recharge, identify,
+  attune, sheet PUT) do NOT clear it.
+- **Whisper authority is the item, never the client:** `curse{action:whisper}`
+  resolves the recipient from the instance's current holder
+  (`characters.user_id`, room-membership enforced) — recipient fields in the
+  message are ignored by construction; container/NPC-carried items have no
+  player owner and are refused with a clear reason. Delivery is the existing
+  private `chat.post_chat` whisper model (per-socket delivery, recipient-
+  filtered history) — no second chat infrastructure, no broadcast, no
+  automatic whisper on loot/equip/rest (all triggers remain DM decisions).
+  Revealing sends exactly the released name+desc through the same channel.
+- **No curse engine (deliberate):** no random tables, no saves, no damage, no
+  tick timers — D106 stores what the DM authors and delivers it when the DM
+  asks. Mechanics stay in the DM's hands (backlog: pickpocketing, automatic
+  curse triggers, secret saves, curse consequences).
+- **D105 follow-up fixed:** `handle_del_token` now deletes token + `tok:<id>`
+  container + seat-unassign + chronicle line inside ONE `db.tx()`; a failing
+  DELETE (e.g. FOREIGN KEY from a mounted rider) rolls BOTH back — verified
+  with the real FK failure, no monkeypatching.
+- **Consequences:** canonical suite `docker compose run --rm test` →
+  **775 passed, 1 skipped, 0 failed** (baseline 749 +
+  `tests/test_d106_curses.py` 26 behaviour tests, 0 source-only pins).
+- **Honest limits:** instance identity is per-inventory — after a transfer the
+  DM panel must re-read ids (the UI does, via `inv_changed`/`curse_updated`);
+  a curse travels to a NEW holder revealed=False but the DM panel still shows
+  the truth (that is the point); whisper text length is capped (1000 chars,
+  chat-clean); curses on equipment are still passive story facts — nothing
+  fires mechanically.
+
+## D107 — 2024 is THE primary rules baseline; compatibility becomes documentation, prioritised — never silent drift
+
+- **Baseline decision:** DnDTable's binding primary rules foundation is
+  **D&D 5e (2024)**. Everything the engine implements in 2014 semantics is now
+  a DOCUMENTED distance with a backlog id (R-P0.x … R-P2), not an accident —
+  the audit lives at `docs/RULES_AUDIT_2024.md` (matrix with `file:line`
+  evidence, CSV-schema suitability per file, house-rule register H1–H9,
+  prioritised R-list).
+- **D107 stays an audit:** no rule implementations, no schema changes, no new
+  content packs — only the audit document, a §11 in the CSV guide, this
+  decision, the TODO sprint block/backlog and one README sentence. The suite
+  is re-run canonically to prove nothing else moved.
+- **Already-2024 findings are recorded too:** cantrip scaling already runs on
+  TOTAL CHARACTER LEVEL (`abilities.py`, spells.csv `scale_tiers 5/11/17`) and
+  the class-CSV ASI cadence is data-driven (Fighter 1/2/6 would be pure data)
+  — both are kept as-is and pinned by the audit, not "fixed".
+- **Copyright wall stands:** quotable rule text stays SRD 5.1 (CC BY 4.0,
+  ATTRIBUTION.md); 2024 differences are phrased functionally in our own
+  words; adopting ANY 2024 official text requires the human-verified SRD 5.2
+  status step (R-L0) first.
+- **Existing house rules get explicit labels instead of quiet divergence:**
+  the death-save pipeline (D34), NPC-at-0-HP (D56/D105), attunement gate
+  (D105), display-only exhaustion/inspiration/skill-ranks are now the
+  register H1–H9 in the audit; changing any of them is a conscious,
+  R-numbered decision, never a side effect.
+- **Consequences:** canonical suite stays **775 passed, 1 skipped, 0 failed**
+  (docs-only sprint); the R-list is the ordered starting point for whichever
+  rules sprint comes next.
+
+## D108 — The D107 audit is corrected against SRD 5.2.1; the 2024 character origin becomes a real, ledgered operation
+
+- **D107 was wrong where it guessed.** Re-verified against the official SRD
+  5.2.1 PDF (CC BY 4.0, 2025-05-01) and the 2024 rules glossary: there is NO
+  Proficiency-Dice change (the fixed bonus stays — D107's R-P0.1 deleted),
+  the Concentration DC is max(10, half the damage) not "11 + half", Origin
+  feats come from the BACKGROUND (species extras like Human's Versatile are
+  separate traits), 2024 feat categories are Origin/General/Fighting
+  Style/Epic Boon and GENERAL feats MAY raise scores (to 20), death saves
+  remain 3✓/3✗ exactly as `room/death.py` already implements (no Dying
+  condition), short-rest Hit Dice stay player-spent, Weapon Masteries are the
+  SRD list Cleave/Graze/Nick/Push/Sap/Slow/Topple/Vex SEPARATE from the
+  weapon properties, 2024's condition list gained the standalone
+  Incapacitated and never had Dying/Encumbered, Exhaustion caps at level 6
+  with flat penalties, and Passive Perception simply no longer exists — its
+  absence is conformance, not a gap. Every correction is row-marked (K1–K9)
+  in `docs/RULES_AUDIT_2024.md` §1.
+- **R-L0 is closed:** SRD 5.2.1 is officially CC BY 4.0 (source URLs + the
+  verbatim attribution statement are in `ATTRIBUTION.md`). The shipped packs
+  stay project-original with house-rule notes — following 2024 MECHANICS
+  needs no SRD names.
+- **The origin operation lives in the build engine, not beside it.**
+  `charbuild.apply_origin` validates the background against THIS room's
+  content (three ASI abilities + a feat whose category is exactly `origin`),
+  accepts from the client ONLY the distribution (`plus2_plus1` on DIFFERENT
+  allowed abilities, or `three` × +1), REFUSES any score that would rise
+  above 20 (no clamping), and reuses `_apply_feat` (now category-aware).
+  The feat id and the amounts come from the background row — never from the
+  request.
+- **The ledger is the proof; the recompute is the guard.** The grant is
+  recorded as `characters.build.origin` (no heuristic "which score did this
+  come from?" reverse math) and replayed at the FRONT of the existing
+  D96 full recompute — so origin-before-build and build-before-origin both
+  produce one application, double posts/replays/reloads answer `already`,
+  and later level-ups replay it instead of wiping it. hp/max_hp/slots/
+  resources are untouched; starting gear keeps its separate D94/D101 claim
+  path. A sheet PUT cannot forge or erase the ledger (`build` is not a
+  writable sheet column).
+- **Old data never becomes 2024 silently:** `asi_abilities`/`origin_feat`/
+  `feats.category` are additive optional columns; a background row without
+  them reports "not a 2024 background" and refuses. Existing characters are
+  never auto-migrated — the origin is applied only by an explicit, authorised
+  operation. Species `ability_bonuses` stay data-only.
+- **UI stays a client-side convenience:** the "🧬 2024 Origin" prep card
+  shows the server's report (allowed abilities + current values + feat +
+  every refusal), a live preview, and one apply button; every real check is
+  server-side (`GET/POST /api/build/{code}/{cid}/origin`, same
+  owner-or-assigned-DM authorisation as the build API).
+- **Consequences:** `tests/test_d108_origin.py` (22 behaviour tests, no new
+  skips) + the untouched canonical suite; the corrected audit's remaining
+  work is Weapon Mastery (R-P0), Concentration saves / Light bonus attack /
+  origin-feat-choice flows (R-P1) and the display tier (R-P2).
+
+## D109 — The 2024 weapon masteries become a server-authoritative layer: property, entitlement and intent are three separate gates
+
+- **Context:** the D108 audit left R-P0 (weapon masteries) open. The eight
+  SRD 5.2.1 masteries (Cleave, Graze, Nick, Push, Sap, Slow, Topple, Vex) are
+  NOT weapon properties — a property says what a weapon can do, a character
+  feature says what they may do, and combat says whether THIS attack
+  qualifies. Merging those axes would let a magic sword silently hand out
+  class features or let a client opt a plain swing into extra effects.
+- **Three-gate model, validated before any die is touched:** (1) the item's
+  `mastery` prop (new additive `items.mastery` column, whitelist-registered
+  in content.SCHEMAS), (2) the build ledger `characters.build.masteries`
+  (`grants` + `pending` — granted only by applying a level with
+  `mastery_gain`, chosen from the class row's `mastery_options` pool, or by
+  an explicit DM-grant route; NEVER retroactively, same principle as D108's
+  origin), (3) the request's explicit `mastery` intent plus per-mastery
+  legality (mode, hands, initiative anchor, reach, once-per-turn markers
+  `m_cleave`/`m_nick` on the turn object). An invalid intent is refused
+  pre-roll — it never rolls a "free" attack.
+- **No second engine.** Push calls `apply_forced_move` (kind `push`, fixed
+  2 cells = up to 10 ft, obstacles truncate like every forced move); Topple
+  reuses the save/prone path; Sap/Slow/Vex write existing condition markers
+  (`sapped`/`slowed`/`vexed`) carrying a `src` token anchor whose expiry
+  lives ONLY in the existing D80 turn-lifecycle hook (`step_src`);
+  adv+dis stays the engine's confusion rule; `slowed` is a −10 ft hook in
+  the one `_speeds` function (flat, never stacks); a Light weapon may now
+  occupy the off hand (2024 two-weapon precondition for Nick).
+- **Documented deviations:** "when you deal damage" (Slow/Vex) = server-
+  rolled damage > 0 (HP stays manual); marker masteries need active
+  initiative and a listed token (src expiry is turn-hook-anchored); spell
+  attacks consume markers only with a token reference; Cleave's second hit
+  drops the ability modifier (unless negative) but keeps magic flat
+  bonuses and extra dice.
+- **Audit fixes folded in:** `apply_origin` and the persistent block of
+  `apply()` each run inside ONE `db.tx()` (BEGIN IMMEDIATE) — check-then-
+  write windows closed; the reach/range maths now measures authoritative
+  footprint CELLS ×5 ft instead of raw pixel deltas (latent D93 bug that
+  made any spaced target "out of reach").
+- **Consequences:** `tests/test_d109_mastery.py` (29 behaviour tests, no new
+  skips; a deterministic chat-sentinel drain helper replaces flaky event
+  loops), `Dockerfile` test stage now copies `scripts/` so the generator's
+  byte-idempotency test guards the shipped pack in the canonical image too.
+  Canonical: 826 passed, 1 skipped, 0 failed.
+
+## D110 — The "back-backlog" rule is retired for DnDTable; the engine's remaining wish-list becomes planned residual work, and one continuous integration chain guards the shipped paths
+
+- **Context:** Sprints 34–38 closed the rules gaps (D106–D109), but the
+  question "what is actually still missing to call this feature-complete?"
+  was only answerable from TODO prose — not from code evidence. The TODO
+  section "bewusst nicht gebaut" (deliberately-unbuilt timebox artefacts)
+  carried a "back-log it" framing imported from a different project.
+- **Decision:** (1) The framing is retired: everything still desired for
+  DnDTable is planned residual work, classified and sequenced in
+  `docs/FEATURE_COMPLETE_GAPS.md` (S40 genericity → S41 opposed/sleight →
+  S42 automatic magic → S43 combat R-P1 → S44 data projection → S45+
+  CSV content + operations). (2) The real state is now documented from
+  file:line evidence in `docs/FEATURE_MATRIX.md` and
+  `docs/CSV_ONLY_READINESS.md` — column ≠ mechanic is a named, measured
+  property (species/creatures are data-only; the executor cannot express
+  movement/check/duration-with-save effects; the condition catalogue is
+  hardcoded). (3) D110 itself ships no new mechanic: it integrates.
+- **The chain:** `tests/test_d110_e2e.py` drives one continuous A→F run
+  over the REAL REST/WS handlers — pack import → 2024 characters (origin,
+  class apply, mastery pick, kit-choice starting gear) → move/wall/door/
+  fog/view-as/floors → initiative with Cleave/Topple/Graze/Vex and real
+  condition clocks → down → adjacency-gated atomic loot → DM curse set/
+  reveal/whisper with owner-only delivery → reconnect snapshot equality +
+  replay idempotency. It is the machine-checkable twin of
+  `docs/SATURDAY_ACCEPTANCE.md`.
+- **Two P1 integration bugs found and fixed by the chain:**
+  (a) `room/dice.py` spent the turn's action (and the Nick marker) BEFORE
+  validating target visibility/reach/push-size/cleave-pair — every refused
+  attack burned a slot; slot accounting now runs after all pre-roll
+  validation. (b) `room/inv.py` let the curse action `whisper` fall into
+  the reveal/conceal branch, executing `curse_reveal(False)` — a whisper
+  silently UN-revealed a disclosed curse (latent since D106; the suite
+  never combined reveal→whisper). `whisper` now performs no mutation.
+- **Consequences:** the canonical suite grows the e2e file (5 tests, no
+  skips); D106/d109/combat/inventory neighbours re-verified green after
+  both fixes; the browser acceptance (Sat 2026-10-17) has a written script.
+
+## D111 — Effects become a validated, versioned data grammar executed by the existing engines, and the condition catalogue becomes CSV data with behaviour hooks
+
+- **Context:** D110 measured the gap (`docs/CSV_ONLY_READINESS.md`):
+  columns existed without mechanics — items could only `heal`, spells had no
+  movement/check/resource effects, the condition catalogue was 18 hardcoded
+  keys, and S40 of `docs/FEATURE_COMPLETE_GAPS.md` defined the generic base
+  every later sprint (S41–S44) builds on.
+- **Decision:** (1) One versioned cell grammar (`app/effectops.py`, `v:1`):
+  ops `damage/heal/temp_hp/condition/condition_remove/break_concentration/
+  save/check/forced_move/resource`, canonical JSON (byte-stable canon, strict
+  parse, hard node/op/cell/depth/dc/cell-count/cost limits), unknown op or
+  field REFUSES the row at import. (2) Cells run through the EXISTING
+  engines only — health/damage, movement's `apply_forced_move`, saves/checks
+  over the normal dice channel, conditions through the D80 clocks, resources
+  through `gear`/`inventory`; `abilities.execute()` runs the cell in its own
+  shell. No second engine. (3) Conditions gained a DEFINITION layer:
+  `conditions.csv` (hook flags `blocks_movement/speed_delta/my_*_dis/
+  attacks_against_me_*/auto_fail_saves` read by the existing movement/dice/
+  ability paths + `on_start/on_round/on_expire` effect hooks fired by the
+  turn lifecycle); the SRD keys became `BUILTIN_HOOKS` data a CSV row can
+  override. (4) Triggers `use/equip/unequip/on_hit/on_damaged` fire inline at
+  the authoritative handlers, claim-guarded (one firing per token+trigger+
+  carrier+round/op, no trigger chains, ≤8 carriers), with all-or-nothing
+  resource preflight inside the claim transaction — a refused action never
+  pays, a replayed one never re-fires. (5) Feats with a cell surface as
+  castable `feat_<id>` abilities (charbuild entitlement). Documented v1
+  non-goals (source-keyed hooks, reactions, auras, summons, components, the
+  concentration SAVE — S42) live in `docs/EFFECT_GRAMMAR.md`; 2024
+  simplifications (blanket disadvantage for frightened, blinded checks-dis,
+  DM-prone, grappled/restrained now blocking movement outright) are named
+  there too.
+- **One latent P1 infrastructure bug found by the new tests:**
+  `room/net.py` keyed cross-loop socket delivery by `id(ws)` — CPython reuses
+  ids, so a fresh socket could inherit a STOPPED owner loop and every send to
+  it awaited a future that could never resolve (hang). The owning loop now
+  lives on the socket (`ws._iio_loop`), stopped loops are refused, and
+  cross-loop sends carry a timeout. (D111's third ws session in one test
+  exposed it; production uvicorn had only ever had one loop.)
+- **Consequences:** S40 closed (`docs/FEATURE_COMPLETE_GAPS.md`);
+  `docs/EFFECT_GRAMMAR.md` is the author-facing reference and
+  `docs/CSV_ONLY_READINESS.md` re-scored per surface; the demo pack gained
+   `conditions.csv` + trigger/effect demo rows (generator byte-idempotent);
+   `tests/test_d111_effects.py` (21 tests, real WS paths, no source pins)
+   green; canonical suite grows accordingly.
+
+## D112 — Contested actions become ONE reusable primitive the 2024 special-melee and pickpocket rules run on; no second rules engine
+
+- **Context:** D111 gave effects a data grammar but left every *contested*
+  action (grapple, shove, escape, a secret steal) without a shared way to ask
+  "check vs check", "check → DC → save" or "check vs a fixed DC". S41 of
+  `docs/FEATURE_COMPLETE_GAPS.md` named exactly this: a generic opposed/DC
+  primitive plus the 2024 special-melee family and pickpocket, built on the
+  existing dice/conditions/inventory engines — explicitly NOT a parallel rules
+  engine, and 2024 (D107/D108) is the baseline, not 2014.
+- **Decision:** (1) `app/room/opposed.py` is a thin, reusable helper over the
+  EXISTING dice channel (`do_roll`/`_combine_adv`) and `gear` bonus sources —
+  `participant`, `check_roll`, `save_roll`, `bonus_roll`, `melee_attack_number`,
+  `better_save`, `opposed_wins(att, def, tie=)`, `beats_dc(total, dc)`, and a
+  `Tie` exception for a caller-deferred tie. It ships NO rules of its own; the
+  three shapes are just composition. The default tie rule is
+  `tie="defender"` (a d20 tie goes to the defender/roller-must-meet-DC);
+  `tie="attacker"` flips it; `tie="dm"` raises `Tie` so the caller defers to a
+  DM — never a silent coin flip. A closed-world *effect-grammar* op that would
+  let CSV data express an opposed check is deferred to S42; the interface is
+  documented in `docs/EFFECT_GRAMMAR.md` so S42 can wrap this helper without a
+  second implementation. (2) `app/room/grapple.py`: the **2024** special-melee
+  family, not the 2014 Athletics-vs-Athletics contest. Grapple = the attacker's
+  special-melee number — `melee_attack_number` = max(unarmed attack bonus, an
+  Athletics check) — becomes a DC the target answers with a **save** (`save_roll`),
+  by default the target's HIGHER of Str/Dex (`better_save`), DM-overridable
+  (`save` field); Shove (prone / 5-ft push) resolves the same check, push via
+  the existing `moveforced.apply_forced_move`. State is additive only: the
+  grappled `conds` entry carries the grappler `src` and a new optional `dc`
+  (int 1–30, `_clean_dc`) so escape is "Athletics or Acrobatics vs the stored
+  DC". The grapple ends when the target leaves the grappler's reach —
+  `end_grapples_out_of_reach` is wired into the three authoritative movement
+  ends (forced move incl. a shove, a normal walk, a DM teleport) — or when the
+  grappler is gone/incapacitated (escape then auto-succeeds). Reach and
+  adjacency use the SAME closest-footprint-corner geometry (Chebyshev ≤ 1) the
+  dice module already uses for reach; the size gate is "no more than one size
+  larger" via `npc.SIZES` index. (3) `app/room/pickpocket.py`: BOTH 2024
+  adjudication models ship. Model A `pickpocket` is the DM-mediated attempt — a
+  hidden Sleight-of-Hand check reported ONLY to the DM; Model B
+  `pickpocket_take` lets a thief choose one concrete DM-authorised item and
+  auto-transfer it on success. Because 2024 has NO passive perception
+  (`RULES_AUDIT_2024` A7), "noticed" is EITHER a DM-set fixed `notice_dc`
+  (`beats_dc`) OR a real Perception check the engine rolls and resolves with
+  `opposed_wins(tie="defender")` — the engine never forces a mode. Discovery is
+  reported to the DM *separately* from theft success. Success is one atomic
+  `inventory.transfer` (PC victim) or `inventory.container_give` (NPC
+  `tok:<id>`), with `_ownership_moves` preserving curse metadata and resetting
+  `revealed`. `handle_pickable` (DM only) toggles the new `pick` flag on a
+  character item (`set_pick_char`) or an NPC container (`container_set_pick`).
+  (4) Leak- and replay-guards are load-bearing: ONLY DM-flagged `pick` items are
+  stealable, and an unflagged/unknown item answers exactly like a failed check
+  (`_pick_entry` returns None) so the endpoint is never an inventory oracle;
+  the op-id guard (`inventory._claim`) is taken BEFORE the action slot is spent
+  and before any roll, so a replay spends and rolls nothing; every precondition
+  (room, floor, reach, visibility, authz, size, target-alive) is validated
+  before anything is spent. `pick` never stacks (`_stack_key` returns None) and
+  rides the `clean_items` whitelist; a fresh `VTT_DATA_DIR` and a replayed op
+  both stay idempotent. (5) UI (Phase 5) is actor+target only — the sheet names
+  who acts on whom and a fresh `op_id`; the whole resolution is server-side.
+  The DM authorises `pick` items from the NPC chest and the character sheet
+  (`🤝 steal`). No new reply kinds were needed: grapple/shove/escape reuse the
+  `dice`+`cond`+`initiative` kinds, pickpocket reuses `whisper`+`dice`+
+  `inv_changed`, `pickable` reuses `inv_contents`/`inv_changed` — `40_ws.js`
+  was untouched. `55_diorama.js` was not touched.
+- **Consequences:** S41 closed (`docs/FEATURE_COMPLETE_GAPS.md`);
+  `docs/FEATURE_MATRIX.md`, `docs/RULES_AUDIT_2024.md` (grapple/shove/escape +
+  pickpocket now implemented, 2024-correct) and `docs/CSV_ONLY_READINESS.md`
+  re-scored per surface; the opposed interface is documented as the S42
+  wrapping point in `docs/EFFECT_GRAMMAR.md`; `AGENT_GUIDE.md` gained the three
+  modules + six WS message types + test map; `MANUAL_BROWSER_CHECKLIST.md`
+  gained the D112 walkthrough; `tests/test_d112_contested.py` (31 tests, real
+  WS paths — save/tie unit, full grapple/shove/escape, both pickpocket models,
+  leak, replay, concurrency, cursed transfer, cross-room, cross-plane, action
+  economy) green; canonical suite: 883 passed, 1 skipped, 0 failed.
+
+## D113 — Konzentration, automatische Flüche und die Opposed-Wirkgrammatik werden 2024-konform datengetrieben (Sprint 42)
+
+- **Kontext:** Sprint 42 setzt die in D111 (Wirkgrammatik) und D112
+  (Opposed-Primitive) gelegten Grundlagen in drei echte 2024-Regeloberflächen um,
+  ohne irgendwo eine zweite Engine zu bauen: die 2024-Konzentration (Phase 2),
+  automatische, DM-autorierte Flüche (Phase 3) und ein `opposed`-Op der
+  Wirkgrammatik (Phase 4). Alle drei laufen ausschließlich über die vorhandenen
+  authoritativen Operationen (`room.health`, `app.conditions`, `room.opposed`,
+  `room.moveforced`, das Ressourcen-Ledger) und die D111-Triggerseams.
+  UI-Texte bleiben Englisch, diese Dokumentation ist Deutsch. `55_diorama.js`
+  wurde nicht angefasst; keine Git-/`.git`-Zugriffe.
+
+- **Entscheidung Phase 2 (Konzentration):** Konzentration behält ihre einzige
+  Darstellung — das `concentrating`-Flag in `conds` (D59). Neu ist ein
+  additives Link-Feld `conc` = Token-ID des Konzentrierenden an einer
+  Condition-Instanz: eine Condition „gehört" zu einer Konzentration und endet
+  raumweit mit ihr. Der Lebenszyklus liegt in `app/room/concentration.py`
+  (`end_previous`, `break_link`, `on_damage`, `enforce_after_condition`). Der
+  Wurf läuft über `room.opposed.save_roll` (derselbe d20-Kanal inkl.
+  `auto_fail_saves`/`my_saves_dis`), kein zweiter Würfelweg. Der Schadens-DC ist
+  `max(10, floor(HP_verlust / 2))` OHNE Cap, wobei HP_verlust die TATSÄCHLICH
+  verlorenen HP nach Resistenz UND Temp-HP-Absorption sind — `change_hp` übergibt
+  genau diesen Wert. Runtergehen auf 0 HP oder ein
+  Dekondensierungs-/Inkapazitätszustand bricht SOFORT ohne Wurf. Beim Zaubern
+  einer neuen Konzentration wird die alte BEVOR die neuen Effekte landen beendet
+  (`end_previous`), damit die alten Link-Effekte weg sind und die neuen bestehen
+  bleiben. Ein `break_concentration`-Op und ein inkapazitätsauslösende Condition
+  löschen zusätzlich alle `conc`-verlinkten Conditions des Wirkenden.
+
+- **Entscheidung Phase 3 (automatische Flüche):** `active` und `revealed` sind
+  vollständig unabhängige Zustände. Der DM kann mit `activate`/`deactivate`
+  schalten; Enthüllen/Verbergen/Whisper ändern die Aktivierung niemals. Die
+  Schemaerweiterung ist strikt rückwärtskompatibel: `clean_curse` speichert
+  `trigger`/`effects`/`active` NUR wenn gesetzt — ein alter Fluch round-trippt
+  byte-identisch und ist per Default inaktiv; keine Schemaänderung kann einen
+  alten Fluch versehentlich einschalten. Bewaffnet wird über `arm`
+  (`trigger` + Wirk-Cell), der Cell wird mit derselben `effectops`-Grammatik
+  validiert (keine zweite Fluch-/Effektengine). Ausgelöst wird nur an echten
+  Mutationen (`equip`/`unequip`/`use`/`on_hit`/`on_damaged`/`on_transfer`) und
+  nur wenn `active` UND `trigger` passen — ein bloßes Lesen/Anzeigen/Synchronisieren
+  von Inventar feuert nichts. Besitzerwechsel feuern `on_transfer` über
+  `_item_transfer_effects`, geclaimed an der Transfer-`op_id` (Replay/Race feuert
+  nicht doppelt), atomar über das bestehende `inventory`-Kommando.
+  Fluch-Herkunft wird nie an Spieler verraten: curse-origin-Fragmente gehen über
+  `net.dm_whisper` nur an den DM; die Owner-Ansicht bleibt `curse_view`-streng
+  (Name/Beschreibung nur wenn enthüllt; `active`/`trigger`/`effects` nie).
+  D111-Budget und Tiefen-Rekursionsschutz werden wiederverwendet. 2024-getreu
+  endet ein Fluch NICHT automatisch durch Unequip/Besitzerwechsel — Dauer,
+  Bindung und Entfernung sind ausdrücklich zu definieren; nichts entfernt einen
+  Fluch implizit.
+
+- **Entscheidung Phase 4 (Opposed-Op, Grammatik v2):** Die Grammatik akzeptiert
+  `v1` UND `v2` (`V=2`, `V_MIN..V_MAX=1..2`); alles andere (v0/v3) wird
+  weiterhin abgelehnt, unbekannte Ops/Felder bleiben closed-world. v2 fügt nur
+  den `opposed`-Op hinzu (unter v1 ausdrücklich verboten): ein Attributswurf des
+  Subjekts gegen denselben Wurf des Ziels, entschieden von `room.opposed`
+  (`check_roll` + `opposed_wins`, `tie` = defender/attacker/dm) — keine zweite
+  Opposed-Engine. `canon()` erhält die Version des Cells, sodass ein v1-Cell
+  byte-identisch bleibt und v2-Nahme keine gespeicherten Inhalte umschreibt.
+
+- **Konsequenzen:** Neue additive, rückwärtskompatible Felder ohne Migration
+  (`conc` an Conditions, `trigger`/`effects`/`active` an Curses, `on_transfer`
+  als Trigger). `tests/test_d113_concentration.py` (9),
+  `tests/test_d113_curses.py` (9) und `tests/test_d113_opposed.py` (6) decken
+  die Flächen über echte WS-Pfade ab; eine D111-Assertion (v2 war „falsche
+  Version") wurde auf v3 umgestellt, weil v2 jetzt gültig ist. Kanonische
+  Suite (Python 3.12): 917 passed, 1 skipped, 0 failed (inkl. 10 Fallen-Tests,
+  Phase 5). Erledigt in Sprint 42: datengetriebene Fallen (Phase 5) und die
+  Curse-/Fallen-Autoren-UI + diese Doku (Phase 6; Browser-Durchlauf bleibt
+  menschliche Abnahme). Offen bleibt nur vertikale 10-ft-Geometrie (Phase 7).
+
+- **Entscheidung Phase 5 (datengetriebene Fallen):** Eine Falle bleibt eine
+  MAP-ENTITÄT (kein `traps.csv`), nur ihre Felder werden erweiterbar. Neu und
+  optional (Omit-when-Default → alte Fallen round-trippen byte-identisch):
+  `effects` (Wirk-Cell derselben Grammatik), `trigger` (heute nur `step`
+  verdrahtet), `search_dc`, `disarm_dc`, `repeat`. Eine alte Falle (nur
+  `dc`+`dmg`) behält den unveränderten Einweg-Pfad. Die ganze Auslösung läuft
+  über `effectops.run_ops` (Save/Check/Schaden/Condition/Forced-Move) — der
+  `random.randint`-Wurf ist raus, kein zweiter Würfel-/Save-Kern. Entdecken ist
+  ein Weisheit-(Wahrnehmung)-Check gegen `search_dc`, Entschärfen ein
+  DEX-Geschicklichkeitswurf gegen `disarm_dc` über `room.opposed`
+  (`participant`/`check_roll`/`beats_dc`) — keine neue Werkzeug-Proficiency-Engine
+  (DM gewährt ggf. Vorteil). Neue WS-Nachricht `trap` (`search`/`disarm`/DM
+  `trigger`), Actor benennt ein FELD, nie eine Fallen-ID. Leak-Schutz: Die
+  Antwort auf „leeres Feld durchsucht" und „versteckte Falle, Wurf verpatzt" ist
+  byte-identisch — der Endpunkt ist kein Fallen-Oracle; `discovered` wird nur bei
+  Erfolg gesetzt und dann per `map_changed` enthüllt. `disarmed` ist ein
+  Runtime-Flag, das ein veraltetes Editor-Snapshot nicht re-armed (dispatch-
+  Merge), und entschärfte Fallen federn auf `triggered`.
+
+- **Entscheidung Phase 7 (vertikale Geometrie, 10 ft je Stockwerk):** Eine
+  einzige kanonische vertikale Skala in `app/vertical.py`: EINE Höhen-Einheit der
+  `elev`-Ebene UND EINE deklarierte Ebenen-Stufe entsprechen JEDEM exakt 10 ft
+  (`ELEV_FT=10`, `FLOOR_FT=10`; `elev_to_ft`/`floor_to_ft`/`absolute_ft`).
+  Bewusst NUR die Skala/Buchführung — KEIN Höhenkampf: Sturzschaden,
+  Höhen-Deckung und Flug/Schwimm/Kletter-Kosten bleiben die bewusst
+  ausgelagerte Engine-Kante aus D70/D83. Pfadfindung gateert Schritte weiterhin
+  an |Δz| ≤ 1 in EINHEITEN (unverändert); die Fuß-Angabe ist, was eine Einheit
+  bedeutet, keine zweite Geometrie. Die Ebenen (`floors.py`) sind eine
+  unsortierte, voneinander unabhängige Namensliste (Kollision/Sicht getrennt,
+  D86/D88) — der deklarierten Reihenfolge wird eine Höhen-Ordnung gegeben
+  (`floors.level`: Primär=0, jede weitere Ebene +1 Stufe = +10 ft;
+  `absolute_height_ft` = Ebenen-Offset + Boden-Elevation×10 ft), rein
+  geometrisch/reporting, ohne die Ebenen zu einem Kollisions-Stack zu machen.
+  Die `elev`-Klammer bleibt bei -6..6 EINHEITEN. `55_diorama.js` bleibt tabu.
+
+- **Konsequenzen Phase 7:** `app/vertical.py` (Skala, importfrei), additive
+  Ebenen-Helfer in `app/floors.py` (kein Schema/Migration), Doku-Hinweis an der
+  `elev`-Klammer. `tests/test_d113_vertical.py` (4) pins die Skala, den Ebenen-
+  Stack (inkl. Reihenfolge nach `rename`) und dass die Einheiten-Klammer
+  unverändert ist. Kanonische Suite: **921 passed, 1 skipped, 0 failed**
+  (917 + 4). Sprint 42 (D113) ist damit in allen Phasen 2–7 erledigt; offen
+   bleibt nur der menschliche Browser-Durchlauf der Phase-6-Oberflächen.
+
+## D114 — Vertikale Token-Geometrie wird über Körper-Ebenen und Öffnungen entschieden; Sicht und physische Reichweite bleiben bewusst verschieden (Sprint 43)
+
+- **Problem und Abgrenzung:** D86/D88/D102 behandelten Ebenen korrekt als
+  voneinander unabhängige Besetzungs-/Sichtebenen. D113 führte nur eine
+  Höhen-Skala ein. D114 macht Token zu echten vertikalen Volumina und Ebenen zu
+  gestapelten Räumen, ohne eine zweite LOS-, Footprint-, Würfel- oder
+  Bewegungsmaschine zu erzeugen. Die Entscheidung gilt für die Backend-Phasen
+  0–5; Flug/echte vertikale Bewegung und UI bleiben ausdrücklich offen.
+
+- **Token-Volumen:** `tokens.height_ft` ist die physische vertikale Ausdehnung,
+  `tokens.elevation_ft` die Unterkante über der STANDFLÄCHE. Beide sind
+  additiv-migriert; alte Tokens bleiben mit `NULL`/`0` gültig. Größenkategorien
+  liefern nur dokumentierte Hausregel-Defaults (Tiny/Small/Medium 5 ft, Large
+  10 ft, Huge 15 ft, Gargantuan 20 ft) und sind ausdrücklich keine Obergrenze.
+  Technisches Validationsband: Höhe/Elevation jeweils 0..200 ft, negative
+  Elevation wird auf 0 gekürzt. `app/vertical.py` bleibt die einzige Skala;
+  `floors.py` berechnet daraus absolute Fuß- und gespannte Ebenen.
+
+- **Öffnungen:** Neue pro-Ebene/pro-Zelle-Karte `openv` in `mapmodel`.
+  `openv=1` bedeutet eine Deckenöffnung über dieser Zelle zur einen Level
+  höher deklarierten Ebene. Fehlend, ungültig, falsche Länge oder `0` bedeutet
+  durchgehend feste Decke — Fail-closed. `void`/Treppen werden nicht zweckentfremdet.
+  Die Spieleransicht maskiert unerforschte `openv`-Zellen auf `0`; ein Opening
+  darf nie durch Fog als Weltwahrheit durchsickern.
+
+- **Einheitliche Schlussstelle:** `app/room/vertical3d.py` ist die einzige
+  Etage-übergreifende Geometrie-Entscheidung. `body_planes()` liefert nur die
+  Ebenen, in denen der Tokenkörper physisch ist; eine höhere Ebene wird nur
+  aufgenommen, wenn die Höhe sie erreicht, das GESAMTE Footprint durch jede
+  zwischenliegende Öffnung geht und die Zielzellen nutzbarer Boden sind.
+  Ein einzelnes Loch lässt ein breites Geschöpf nicht durch.
+  `observable_cells()` trennt bewusst zwei Phänomene: Körperpräsenz oder
+  gleiche Ebene zeigen das volle Footprint; sonst nur ein senkrechter Shaft.
+  Nicht verbundene Ebenen liefern leer. Damit bleibt das D86/D88 „elsewhere“
+  ohne Öffnungen byte-identisch.
+
+- **Sicht ist nicht Reichweite:** Für Nebel und Token-Delivery zählen
+  `body_planes` als echtes Stehen (`_viewer_planes`, `viewer_source_cells`);
+  ein aufragender Körper ist Licht-/Sichtquelle auf der oberen Ebene. Für
+  Angriffe/Anvisieren nutzt `room.dice` `observable_cells`, weil ein Schacht
+  Sicht gewähren kann. Melee-/Grapple-Nachbarschaft und Interaktionen nutzen
+  hingegen nur `body_cells`: ein offener Schacht allein erlaubt kein Greifen,
+  Drängen oder physisches Hantieren. Gleiche Ebene bleibt rein 2D; die
+  vertikale Reichweiten-Zugabe entsteht erst bei einem Schacht.
+
+- **Live-Sicherheit:** Token-Delivery, Präsenz-/Condition-Ereignisse,
+  `/state`-Snapshot, `plane_viewers` und Interaktionen verwenden dieselbe
+  Körperpräsenz-Entscheidung. `token_height` und `map_edit` lösen
+  `reevaluate_visibility` aus, damit eine wachsende Höhe oder neu gesetztes
+  `openv` Tokens sofort korrekt verteilt/entfernt statt erst beim nächsten Zug.
+  Unregistrierte/unbekannte Floor-Namen verbinden nichts (fail-closed). Ein
+  Push/Shove über Ebenen wird abgelehnt; nur Angriffe und Grapple können eine
+  Körperpräsenz im gemeinsamen Ebenenanteil nutzen.
+
+- **Bewusste Lücken:** Echtes Fliegen, vertikale Bewegungs-/Flugbudgets und die
+  Client-Darstellung mehrerer Ebenenanteile sind Phase 6/7 und NICHT
+  Feature-complete. Die D113-Werkzeuglücke bleibt bestehen: Entschärfen ist ein
+  echter DEX-Check, aber Thieves'-Tools-Proficiency ist weiterhin nicht
+  modelliert. UI-Beschriftungen sagen daher „Dexterity check“, nicht „Thieves'
+  tools“.
+
+- **Konsequenzen:** `authz.TOKEN_COLS` trägt `height_ft`/`elevation_ft`;
+  `net.plane_viewers`, `room.visibility`, `room.rooms`, `room.dice`,
+  `room.grapple` und `room.interact` fragen die zentrale
+  `vertical3d`-Schlussstelle statt Home-Floor-Pauschalen. Neue Integrationstests:
+  `tests/test_d114_vertical.py` (5), `tests/test_d114_openings.py` (4) und
+  `tests/test_d114_phase5_integration.py` (5). Kanonischer Stand nach Phase 5:
+  **937 passed, 1 skipped, 0 failed**.
+
+### D114-Ergänzung — vertikaler Flug, Volumen-Kollision und UI sind umgesetzt
+
+- **Vertikale Bewegung:** `app/path.py::find_path_3d` sucht über
+  `(floor, origin)`-Zuständen. Horizontale Schritte bleiben ausschließlich in
+  der bestehenden `path`/`step_legal`-Maschine; ein senkrechter Schritt prüft
+  genau eine Levelstufe, eine vollständige Footprint-Öffnung und offenes
+  Zielvolumen in `vertical3d`. `movecost.vertical_cost()` rechnet einen vollen
+  Ebenenwechsel als `10 ft = 2` kanonische Bewegungsfelder — keine zweite
+  Wirtschaft.
+
+- **Flug und `void`:** `void` ist freies Flugvolumen, aber kein begehbarer
+  Boden. `mode="fly"` darf `void` betreten und ebeneübergreifend fliegen;
+  `mode="walk"` bleibt auf Standflächen und darf eine offene Vertikalachse nicht
+  benutzen. Die Ganzzervolumen-Kollision nutzt `volume_final_valid()` mit den
+  bestehenden Owner-/Reiter-Ausnahmen, ohne eine zweite Kollisionsregel.
+
+- **Explizite Absicht:** Ein `move` wechselt die Ebene nur, wenn das Wire-Feld
+  `floor` vorhanden und anders als die aktuelle Ebene ist — oder wenn ein
+  Pfadpunkt ausdrücklich ein anderes `floor` trägt. Ein fehlendes Feld ist
+  weiterhin die aktuelle Ebene und darf nicht als 3D-Wunsch missverstanden
+  werden. `walk3d()` validiert jeden Schritt erneut, sendet `token_floor`,
+  trägt Budget ab und führt Reiter mit.
+
+- **UI/Canvas:** Token-Sheets setzen `height_ft`/`elevation_ft`; ein
+  vertikaler Flugknopf sendet eine explizite Etagenabsicht, ohne die Route im
+  Client zu erraten. Der DM-Editor besitzt einen `openv`-Pinsel, `openv` wird
+  bei Resize mitgeführt und erscheint als `↕`-Hinweis. Tokens zeigen Elevation
+  mit `↑<ft>` und eine gesetzte Körperhöhe mit `↕<ft>`.
+
+- **Keine zweite Sichtautorität:** Für Spieler und DM-Charaktervorschau rendert
+  der Canvas genau die servergefilterten Rows. Das DM-Browsing bleibt auf
+  `state.viewFloor` beschränkt. `viewerPlane()` stellt die Browsing-Ebene bereit;
+  `onPlane()` wendet sie nur für DM-Browsing an. Ein Client entscheidet nicht
+  eigenständig, wer durch einen Schacht sichtbar sein könnte.
+
+- **Bewusst offen:** Diagonale + vertikale Kombination, Springen/Fallen,
+  vertikales Klettern/Schwimmen, interaktive 3D-Pfadvorschau, automatische
+  Terrain-Erkennung und echte Browser-/Playwright-Akzeptanz sind nicht Teil von
+  D114. Thieves'-Tools-Proficiency bleibt weiterhin die bekannte D113-Lücke.
+
+- **Konsequenzen Phase 6–8:** Neue Phase-6-Tests in
+  `tests/test_d114_phase6_vertical_movement.py` (7) und Phase-8-Integrationstests
+  in `tests/test_d114_phase8_integration.py` (4). Kanonischer Stand nach
+  Sprint-43-Abschluss: **948 passed, 1 skipped, 0 failed**.
+
+## D115 — Nachtschicht 2026-10-16: bereits vorhandene Gear-/Build-Spalten erreichen die bestehenden Pfade, ohne neue Regelmaschinen
+
+- **Ausgangslage:** D114 ließ eine dokumentierte, schmale Lücke: mehrere
+  CSV-Felder (`speed_bonus_ft`, `darkvision_ft`, `backgrounds.skill_prof`,
+  `feats.spells_grant`, Klassen-/Spezies-/Subclass-Felder) waren bereits
+  validiert importiert, aber teilweise ohne Konsumenten oder nur als Bogenanzeige.
+  Die Nachtschicht entschied nicht für neue Mechanik, sondern dafür, die
+  vorhandenen Kanäle tatsächlich bis zu ihren Konsumenten zu führen.
+
+- **Ausrüstung:** `movement._speeds` liest den vollständigen PC-Sheet durch
+  `gear.as_sheet` und damit `gear.clean_speeds`, statt isoliert nur die
+  `speed`-Spalte. `visibility._token_darkvision_cells` übernimmt zusätzlich
+  `gear.effective_gear()["darkvision_ft"]`; Zellenradius bleibt 5 ft pro
+  Rasterschritt. Der Tokenwert bleibt DM-/Operator-Authoring, Ausrüstung hebt
+  ihn nur auf, ohne eine zweite Sichtmaschine. `hit_dice_bonus` wird über den
+  einen Gear-SSOT in den Short-Rest-Weg gehoben, und `hands:2` nutzt
+  ausschließlich die bestehende Zwei-Hände-Regel.
+
+- **Build:** `backgrounds.skill_prof` wird in `_replay_origin` auf dem
+  bestehenden Origin-/Chronology-Pfad angewandt. `feats.spells_grant` nutzt
+  dieselbe Grant-Achse wie Subklassen und fließt in den bestehenden
+  `spell_state`/`characters.spells`-Pfad; auch außerhalb des Klassenpools
+  gültige Raum-Zauber können projiziert werden. `classes.expertise` wird
+  optional auf der bereits vorhandenen Skill-Achse angewandt (0/1/2): Die
+  Auswahl bleibt hinter der Zeilenkapazität und einer bereits bestehenden
+  Profizienz zurück, wenn die Klasse keine Expertise zulässt.
+
+- **Provenienz statt zweiter Regelkern:** Background-Tools/Sprachen/Features,
+  `classes.weapon_prof`/`armor_prof`, Subclass-Features und die Species-Zeile
+  werden als read-only Ledger-/UI-Projektion erfasst. Sie liefern nachvollziehbare
+  Sheet-Informationen, ohne Größentypen, Bewegung oder Waffen-/Rüstungsadjudikation
+  aus dem bestehenden Fußabdruck-/Item-/Executor-Kern wegzunehmen.
+
+- **Bewusste Grenzen:** `feats.requires` bleibt Inhaltstext; eine echte Prüfung
+  würde ein 2024-Fertigkeitsrangmodell erfordern, das die Engine nicht besitzt.
+  Species-, Klassen- und Subclass-Texte steuern weiterhin nicht automatisch
+  Bewegung, Footprint oder Kampfentscheidungen. `items.duration` und
+  Zauber-Dauerablauf bleiben offene, separat dokumentierte Punkte.
+
+- **Konsequenzen:** Neue Tests in
+  `tests/test_engine_gear_grants.py` (11) pinen Ausrüstungs-Speed, Ausrüstungs-
+  Dunkelsicht, Hit-Dice-Bonus, Hand-Count, Background-Fertigkeiten,
+  Background-Feature/Languages, Feat-Spell-Grant, optionale Klassen-Expertise,
+  Klassen-/Subclass-/Species-Projektion. Kanonischer Stand nach der
+  Nachtschicht: **959 passed, 1 skipped, 0 failed**.
+
+## D116 — AP-001: Der Reichweiten-/Reach-Härtungstest wird nicht reaktiviert, sondern seine eigentliche Testfehlerquelle entfernt
+
+- **Ausgangslage:** Der einzige dauerhafte Kanon-Skip markierte den
+  Live-Härtungstest `test_out_of_range_and_cross_reach_refused` als „flaky in
+  the test harness“. Die Server-Engine hatte die Reichweiten- und Reach-Gates
+  bereits, aber ohne Live-Test blieb die Behauptung unbewiesen.
+
+- **Diagnose:** Kein Race und keine Engine-Lücke: `item_defs` werden im
+  `/state`-Payload alphabetisch sortiert. Der Test griff nach dem Anlegen
+  zweier Definitionen positionell auf `[0]` und `[-1]` zu. Nach der zweiten
+  Anlage war `Dagger` alphabetisch vor `Dart`, sodass der Test versehentlich
+  die erste Waffe erneut grantete. Eine zusätzliche Assert-Drift erwartete die
+  ehemalige Textur „out of range“, während die Engine heute „maximum range“
+  zurückgibt.
+
+- **Entscheidung:** Der Test wird durch eindeutige Namensauflösung determinisch
+  gemacht und prüft die aktuell autoritativen Fehlerformulierungen exakt. Der
+  Skip wird entfernt, statt ihn mit einem Retry zuzukleistern.
+
+- **Konsequenzen:** Die Kanonsuite läuft erstmals wieder vollständig ohne
+  dauerhaften Skip: **960 passed, 0 skipped, 0 failed**. Der angebundene
+  Reichweiten-/Reach-Sicherheitsnachweis ist als AP-001 abgeschlossen und im
+  `docs/AUTONOMOUS_WORK_LOG.md` dokumentiert.
+
+## D117 — AP-003: `duration` wird Startwert der bestehenden Bedingungsuhr, nicht eine zweite Uhr
+
+- **Ausgangslage:** `duration` existierte in `spells.csv` und `items.csv`, aber
+  nur als Text. Eine `condition`-Operation musste ihre Runden manuell
+  wiederholen, was CSV-Inhalt und Mechanik unnötig koppelte und eine falsche
+  „ohne Konsumenten“-Lücke erzeugte.
+
+- **Entscheidung:** Die bestehende Condition/Runden-Lifecycle-Engine bleibt die
+  einzige Uhr. Für ihren START-WERT darf eine condition-Operation `"duration"`
+  verwenden; ein fehlendes `rounds` ist gleichbedeutend. `duration_rounds()`
+  übersetzt ausschließlich in Runden (`1 minute → 10`, `1 hour → 60`, `1 day`
+  auf die bestehende 999-Runden-Obergrenze). `instant`, `permanent` und
+  unbekannte Texte bleiben 0, was dem bisherigen Marker-Verhalten entspricht.
+
+- **Speicherstrategie:** Zaubereffekte werden beim Mapping mit der konkreten
+  Dauer aufgelöst. Item-Definitionen behalten den Marker im kanonischen JSON,
+  damit eine Änderung von `props.duration` beim nächsten Auslösen wirksam wird.
+  Dadurch bleibt die Canonisierung stabil, ohne den Itemwert einzubrennen.
+
+- **Konsequenzen:** Die Kanonsuite wuchs auf **963 passed, 0 skipped, 0 failed**.
+  Die Dokumentation unterscheidet jetzt sauber zwischen combat round expiry,
+  Noncombat-Wanduhr und einem zusätzlichen Save, der eine Bedingung vorzeitig
+  beendet. Nur Ersteres ist durch diese Entscheidung abgedeckt.
+
+## D118 — AP-004: Klassen-Casting-Ability als additive Build-Meta (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `classes.spellcasting_ability` war in den Klassendaten vorhanden,
+  wurde aber vom Build-Plan, Apply-Resultat, Ledger und der UI ignoriert.
+- **Entscheidung:** `charbuild` liest die erste gültige Klassenlevel-Angabe und
+  stellt sie als `plan.needs.spell.ability`, `apply.casting_ability` sowie
+  `build.casting.ability` bereit. Prep-Wizard und Raum-Bogen zeigen die Meta an.
+  Die Ausführung eines registrierten Zaubers behält weiterhin seinen eigenen,
+  geprüften `ability`-Wert.
+- **Grund:** Die Klasse kann ohne einen Execution-Override ehrlich dokumentiert
+  werden. Eine automatische Überschreibung aller Zauber hätte ein zweites,
+  klassenbasiertes Spellcasting-Modell neben der bestehenden Ability-Registry
+  erzeugt und wäre mit Einzel-Zauber-Definitionen, Monster-Abilities und
+  Feat-Abilities in Konflikt geraten.
+- **Konsequenzen:** Das Build-Ledger enthält jetzt casting-Provenienz.
+  Die Kanonsuite wuchs auf **964 passed, 0 skipped, 0 failed**. Eine spätere
+  Execution-Integration bleibt möglich, erfordert aber eine ausdrückliche
+  Architektur- und Migrationsentscheidung.
+
+## D119 — AP-005: Expertise als geführte, serverseitig erzwungene Wahl (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `classes.expertise` war bereits als Datenfeld vorhanden. Das
+  Wizard zeigte es aber nur als ununterstützten Entscheidungstyp, während
+  `apply()` eine Auswahl optional und lückenhaft validierte.
+- **Entscheidung:** Die Klassen-Expertise ist jetzt eine reguläre Build-Wahl.
+  `plan()` und `apply()` melden Level, Anzahl und zulässige Kandidaten; das
+  Wizard rendert Checkboxen. Die Serverprüfung verlangt genau die deklarierte
+  Anzahl, weist Duplikate ab und akzeptiert nur bereits geübte Fertigkeiten.
+  Der Erfolg bleibt eine additive Erhöhung des bestehenden Skillwerts auf `2`.
+- **Grund:** Ohne geführte UI und exakte Validierung wäre CSV-Expertise eine
+  bloße Zahl ohne vertikale Funktionskette. Eine neue Expertise-Engine oder
+  ein zweiter Skillwert wäre überflüssig und würde die bestehende Skill-Achse
+  spalten.
+- **Konsequenzen:** Alle betroffenen Tests versenden jetzt die erforderliche
+  Wahl. Kanon: **964 passed, 0 skipped, 0 failed**. Die eigentliche
+  Browserabnahme der neuen Checkboxen folgt als AP-006.
+
+## D120 — AP-006: reproduzierbarer lokaler Chromium-Runner (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** Der Build-Wizard war backend- und quelltextseitig getestet, aber
+  die neue Expertise-Checkbox war noch nie in einem echten Browser gerendert
+  worden.
+- **Entscheidung:** `scripts/e2e_build_wizard.py` startet gegen eine
+  lokale Testinstanz und prüft in headless Chromium die komplette Kette:
+  Registrierung, Raum, Content-Import, Beitreten, Charakteranlage, Wizard,
+  Skill-/Expertise-Checkboxen, Apply und persistierten Skillwert. Playwright
+  wird bewusst in einem temporären venv installiert und nicht in die
+  Kanon-Test-Image aufgenommen.
+- **Grund:** Ein echtes Browserwerkzeug gehört in die Acceptance, darf aber
+  die deterministische Kanonsuite nicht von Netzwerkzugriffen, großen
+  Binärdateien oder Browser-Library-Abhängigkeiten des Wirts abhängig machen.
+  Der Runner bleibt getrennt, reproduzierbar und optional ausführbar.
+- **Konsequenzen:** Die Wizard-Kette ist erstmals mit echtem Chromium grün.
+  Kanon bleibt **964 passed, 0 skipped, 0 failed**. Weitere Browserketten
+  können schrittweise in demselben Muster ergänzt werden.
+
+## D121 — AP-007: Feature-Voraussetzungen fail-closed und chronologisch (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `feats.requires` war importierbar, wurde aber nie geprüft.
+  Zusätzlich bestand im Recompute eine Chronologie-Lücke: Level-8-Features
+  wurden vor der Level-1-Fertigkeitswahl angewandt.
+- **Entscheidung:** `requires` wird jetzt für Attributswerte, Skill-Proficiency
+  und vorangehende Features geparst. Unbekannte Bedingungen werden abgewiesen.
+  `apply()` prüft sie serverseitig; `plan_for_character()` liefert verfügbare
+  Optionen inklusive fehlender Voraussetzungen, und der Wizard deaktiviert
+  unzulässige Features. Level-1-Skills werden vor späteren Features angewandt.
+- **Grund:** Eine ignorierte CSV-Spalte erzeugt falsche Vertrautheit. Fail-closed
+  verhindert, dass „5 ranks" oder andere unmodellierten Bedingungen als
+  „keine Voraussetzung" gelesen werden. Die Chronologie muss denselben
+  Charakterzustand sehen, den der Bogen und die UI darstellen.
+- **Konsequenzen:** Kanon: **967 passed, 0 skipped, 0 failed**. Der Demo-Feat
+  `feat_keen` nutzt jetzt `Skill Proficiency — Perception` statt des alten
+  rangbasierten Demo-Texts. Weapon-/Tool-/Spellcasting-/Rank-Voraussetzungen
+  bleiben bewusst unsupported, bis eine echte Mechanik existiert.
+
+## D122 — AP-008: Creature-CSV nutzt den einen bestehenden NPC-Block (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `creatures.csv` hatte einen Import, aber keinen Konsumenten;
+  die tatsächlich ausführbaren Monster liefen ausschließlich über die
+  handgepflegten `npc`-Blöcke in Bestiarium/Tokens.
+- **Entscheidung:** `npc.project_creature()` erzeugt aus einer Raum-Zeile den
+  unveränderten `npc.clean_npc()`-Block. DMs können ihn previewen und per POST
+  als persönliches Bestiarium-Template anlegen. Importiertes Freitext-Material,
+  das die NPC-Grammatik nicht trägt, bleibt sichtbar unsupported.
+- **Grund:** Ein eigener `creature_token`-Zweig oder ein zweites Monstermodell
+  hätte Kampf, Bewegung und Ressourcen gespalten. Die Projektion macht CSV zu
+  einem Zulieferer des bestehenden NPC-Pfads, ohne die Autorisierung oder
+  State-Achsen zu duplizieren.
+- **Konsequenzen:** Kanon: **971 passed, 0 skipped, 0 failed**; zwei
+  Chromium-Suiten sind grün. Die projection ist DM-only, raum-scoped und
+  Duplikate werden sichtbar abgewiesen. Komplexere Freitextaktionen bleiben
+  bewusst als DM-Notiz erhalten, statt falsch automatisiert zu werden.
+
+## D123 — AP-009: Dunkelsicht bleibt auf einer Sinnensäule (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** CSV und Token hatten bereits Dunkelsicht-Felder, aber der
+  NPC-Block verlor die Information; ein Monster konnte sie nie nutzen.
+- **Entscheidung:** `npc.clean_npc()` führt Feet als `darkvision_ft`, Spawn und
+  NPC-Editor übersetzen sie in die bestehende Token-Spalte in Zellen
+  (`ft / 5`). Legacy-Token ohne Blockwert bleiben über die Tokenspalte erhalten;
+  eine bewusste Blockbearbeitung aktualisiert die Spalte.
+- **Grund:** Die D89-Sicht-Engine und die D115-Ausrüstungs-Dunkelsicht sind die
+  einzigen mechanischen Dunkelsicht-Pfade. Eine zweite Monster-Sicht oder eine
+  eigene CSV-Tabelle würde dieselbe Sinne-Achse spalten.
+- **Konsequenzen:** Kanon: **973 passed, 0 skipped, 0 failed**. Importierte
+  Monster sehen mit ihren deklarierten 60 ft = 12 Zellen, und der Editor kann
+  den Wert ohne DB-Migration korrigieren. Bewegungsfelder aus Creature-Zeilen
+  bleiben beim Spawn ebenfalls erhalten.
+
+## D124 — AP-010: NPC-Skills bleiben auf einer Daten- und Anzeigensäule (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** Skills wurden bereits in den NPC-Block projiziert, aber das
+  Sheet zeigte sie nicht und der Bestiarium-Spawn schickte nur ein manuell
+  zusammengesetztes Teilfeld.
+- **Entscheidung:** Das Monster-Sheet rendert die bestehende `skills`-Map
+  read-only über den kanonischen `SKILLS`-Namen. Der Spawn sendet den ganzen
+  `npc`-Block an den bestehenden Handler; Server-normalisiert weiterhin Block,
+  Sinnensäule und alle übrigen Werte.
+- **Grund:** Anzeige, Spawn und CSV-Projektion müssen dieselbe Skill-Achse
+  verwenden. Ein clientseitig erratener Block oder eine zweite Monster-Skill-
+  Logik würde dieselbe Information spalten.
+- **Konsequenzen:** Kanon: **976 passed, 0 skipped, 0 failed**; realer Chromium-
+  Import + Spawn zeigt Hawk-kin mit Dunkelsicht 60 ft / 12 Zellen und Perception
+  im Sheet. Expertise bleibt eine Anzeige-Ebene, keine eigene Mechanik.
+
+## D125 — AP-011: Ressourcen-Gewährung bleibt auf dem einen Ressourcen-Ledger (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** Die Effektgrammatik konnte vorhandene Ressourcen nur verbrauchen.
+  Ein zurückgebender Zauber/Trigger hätte sonst einen zweiten Zähler erzeugen
+  müssen.
+- **Entscheidung:** `resource` erhält `mode: cost|restore`; `cost` bleibt
+  Default für alte Zellen. Restore erhöht eine bereits registrierte,
+  kanonische Charakter-Ressource um einen Wert innerhalb ihres `max`-Feldes.
+- **Grund:** `characters.resources` und der resource-Handler sind die einzige
+  Ressourcendarstellung. Die Grammatik darf sie erweitern, aber nicht duplizieren.
+- **Konsequenzen:** Kanon: **977 passed, 0 skipped, 0 failed**. Bestehende
+  Kosten-Preflights bleiben atomar, unbekannte IDs fail-closed, volle
+  Ressourcen unverändert. Die CSV-Schicht kann jetzt sowohl Klassen-/Focus-
+  Nutzungen kosten als auch im Erfolg zurückgeben.
+
+## D126 — AP-012: Speziesdaten nutzen Bewegung, Sicht und Footprint, statt sie nachzubauen (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `species.csv` besaß Geschwindigkeit, Sinne und Größe, aber nur
+  eine Anzeige-Projektion.
+- **Entscheidung:** Die Spezies-Projektion in `characters.build` wird Teil der
+  kanonischen Sheet-Ableitung. Bewegung, LOS-Sicht und Token-Footprint lesen
+  daraus ihre Werte; keine neue Movement-, Sight- oder Footprint-Engine.
+- **Grund:** Eine Spezies ist kein neuer Mechanismus, sondern Input für die
+  bestehenden Engines. Separate Werte in Sheet, Token oder DM-Notiz würden
+  dieselbe Existenz dreimal beschreiben.
+- **Konsequenzen:** Kanon: **979 passed, 0 skipped, 0 failed**. Stoutheart bewegt
+  sich 25 ft und sieht 12 Zellen; Kit-kin bekommt Small-Footprint. Ausrüstungs-
+  Boni und DM-Autoring bleiben übereinanderliegende, unveränderte Ebenen.
+
+## D127 — AP-013: `companion` ist Markierung im NPC-Block, keine zweite Ownership-Engine (2026-10-16)
+
+- **Status:** umgesetzt
+- **Kontext:** `creatures.csv` führte `companion`, doch die Information verlor
+  sich zwischen Content-API, NPC-Block und DM-UI.
+- **Entscheidung:** `companion` wird als bool-Feld in `npc.clean_npc()` und über
+  `add_token`/`update_npc` in den bestehenden NPC-Block übernommen. Review,
+  Sheet und Bestiarium zeigen/bearbeiten nur dieselbe Markierung.
+- **Grund:** Ob ein Monster ein Begleiter ist, ist Content-Metadatum und
+  Spielhinweis. Ownership, Kontrolle, Kampfnähe und Summon-Regeln gehören zu den
+  bestehenden Token-, Combat- und Encounter-Pfaden und werden hier nicht neu
+  erfunden.
+- **Konsequenzen:** Kanon: **981 passed, 0 skipped, 0 failed**. Der Spawn-Pfad
+  muss weiterhin alle relevanten NPC-Felder vollständig in `clean_npc()` übergeben;
+  ein während der Entwicklung verlorener `attacks`/`spell_slots`-Anteil wurde durch
+  echte WS-Angriffstests sichtbar und behoben.
+
+## D128 — NPC-Angriffsreichweite wird hartes Gate auf der bestehenden Footprint-/Ebenen-Distanz (2026-10-16/17; Doku nachgereicht in der Recovery-Sitzung 2026-10-17)
+
+- **Status:** umgesetzt (Code und Tests waren bereits im gepushten Stand
+  enthalten; der Doku-Abschnitt wurde vor dem Abbruch der autonomen Sitzung
+  nicht mehr geschrieben und wird hier in `docs/RECOVERY_2026-10-17.md`
+  belegter Session nachgereicht, statt die Umsetzung neu zu erfinden).
+- **Kontext:** Der Angriffsauslöser des NPC-Blocks behandelte Distanz nur als
+  Nachbarschafts-Advisory. Deklarierte Reichweiten (SRD: „reach 10 ft“,
+  Longspear usw.) existierten als Freitext in `creatures.csv`, ohne Konsument —
+  jede entfernte Ansage war entweder still falsch oder vom DM-Gefühl abhängig.
+  `dice._vertical_range_distance` (D109/D114) war bereits DIE eine
+  Footprint-Zellen × 5 ft messende, ebenenrichtige Distanz der
+  Spielerangriffe.
+- **Entscheidung:** `npc.project_creature()` liest „reach N ft“ aus der
+  Angriffszeile; `npc.clean_npc()` normalisiert `reach` (Clamp 0–999, Default
+  5 ft). `handle_npc_attack` prüft das Ziel gegen `atk["reach"]` über
+  `_vertical_range_distance` — dieselbe Distanzquelle wie Spielerangriffe und
+  Interaktionen; Fail-closed mit „out of reach“, wenn keine meszbare Linie
+  existiert. Der NPC-Editor zeigt/bearbeitet `reach` je Angriff
+  (`na-reach`-Feld, 0–999). Es wurde keine zweite Reichweiten-Mechanik gebaut.
+- **Grund:** Angriffsauslösung und Interaktion müssen dieselbe Geometrie
+  wahrnehmen. Eine advisory deklarierte Regelzahl ist eine falsifizierte
+  Datenlinie ohne Konsument — sie wird entweder Leser-fähig gemacht oder
+  sichtbar abgelehnt.
+- **Konsequenzen:** Kanon: **985 passed, 0 skipped, 0 failed** (Baseline der
+  Recovery-Sitzung 2026-10-17, `tests/test_d128_npc_reach.py`: 4 neue Tests —
+  Standard-Reichweite verweigert die zweite Zelle, deklarierte 10-ft-Reichweite
+  trifft, CSV-Projektion und `clean_npc`-Rundreise behalten `reach`,
+  Editor-Pin). `docs/CSV_ONLY_READINESS.md` wurde von „advisory“ auf das
+  durchgesetzte Gate korrigiert.
+
+## D129 — Exhaustion wird ein echter, kumulativer Modifikator aus derselben SSOT (2026-10-17, AP-015)
+
+- **Status:** umgesetzt.
+- **Kontext:** Der Exhaustion-Zaehler (0-6) existierte seit D35 als DM-Feld
+  und Bogen-Anzeige, aber ohne jede mechanische Wirkung. RULES_AUDIT
+  F3/F4/K8 dokumentierte die Abweichung von SRD 5.2.1: -2 auf
+  Angriffs-/Schadens-/Probe-/Rettungswuerfe, -5 ft Tempo je Stufe, Tod bei
+  Stufe 6, Long Rest -1.
+- **Entscheidung:** Zwei Helfer in `gear.py` sind die einzige
+  Ableitungsquelle: `exhaustion_roll_mod()` (-2 x Stufe) und
+  `exhaustion_speed_penalty_ft()` (-5 x Stufe). Bestehende Konsumenten
+  werden angebunden: `movement._speeds` (nur PC-Tokens, nur walk -
+  fly/swim/climb bleiben bewusst unberuehrt, weil die
+  Footprint-Engine nur walk ableitet), die
+  Waffen-Angriffs-/Schadenszeilen, Check/Save/Skill und die
+  Spruch-Angriffs-/Spruch-Schadens-Texte in `dice.py`,
+  `opposed.check_roll/save_roll/bonus_roll/melee_attack_number` und
+  `combat.token_dex_mod` (Initiative). Der Tod bei Stufe 6 entschieden
+  durch `status.py` ueber den bestehenden Death-State
+  (`death.new()/apply_thresholds`, hp=0) - keine zweite
+  Tod-Mechanik, kein erfundener Death Save. Long Rest senkt eine Stufe im
+  bestehenden `handle_long_rest`-UPDATE
+  (`exhaustion=MAX(0, COALESCE(exhaustion,0)-1)`).
+- **Grund:** Eine Regelzahl, die nur als Datenfeld im Bogen lebt, ist eine
+  Bogen-Luege. Statt einer zweiten "Exhaustion-Engine" wird an den Stellen
+  erweitert, die laengst das Sheet fragen.
+- **Konsequenzen:** Kanon: **994 passed, 0 skipped** (9 neue Tests in
+  `tests/test_d129_exhaustion.py`: Temp ableitung inkl. NPC-No-op,
+  Angriffs-/Schadenszeile mit "-N exhaustion"-Suffix und abgeleiteten
+  Erwartungswerten statt Magischer Zahlen, Check/Save/Skill,
+  Opposed-Paritaet per Delta-Vergleich, Initiativ-Modifikator, Tod bei 6,
+  Long-Rest-Kaskade 3-2-1-0, Clampung). Das 16-h-Gate des Long Rest
+  bleibt bewusst offene, dokumentierte Hausregel-Grenze (F3 bleibt
+  teilweise offen).
+
+## D130 - Save Ends: Bedingungen mit sa+dc wuerfen am Ende des eigenen Zuges durch die bestehende Rettungs-Ableitung (2026-10-17, AP-016)
+
+- **Status:** umgesetzt.
+- **Kontext:** SRD 5.2.1 laesst viele Effekte enden, wenn das betroffene
+  Wesen am Ende seines eigenen Zug eine Rettungswiederholung besteht
+  ("Save Ends"). D117 hatte die Dauer-mit-Rettungs-Ende-Wirkung bewusst
+  offen gelassen (FEATURE_COMPLETE_GAPS Zeile "Effektgrammatik: Dauer mit
+  Rettungs-Ende"). Der Escape-DC (D112) und die Opposed-Rettungs-Ableitung
+  (`opposed.save_roll`/`beats_dc`) existierten bereits als Konsumenten-Pfade;
+  ein Escape ist jedoch eine ACTION und kein End-of-Turn-Ereignis - die
+  Luecke war das Wiederholungs-Ereignis selbst.
+- **Entscheidung:** Condition-Instanzen bekommen ein additives Feld `sa`
+  (Rettungs-At ability, SSOT-Whitelist `gear.ABILITIES`, geputzt in
+  `conditions._clean_sa`). `combat._save_ends(room_id, token_id)` feuert am
+  Ende des Zuges des betroffenen Tokens - an beiden bestehenden
+  Turn-Uebergabepunkten (`_end_turn_common` und `handle_init_next`), VOR
+  `advance_turn`, damit die Uhrzeit "Ende seines Zuges" bleibt. Wuerfel,
+  Modifikator und Sichtbarkeit sind dieselbe Ableitung wie bei
+  Spielerrettungen (`opposed.participant` loest PC wie NPC ueber
+  `npc.to_char`); die Ankundigung folgt der Concentration-Konvention
+  (PC oeffentlich, NPC DM-only via `_announce_roll`). Erfolg entfernt genau
+  den einen Eintrag - Geschwister-Eintraege mit gleichem Key (D109
+  src/ref-Coexistenz) bleiben. Eintrag OHNE `sa` - jeder Prae-D130-Eintrag
+  und jede Grapple-Instanz - wuerfelt nicht. `cond_add` transportiert jetzt
+  auch `dc` (DM-Autoren Weg zum DC, D112-Muster).
+- **Grund:** Ein zweiter Rettungswuerfel-Weg oder eine zweite Uhr haette
+  genau die D80-Ein-Uhr-Invariante gebrochen. Die Regelzahl "Save Ends"
+  bekommt einen Konsumenten auf der bestehenden Uhr und der bestehenden
+  Rettungs-Mathematik - nicht mehr.
+- **Konsequenzen:** Kanon: **1000 passed, 0 skipped** (6 neue Tests in
+  `tests/test_d130_saveends.py`: sa-Feld-Rundreise/Validierung inkl.
+  Prae-D130-Bytekompatibilitaet, Erfolg entfernt (dc 1 dex - kann nie
+  fehlschlagen), Misserfolg erhaelt Instanz mit dc+sa (dc 30 wis - kann nie
+  gelingen), fremde Zuende loesen NICHT deine Rettung aus, dc-only-Eintraege
+  bleiben unangetastet, NPC-Pfad ueber denselben Participant).
+  Effekt-Operateure (effectops) koennen `sa`/`dc` spaeter als Daten
+  durchreichen; der Mechanik-Konsument ist jetzt fertig.
+
+## D131 - Casting Time verbraucht den Turn-Slot, den es benennt (2026-10-17, AP-017)
+
+- **Status:** umgesetzt.
+- **Kontext:** `spells.csv` fuehrt `casting_time` als Spalte (content-Schema),
+  aber kein Konsument las sie - jedes Wirken war action-oekonomisch
+  gleichgueltig, und `handle_cast` konsumierte ueberhaupt keinen
+  Turn-Slot. Die Turn-Slot-Oekonomie (action/bonus/reaction, D74) und ihr
+  Verbraucher-Muster existierten bereits im Angriffspfad (`_item_attack`:
+  Token-Pflicht im Kampf, turn-Pruefung, `spend_slot`), die
+  Replay-Guard-Mechanik (D93/D94: `inv_ops`) ebenso.
+- **Entscheidung:** `gear.casting_slot()` mappt den Freitext auf den
+  benannten Slot ("bonus"/"reaction" schlagen "action";
+  minute/hour/ritual = ausserhalb des Turn-Tempos -> None = kein Slot).
+  `handle_cast` validiert zunaechst (Spell-Lookup -> nicht-destruktiver
+  Replay-Probe `inventory.claimed` -> Token-Pflicht im Kampf -> turn ->
+  Slot verfuegbar) und verbraucht via `spend_slot` erst nach erfolgreichem
+  Spell-Slot-Claim (D110: abgelehnte Zauber verausgaben nichts).
+  `clean_spells` und die Katalog-Projektion (`charbuild`) tragen
+  `casting_time` jetzt durch - die CSV-Spalte hat damit ihren Konsumenten.
+  Der NPC-Wurfpfad (`_npc_cast`) verändert sich nicht (NPC-Blocks fuehren
+  kein casting_time; das waere ein Daten-Feature, keine Mechanik-Luecke).
+- **Grund:** Action-Oekonomie ist eine einzelne Uhr mit drei Zeigern. Eine
+  Spruchfeld-Angabe ohne Konsument ist eine Bogen-Luege; ein zweiter
+  Slot-Zaehler haette genau die D74-Invariante gebrochen.
+- **Konsequenzen:** Kanon: **1007 passed, 0 skipped** (7 neue Tests in
+  `tests/test_d131_casting_time.py`: Text-Mapping inkl. SRD-Default '' =
+  action, action-Verbrauch + Zweitsperre, bonus verbraucht nicht die action,
+  minute-Sprueche lassen beide Slots heil (Spell-Slot trotzdem belegt),
+  Token-Pflicht verausgabet vorher nichts, Replay bleibt still trotz
+  verbrauchsaction, Spell-not-found antwortet vor dem Token-Gate).
+  Die uebrigen bestehenden Cast-Tests wirken out of combat - die
+  Kanontreue des Gates bleibt ohne kuenstliche Testspruenge belegt.
+
+## D132 - value_gp und cr bekommen Konsumenten auf den bestehenden Datenlinien (2026-10-17, AP-018)
+
+- **Status:** umgesetzt.
+- **Kontext:** `items.csv` fuehrt `value_gp` seit je als Spalte, doch die
+  Projektionskette CSV -> `item_defs` -> Inventar-Eintrag liess das Feld
+  fallen; `creatures.csv`-`cr` wurde nie in den NPC-Block projektiert
+  (CSV_ONLY_READINESS listete "CR->Challenge-Projektion" als offen). Beide
+  Felder waren Bogen-Daten ohne Konsumenten.
+- **Entscheidung:** Keine neue Oekonomie, keine XP-Mechanik (2024 arbeitet
+  Meilensteine). Die bestehenden Linien tragen die Felder: additive
+  Migration `item_defs.value` (REAL DEFAULT 0); `inventory.clean_def`
+  normalisiert 0..999999 (2 Dezimalstellen); `content._project_item`
+  uebergibt `value_gp`; `entry_from_def`/`gear.clean_items` fuihren `value`
+  bis auf den Charakter-Eintrag (Prae-D132-Entries = 0, byte-stabil).
+  `npc._clean_cr` laesst nur das SRD-Band zu (0, 1/8, 1/4, 1/2, 3/4, 1..30;
+  Rest = '' = unbekannt, nie ein gefaelschter Wert); `project_creature` und
+  der `add_token`-Whitelist-Pfad transportieren `cr` in den Block, der ins
+  Monster-Sheet-Payload wandert (D124-Praezedenzfall: read-only-Sichtbarkeit
+  ist ein akzeptierter Konsument).
+- **Grund:** Der Zustand "Spalte ohne Konsument" ist eine Datenlinie, die
+  Luegen erzaehlt. Ein Konsument auf der bestehenden Projektion ist redlich;
+  eine erfundene Shop- oder XP-Mechanik waer eine zweite Engine.
+- **Konsequenzen:** Kanon: **1013 passed, 0 skipped** (6 neue Tests in
+  `tests/test_d132_value_cr.py`: CR-Band inkl. Ausreisser-Verwerfung,
+  Projektion ueber die eine Blockform, value-Clamps + Eintrag-Rundreise,
+  `_project_item` mit frischem id (item_defs.id ist GLOBAL, D100),
+  DM-def -> Grant -> Character-Item, NPC-Token traegt cr). Der
+  Projektions-Warnkanal (stored-but-not-projected) hat den Placeholder-Fehler
+  des Patches selbst gefangen - fail-loud wirkt.
+
+## D133 - Loot-Objekte mit container-Flag sind echte D92-Container (2026-10-17, AP-019)
+
+- **Status:** umgesetzt.
+- **Kontext:** Der Karten-Editor konnte seit je Loot-Glyphen ablegen; der
+  Weglaufweg schrieb beim Betreten nur "[loot] Label" in die Notizen des
+  Charakters und markierte taken_by - Inhalt als Daten gab es nicht.
+  FEATURE_COMPLETE_GAPS fuehrte das als Luecke mit dem Hinweis, das
+  Container-System (D92) und der loot-Kanal (D105, Schluessel tok:<id>)
+  seien eins zu eins uebertragbar.
+- **Entscheidung:** Loot-Eintraege bekommen das Flag `container`.
+  `mapmodel._entity` laesst `container`/`hinted`/`dm_only` durch die
+  Sanitisierung (die Beute-Liste war ein Whitelist-Schluessel ohne diese
+  Felder); `handle_map_edit` bewahrt `hinted` als Runtime-Markierung wie
+  `taken_by`. `handle_inv_container` loest zusaetzlich den Schluessel
+  `loot:<eintrag-id>` auf (Praezedenz: D105 `tok:<token_id>`) und nutzt
+  denselben Anker (Zelle, dm_only, Reichweite, Ebene) wie Welttruhen.
+  `take_loot` verweigert bei gesetztem Flag das Notiz-Picken endgueltig und
+  fluestert einmalig den Oeffnen-Hinweis. Client: Editor-Checkbox
+  "Container", Klick auf die Geaefen-Offnung per `openLootObject` auf dem
+  existierenden `inv_container`-Kanal, Inhalt laeuft ausschliesslich ueber
+  die autorisierten Antworten - nie ueber map JSON oder /state (D92-Invariante).
+- **Grund:** Loot auf der Karte ohne Inhalt ist eine Dekoration, die
+  Beute vorgaukelt. Die Uebertragung auf die bestehende
+  Container-Tabelle (Raum, Schluessel) - nicht eine zweite Truhen-Mechanik
+  - haelt die D92-Regeln (Replay, Serialisierung, Fog-Gates) fuer Loot
+  gratis mit.
+- **Konsequenzen:** Kanon: **1018 passed, 0 skipped** (5 neue Tests in
+  `tests/test_d133_loot_container.py`: kein Notiz-Pickup trotz Ueberlaufen,
+  Muenz-Rundfuellen/Entnehmen ueber den loot:-Schluessel mit Wallet-Wahrheit,
+  Reichweiten-Antwort von ferne, Legacy-Notiz ohne Flag unveraendert,
+  unbekannter/nicht markierter Schluessel bleibt still).
+  Editor-Eintraege ohne Flag verhalten sich byte-identisch wie vorher.
+
+## D134 - Das eine 2024-Incapacitated regelt Aktionen, nicht Bewegung (2026-10-17, AP-020)
+
+- **Status:** umgesetzt.
+- **Kontext:** F5 hatte die Condition-Liste 2024-konform gemacht (key da),
+  die Wirkung war aber falsch geerbt: `incapacitated` trug
+  `blocks_movement + auto_fail_saves` - beides sagt SRD 5.2.1 der EINFACHEN
+  Incapacitated gerade NICHT zu (Bewegung bleibt frei, Retten normal); die
+  Auto-Fails gehoeren zu paralyzed/petrified/stunned/unconscious. Ausserdem
+  gab es kein Wort in der Hook-Grammatik fuer "keine Aktionen/reactions",
+  und die Grapple-Loesung pruefte einen Bewegungs-Block statt des vom SRD
+  genannten Incapacitated-Zustands des Greifenden.
+- **Entscheidung:** Neuer Hook `no_actions` in HOOKS-Grammatik und
+  BUILTIN_HOOKS: parent = {no_actions} pur; die vier Familienmitglieder
+  behalten ihre Bloecke und bekommen no_actions. Konsumenten - alle vor
+  jeder Konsumtion validiert: Angriffspfad (`_item_attack`), Wirk-Gate
+  (D131), der Attack/Escape-Choke `_take_action` (grapple-Flucht und
+  Grapple-Offensive laufen ueber ihn), Dash (`handle_dash`). Reaktionen sind
+  im Engine-v1-Scope nicht modelliert - dokumentierte Grenze (EFFECT_GRAMMAR
+  S6), no_actions benennt sie, der Angriffspfad kann nichts verbieten, was
+  der Wuerfel nie verbraucht. Grapple-Loesung auf `no_actions` umgestellt:
+  der SRD-Satz "the grappler is incapacitated" trifft jetzt genau die
+  Condition, nicht eine Naherungs-Flag.
+- **Grund:** Eine Zustandstabelle, die einem Eltern-Zustand Kind-Effects
+  anhaengt, erzeugt stille Regel-Falschaendungen an jedem Konsumenten. Ein
+  Wort pro Satz der Regelquelle haelt die Zuordnung pruefbar.
+- **Konsequenzen:** Kanon: **1022 passed, 0 skipped** (4 neue Tests in
+  `tests/test_d134_incapacitated.py`: Hook-Tabelle als executable Norm,
+  Angriff+Dash blockiert, Bewegung frei, nach cond_remove wieder frei,
+  Wirken blockiert OHNE Slot-Verbrauch, Flucht braucht eine Aktion).
+  Bestehende Familien-Erwartungen (D110/D113) unveraendert gruen.
+
+## D135 - Heroic Inspiration ist ein verbrauchbares Marker (2026-10-17, AP-021)
+
+- **Status:** umgesetzt.
+- **Kontext:** F6: Inspiration war ein An/Aus-Schalter ohne jeden Konsumenten.
+  SRD 5.2.1: man hat HÖCHSTENS EINE Held-Inspiration; sie wird beim Wurf
+  (Angriffs-, Attributs-, Rettungswurf) VERBRAUCHT; wer bei voller Zahl
+  weitere bekäme, gibt sie weiter oder verliert sie kampflos.
+- **Entscheidung:** `adv:"insp"` auf den Charakter-d20-Pfaden (Angriff,
+  Check, Save, Skill) — `_spend_insp` verbraucht das Marker VOR dem Wurf und
+  faltet in die vorhandene Advantage-Ableitung (SRD "wähle einen Würfel" =
+  keep-higher als dokumentierte Vereinfachung, Klasse wie der frightened-
+  Pauschalhook). Blind-Ausdrücke und NPC-Würfe tragen das Marker nicht
+  (frühe Ablehnung, kein Marker-Diebstahl). Die `gain`-Aktion: Pool bei
+  voll -> `pass_to_char` (Charakter mit Token in DIESEM Raum) schiebt das
+  Marker; ohne Weitergabe: nichts gewonnen, nichts verloren.
+- **Grund:** Ein Statusfeld ohne Konsumenten ist ein UI-Ornament. Der
+  Verbrauch wird zum Engine-Ereignis, weil nur dort die Regel (max 1,
+  Verbrauch beim Wurf, Weitergabe bei voll) erzwingbar ist.
+- **Konsequenzen:** Kanon: **1029 passed, 0 skipped** (7 Tests: Verbrauch am
+  Check inkl. sys-Beleg, Verbrauch am Angriff ohne Flag-Fehler, Blind/NPC-
+  Ablehnung, Voll-Verlust ohne Weitergabe, Weitergabe, Fremd-Raum-Ablehnung).
+  Marker bleibt Boolean (Pool >1 = Klassengrenze, dokumentiert).
+
+## D136 - Help-to-Stabilize ist ein Check, kein Automatismus (2026-10-17, AP-022)
+
+- **Status:** umgesetzt.
+- **Kontext:** F8: Sterbende zu stabilisieren war engine-seitig gar nicht
+  modelliert; 2024 verlangt dafür die Help-Aktion mit einem DC-10-
+  Wisdom-(Medicine)-Check (2014 schaffte das automatisch). Tod-Rettet sind
+  schon D101-Spezialität (death.py) — nur der Helfer-Pfad fehlte.
+- **Entscheidung:** Neue WS-Nachricht `stabilize` (token_id = Helfer,
+  target_token_id = Patient): Patient muss sterbend (nicht stable/tot) sein;
+  Selbst-Stabilize abgelehnt; Adjazenz über das vorhandene
+  `grapple._adjacent` (5 ft, Footprint/Ebenen-korrekt); im Kampf dreht der
+  Helfer die Initiative-Liste -> eigener Turn + Action verbrauchen
+  (`set_init` persistiert, D8-Muster), D134 no_actions-Gate; Würfel durch die
+  vorhandene Skills-Ableitung (`skill_bonus medicine`, wis); natural 20
+  heilt auf 1 HP (death-Block weg, wie nat-20 der Tod-Rette), total ≥ 10
+  setzt stable, Fehler bewegen KEINEN Tod-Rette-Zähler. Außerhalb des
+  Kampfes: erlaubt, ohne Action-Verbrauch (dokumentierte v1-Grenze).
+- **Grund:** Der Sterbepfad war der einzige Kampf-Kernmechanismus ohne
+  Helfer-Interaktion. Alles Neue läuft über bestehende kanonische
+  Ableitungen (Adjazenz, Skills, Action-Ökonomie, Condition-Hooks).
+- **Konsequenzen:** Kanon: **1033 passed, 0 skipped** (4 Tests: Würfel-Text
+  ⇔ stable-Zustand über zufälligen Wurf robust, Selbst-/Patient-Guards,
+  Distanz/Turn/Action-Verbrauch, stunned blockiert). get_init ist ein
+  FRISCHER DB-Read — Mutationen brauchen set_init (Fallstrick geheftet).
+
+## D137 - Deckung reitet jeden Angriffs­wurf, auch den der Zauber (2026-10-17, AP-023)
+
+- **Status:** umgesetzt.
+- **Kontext:** A5 prüfte die Cover-Werte (half +2, 3/4 +5, total = nicht
+  anvisierbar) — die waren inkl. 3/4-Auswahl in Backend und Client längst
+  da; die Lücke war eine andere: die Deckung fehlte auf den ZAUBER-
+  Angriffs­würfen (PC-Manual-Roll, PC-Cast, NPC-Roll, NPC-Cast), während
+  Waffenwürfe sie trugen. SRD-seitig ist Deckung eine Eigenschaft des
+  Ziels, nicht des Angriffs­werkzeugs.
+- **Entscheidung:** `_spell_cover(msg)` + `_total_cover_note` als gemeinsamer
+  Pfad; `_spell_attack_text` bekommt den cover-Parameter (Text `vs 3/4
+  cover`, `-5 cover`, totaler Abzug auf die Summe). Total Cover LEHNT das
+  Ziel ab, BEVOR in handle_cast/_npc_cast ein Slot, Marker oder eine Action
+  angefasst wird (order same as D131: validate first, spend after).
+- **Grund:** Ein Regelwert, der nur auf einer von zwei Angriffs­pfaden
+  wirkt, ist eine stille Hausregel. Eine gemeinsame Deckungs­funktion pro
+  Würfel­gattung hält die Pfade deckungsgleich.
+- **Konsequenzen:** Kanon: **1037 passed, 0 skipped** (4 Tests: 3/4 und half
+  auf Spell-Attack-Rolls, Total-Verweigerung OHNE Slot-Verbrauch, Cast mit
+  3/4, Plain-Text unverändert). Audit A5 damit vollständig abgearbeitet.
+
+## D138 - Vorbereitung ist Daten, kein Klassencode (2026-10-17, AP-024/025)
+
+- **Status:** umgesetzt (+ Audit-Verifikation F2/E2).
+- **Kontext:** C3 wollte den Prepare-Ablauf "je Klasse". Klassennamen im
+  Engine-Kern wären der zweite Motor im Haus. Beim Prüfen der R-P2-Liste
+  erwiesen sich zwei Posten als bereits erledigt: F2 (HD-Pool = Level,
+  `hit_dice_max` 1-20, KEIN Halb-Level-Cap — SRD 5.2.1 ohne Obergrenze ✓)
+  und E2 (2024 kennt keinen Nebenhand-Bonusangriff; die Light-Regel lebt als
+  Nick-Mastery, D109, vollständig gating-getestet ✓).
+- **Entscheidung:** Prepare-Gate datengetrieben wie casting_time (D131):
+  `clean_spells` trägt `prep`/`prepared`; enthält die Liste EINEN Eintrag
+  mit prep=true, ist die Liste gated; Zauber ab Grad 1 brauchen prepared,
+  Kantrips sind ausgenommen; die Ablehnung geschieht vor jedem Slot-/
+  Action-/Marker-Verbrauch. CSV projiziert beide Felder (charbuild).
+  Long-Rest und Prepare-Wechsel bleiben Spieler-/DM-Flow über den
+  bestehenden Spell-Listen-Kanal — die Engine erzwingt nur die Konsequenz.
+- **Grund:** "Regel je Klasse" ist Inhalt; "wer vorbereitet sein muss, kann
+  Unvorbereitetes nicht wirken" ist Mechanik. Nur die Mechanik gehört in die
+  Engine — dieselbe Trennung, die schon D131 trug.
+- **Konsequenzen:** Kanon: **1040 passed, 0 skipped** (3 Tests: Gated-Liste
+  verweigert ohne Verbrauch, Prepared wirkt, Kantrip-Ausnahme + ungated
+  frei). Audit: C3 ✓, F2 ✓ verifiziert, E2 ✓ (Nick), R-P1/R-P2-Listen
+  bereinigt.
+
+## D139 - Species-Origin-Feat erreicht die Auswahl-Logik (2026-10-17, AP-026)
+
+- **Status:** umgesetzt (+ B6-Verifikation).
+- **Kontext:** B5 forderte den Origin-Feat-Ablauf (D108, erledigt) und
+  Species-Bonus-Feats; SRD 5.2.1 kennt artenbezogene Origin-Feats, aber
+  species.csv hatte weder Feld noch Konsumenten. B6 („Requires-Freitext")
+  war bei Prüfung bereits erledigt: `_parse_feat_requires` parst
+  Attributs-/Skill-/Feat-Bedingungen maschinell fail-closed, das Pack trägt
+  kein „ranks" mehr.
+- **Entscheidung:** Schema-Feld `origin_feat` (id) für species; Projektion
+  gibt es weiter; die Feat-Auswahl konsumentiert es doppelt: (a)
+  Prerequisite-Ketten zählen es als angewandt, (b) die gleiche Feat kann
+  nicht noch einmal gewählt werden — `taken`-Set + „already chosen". (b)
+  schließt gleich die generische SRD-Regel „no feat twice" für den ganzen
+  Level-Up-Flow, nicht nur für Species.
+- **Grund:** Ein Datenfeld ohne Konsumenten ist Dekoration (D135-Lektion).
+  Der Konsument wurde an die bestehende options-Ableitung gehängt statt
+  einen zweiten Wahl-Kanal zu bauen.
+- **Konsequenzen:** Kanon: **1043 passed, 0 skipped** (3 Tests: Projektion
+  liefert/leert origin_feat, Species-Feat zählt als genommen + stillt
+  Prerequisite-Kette, Ledger-Duplikat blockiert). Nebenbefund geheftet:
+  SCHEMAS ist auch Generator-Input — Schema-Zeilen ändern schreibt den
+  content_pack-CSV neu (D109-Idempotenztest fängt das korrekt); der
+  mit-generierte species.csv ist jetzt Stand des Schutzes.
+
+## D140 - Schwimmen/Klettern ohne Speed: der SRD preist es an, er verbietet es nicht (2026-10-17, AP-027)
+
+- **Status:** umgesetzt.
+- **Kontext:** D83 erlaubte Bewegungsmodi strikt nur MIT zugehörigem Speed
+  („no silent substitution") — für Schwimmen/Klettern ist das strenger als
+  SRD 5.2.1: Ohne Schwimm-/Kletterspeed ist beides möglich, jeder Fuß
+  kostet 1 Extra-Fuß (2 in schwierigem Gelände). Nur Fliegen ohne Speed
+  ist tatsächlich unmöglich.
+- **Entscheidung:** `_mode_or_error` verlangt einen Speed nur noch für
+  fly; swim/climb durchnach immer, mit dem Aufschlag als EINER Regel in
+  `movecost.route_cost`: `unit + (2 if difficult else 1)` — wörtliche SRD-
+  Addition, keine Multiplikation (schwierig+schwimmen = 3, nicht 4).
+  Diagonal-Alternierung bleibt Basis; der Aufschlag kommt pro Schritt
+  obendrauf. Client: Modus-Picker zeigt swim/climb immer, fly nur mit
+  Speed. Budget bleibt walk_budget (D83-Konversion unverändert).
+- **Grund:** Die D83-Weigerung war ein Platzhalter („no fake terrain rules
+  yet"). Die Regelquelle liefert eine Zahl, keinen Verbotsatz — also Zahl.
+- **Konsequenzen:** Kanon: **1045 passed, 0 skipped** (2 Tests:
+  Kosten-Tabelle als ausführbare Norm inkl. Diagonal-Mix, WS: fly verweigert
+  / swim bewegt). terrain.py/movement_modes-Suiten unverändert grün.
+  Wasser-/Kletterwände als Terrainklassen bleiben Content (AP-031-Kandidat).
+
+## D142 - Nebel-Gedächtnis überlebt den Prozess (2026-10-17, AP-028)
+
+- **Status:** umgesetzt.
+- **Kontext:** TODO P2 „Ghost persistence": D9's _last_seen war reiner
+  Speicher — ein Server-Neustart fraß alle Nebel-Ghosts (und Multi-Worker
+  wäre ohnehin falsch). Gezielt wurde NIE pro Step geschrieben.
+- **Entscheidung:** additiv room_state.ghosts_json (ein Blob pro Raum:
+  {user_id: {token_id: snapshot}}). Schreibzeitpunkt = disconnect des
+  letzten Sockets des Viewers (prune_viewer_last_seen schreibt VOR dem
+  Pop; leere Geister schreiben nichts). Lesezeitpunkt = erster gesehener
+  Frame des Viewers im Raum (visibility-Hydrate) und Raum-Beitritt
+  (rooms-Snapshotpfad). JSON-Keys werden beim Hydratieren wieder zu int —
+  die token_id-Nachschlage bleibt int. Kein Write pro Step, ein Write pro
+  Abmeldung.
+- **Grund:** Persistenzkosten gehören an die Lebensereignisse des Gedächt-
+  nisses (anmelden/abmelden), nicht an den Heißpfad.
+- **Konsequenzen:** Kanon: **1047 passed, 0 skipped** (2 Tests: Schritt ->
+  Ghost im Speicher -> Disconnect schreibt DB -> Speicher leer -> Hydrat
+  liefert int-keys zurück; Geisterleere schreibt nichts). Alle Nebel-Suiten
+  unverändert grün. Multi-Worker bleibt bewusste Grenze (ein Prozess, wie
+  zuvor; die Grundlage ist jetzt gelegt).
+
+## D143 - Ein Einstiegspunkt für die Checks: Makefile, Live-Smoke, Lockfile (2026-10-17, AP-029)
+
+- **Status:** umgesetzt.
+- **Kontext:** TODO P1 wollte drei Dinge, die bisher nur in Köpfen und
+  Logs lebten: einen reproduzierbaren Python-Stand, einen lebenden
+  Server-Smoke vor „macht Sinn"-Deploys und einen einzigen Einstiegspunkt
+  für die Checks, die der Marathon sowas jedes Mal manuell ausführt.
+- **Entscheidung:** requirements.lock = komplettes transitive Freeze des
+  kanonischen Docker-Test-Images (nur `==`-Zeilen, sortiert; Regeneration
+  per `make lock`). scripts/smoke.sh startet uvicorn auf Loopback mit
+  eigenem VTT_DATA_DIR und Port per SMOKE_PORT, beweist health -> register
+  -> Raum per HTTP und stoppt per pidfile-trap; kein Docker, kein
+  geteilter Zustand. Makefile kapselt test/compile/check/smoke/lock.
+- **Grund:** Check-Routinen, die nur als lange bash-Zeilen existieren,
+  altern still. Ein Skript mit Exit-Code ist ein Test; ein Freeze mit
+  Regenerations-Kommando ist wartbar.
+- **Konsequenzen:** App-Code unverändert (Kanon bleibt 1047). Die
+  .mjs-Smoke-Suite aus dem TODO-Original existiert nicht und wurde nicht
+  erfunden — der HTTP-Smoke ist die ehrliche Form davon.
+
+## D144 — Swim/Climb-Aufschlag nur OHNE Speed (AP-030)
+- **Status:** umgesetzt.
+- **Kontext:** D140 machte swim/climb für alle Creaturen bewegungs-erlaubt
+  und belegte jedes Feld mit dem SRD-Aufschlag (+1/ Feld, +2 schwierig).
+  Das war zu scharf: Wer eine swim-/climb-Geschwindigkeit besitzt, schwimmt
+  und klettert nach SRD ohne Kostenzuschlag. D83 durfte nicht bedeuten,
+  bestatte Wesen mit Fischgeschwindigkeit zu bestrafen.
+- **Entscheidung:** Der Aufschlag folgt dem Speed, nie der terrain-Zelle.
+  movecost.route_cost und path.path_footprint_cost erhalten ein durchgängiges
+  strained-Flag (unit + Aufschlag statt unit * Multiplikator), das die
+  creature-kundige Schicht setzt: movement._strained(tok, mode) prüft die
+  Speed-Tabelle, walk()/walk3d()/Preview tragen es durch. combat.move_remaining
+  führt fehlende swim/climb-Pool-Einträge auf den walk-Pool zurück, damit das
+  Ledger dieselbe Einheit wie movecost spricht. fly bleibt Speed-Pflicht
+  (D140), swim/climb bleiben immer erlaubt.
+- **Grund:** Die Grid-Module bleiben creature-blind (eine Lookup-Stelle),
+  die Mechanik folgt exakt der SRD-Regel „speed vorhanden = kein Aufschlag",
+  und die Wirtschaft (Budget) bleibt in einer Währung.
+- **Konsequenzen:** Kanon 1050 (5 Tests in test_d140_swim_climb.py: Unit-
+  strained, zwei Ledger-Unit-Tests, Surcharge-Erwartungen auf strained=True
+  umgestellt). Der alte WS-Kampf-Budgettest wurde durch deterministische
+  Unit-Tests ersetzt — er hing bei entferntem End-Event in receive_json.
+  Lernkurve dokumentiert: compose-Aufrufe IMMER mit --build (ein vergessenes
+  --build ließ zweimal alten Image-Code laufen und produzierte Scheinhänger).
+
+## D145 — Species-Ability-Boni mechanisch (AP-031)
+- **Status:** umgesetzt.
+- **Kontext:** Die species.csv führt seit jeher die Spalte ability_bonuses
+  (z. B. dex+2), aber kein Konsument hat sie je angelegt — die D101-Follow-up-Zeile
+  „not mechanically applied" war die letzte offene Mechanik-Lücke im geführten
+  Charakterfluss.
+- **Entscheidung:** Grant nach D108-Muster: Report-Endpoint (Vorschau der
+  Zielwerte) und Apply-Endpoint je Charakter, EXACTLY-ONCE innerhalb eines
+  db.tx(), Zahlen ausschließlich aus dem Raum-Content. Der Bonus ist ein
+  Ledger-Eintrag (build.species_bonus), den _replay_species am ANFANG der
+  Chronologie einspielt (2024: Species vor Origin, Klasse, ASI) — in
+  _recompute ebenso wie im unbuilt-Zweig von apply_origin, damit kein
+  späterer Bauschritt ihn je still verlieren kann. Bestehende Blätter werden
+  nie automatisch migriert; hp/AC/Slots/Ressources bleiben unberührt.
+- **Grund:** Ein Direktschreib-Knopf wäre beim nächsten Full-Recompute vom
+  base_stats-Snapshot verschluckt worden. Die Ledger-Replik ist dieselbe
+  Idempotenz-Maschine, die D108 für Origin bewiesen hat — zwei Grants in
+  beliebiger Reihenfolge kommutieren nachweislich.
+- **Konsequenzen:** Kanon 1055 (5 neue Tests inkl. Kompositionstest Origin
+  +Species in beiden Reihenfolgen). _species_projection zeigt die Boni jetzt
+  read-only. Die UI-Knöpfe im geführten Fluss sind Folgearbeit (API ist
+  vollständig); TODO-D101-Followup entsprechend nachgezogen.
+
+## D146 — Trank/Rollage wird verbraucht (AP-032)
+- **Status:** umgesetzt.
+- **Kontext:** Consumables hinterließen als „leere Hülle" im Inventar (nur der
+  charges-Zähler ging auf 0). SRD: ein Trank ist nach dem Trinken WEG. Die
+  TODO-Zeile „potions aren't deleted" war der letzte echte Regel-Overpass der
+  Inventar-Mechanik.
+- **Entscheidung:** _consume(it, items) in handle_use_item, innerhalb derselben
+  Schreibtransaktion wie die Heilung (nie Heilung ohne Verbrauch, nie
+  Verbrauch ohne Heilung; der op_id-Replay-Guard D93 bleibt der Türsteher).
+  Regel: kind potion/scroll UND charges==0 -> wenn qty>1: eine Dosis weniger
+  und die aktuelle ist frisch (charges zurück auf chargesMax); sonst fällt der
+  Eintrag aus der Liste. Ein Fluch-Eintrag bleibt IMMER (D106/D113: eine
+  Flurspur darf nicht verschwinden). Alles andere (Wandern, Ringe, …) behält
+  die bekannte depleted-Schale — aufladbare Items werden nicht weggeworfen.
+- **Grund:** Eine Regel, vier Hüllen-Workarounds (Client-Greyout, DM-Mülleimer,
+  Test-Erwartungen) sind vier Erklärungen. Die Inventarliste ist ab jetzt
+  wieder die Wahrheit: was drin steht, existiert.
+- **Konsequenzen:** Zwei alte Tests beweisen die neue Semantik und wurden auf
+  die stärkere Assertion gezogen (test_integration: items == []; sprint23: der
+  Replay eines verbrauchten Tranks antwortet ehrlich 'Item not found' statt
+  stumm). Kanon 1060 (5 neue Tests in test_d146_potion_consumed.py inkl.
+  qty-Stack, curse-Guard und Replay-Nachweis per Marker-Chat).
+
+## D147 — Attunement identifiziert (statt zu gate-en) (AP-033)
+- **Status:** umgesetzt.
+- **Kontext:** Die TODO-Zeile wollte „warn/gate attuning to an unidentified
+  magic item". Die Regel-Faktenlage (DMG wie SRD): das Attunement IST eine
+  kurze Rast mit dem Objekt, und die Regel sagt ausdrücklich, dass die
+  Creature beim Attunement die Eigenschaften des Objekts ERFÄHRT. Ein Gate
+  wäre eine Hausregel gegen die Regel.
+- **Entscheidung:** handle_attune flippt beim ATTUNE-ON für magische,
+  unidentifizierte Objekte zusätzlich identified und flüstert den Fund dem
+  Besitzer (desc-Zelle oder Hinweis ohne Text). refuse (Cap 3) und Toggle-off
+  verraten nichts; der DM-identify-Pfad bleibt unberührt. Die Vereinfachung
+  (Erkundung am Ende des Attune-Handlers, nicht an einer eigenen Short-Rest-
+  Uhr) ist explizit dokumentiert, weil die Engine Attunement ohnehin
+  augenblicklich modelliert.
+- **Grund:** Ein Warn-Gate hätte eine echte SRD-Erfahrung bestraft, die der
+  Spieler gerade durchführt. Die Identifikation ist die Belohnung des
+  Attunements selbst — jetzt ist sie auch die Implementierung.
+- **Konsequenzen:** Kanon 1063 (3 Tests in test_d147_attune_identify.py).
+  TODO-Zeile auf „resolved by rule, not by gate" gezogen. Für den Spieler
+  unbekannte Objekte bleiben unbekannte Objekte, bis er sie benutzt, einer
+  Rast widmet oder ein Attunement eingeht.
+
+## D148 — Multi-Socket-Geisterbeweis (AP-034)
+- **Status:** umgesetzt (Test-Evidence, kein App-Code).
+- **Kontext:** TODO P2 wollte „seed ghosts more robustly; multi-socket-per-user
+  testing". Die Prune-/Persist-/Hydrate-Maschinerie war bereits socket-richtig
+  gebaut (prune nur bei `if not socks`) — es fehlte der Beweis, und ein
+  Reconnect-Test fand ihn ohne neuen Code.
+- **Entscheidung:** Zwei Tests in test_d148_multisocket_ghosts.py: (1) schließt
+  einen von zwei Tabs eines Users — Geister bleiben in RAM, nichts wird
+  persistiert, keine offline-Presence; (2) nach dem echten letzten Socket
+  schreibt die DB, und der nächste State-View des Users zeigt die verblichenen
+  Tokens wieder (hydrate über denselben Weg wie nach einem echten Neustart).
+- **Grund:** „bereits richtig" ohne Test ist ein Gerücht. Die D142-Schichten
+  (RAM, ghosts_json, State-Hydrate) werden hier genau an der Naht geprüft,
+  die ein Browser-Tab-Wechsel schlägt.
+- **Konsequenzen:** Kanon 1065. Erkenntnis fürs Testen: Nebel-Geister brauchen
+  ein Token, das UNSICHTBAR endet — ein Pfad durch die Wand existiert nicht,
+  der DM muss teleportieren; und /state hydratisiert, prune aber auch wieder,
+  wenn der Beweis-Socket vorher schließt. TODO-P2-Zeile damit belegt.
+
+## D149 — In-App-Hilfe als Modul (Suche, Kategorien, Kontext)
+- **Status:** umgesetzt.
+- **Kontext:** Die Hilfe war statischer Text im Chronik-Panel: nicht durchsuchbar,
+  nicht nach Kontext, nie aktuell gehalten. Doku existsierte doppelt (statisch vs.
+  realidad) und veraltete still.
+- **Entscheidung:** app/static/js/65_help.js als eigenes Modul — 42 Einträge in 8
+  Kategorien (start/chars/combat/magic/maps/content/dm/errors), Suche (#help-search),
+  Kategorie-Tabs (#help-cats), Kontext-Chip (helpCtxCat(): game→combat, chars→chars,
+  inv→magic, story→dm, dm→dm). ?/Esc in 50_canvas/60_main delegieren nur noch an
+  setHelp()/helpVisible(); 99_boot MODULES/REQUIRED tragen das Modul. Jeder
+  Hilfe-Eintrag nennt den echten UI-Griff (Button-ID oder Pfad), keine Fiktion.
+- **Grund:** Hilfe, die nicht finde-bar ist, ist Doku-Friedhof. Eintrag nur für
+  Dinge, die Audit/E2E als bedienbar belegt haben (test_d149 pinnt das).
+- **Konsequenzen:** index.html verliert den statischen Block; Hilfe wächst ab jetzt
+  mit jedem Feature-Decision-Eintrag.
+
+## D150 — AP-022 Geschlossen: Stabilize- und give-Buttons
+- **Status:** umgesetzt.
+- **Kontext:** D136 (Stabilize) und D137 (inv_transfer) waren reine Server-Ops —
+  die Audit-Matrix fand keinen einzigen Aufrufpfad im Client. Feature vorhanden,
+  im Spiel nicht existent.
+- **Entscheidung:** 🩺 Stabilize sitzt im Death-Block des Sheets (deathHtml/#dstab,
+  eigene Person gesperrt wie serverseitig); 🫱 give sitzt auf der Inventarzeile des
+  eigenen Chars und öffnet den Picker (#give-to/#give-qty/#give-go). Der Server
+  prüft alle Gate erneut (Adjacenz, Aktion, Turn, Besitzer); der Button ist nur
+  die Abkürzung, nie die Erlaubnis. Bewusst KEINE erfundene UI: pickpocket_take,
+  forced_move, knock_prone und class_levels bleiben DM-direct/intern (Doku, keine
+  Tasten-Fiktion).
+- **Grund:** AP-022 (Server-op ohne UI) war der drittgrößte Audit-Befund; ein
+  Server-Handler, den kein Mensch drücken kann, ist ein Test-Handler.
+- **Konsequenzen:** test_d150 pinnt Sende-Payloads + Picker-Reset + Hilfe-Deckung.
+
+## D151 — Test-Schulden der Audit-Matrix abgearbeitet
+- **Status:** umgesetzt.
+- **Kontext:** turn_mark, death_clear, quest_obj_add und quest_fail hatten UI,
+  aber keinen einzigen pytest-Nachweis — Matrix-Eintrag „getestet: nein".
+- **Entscheidung:** tests/test_d151_ops_coverage.py: turn_mark (DM + Besitzer,
+  Toggle zurück auf available), death_clear (DM-only), quest_obj_add/quest_fail
+  (Flow + „Only the DM manages quests"). Server-Fehlerstrings werden wörtlich
+  gepinnt, weil die Hilfe sie zitiert.
+- **Grund:** Die Matrix darf keine Spalte „glaubt grün" enthalten.
+- **Konsequenzen:** Kanon 1065 → 1084.
+
+## D152 — Trank ohne Ladenzähler = genau ein Schluck
+- **Status:** umgesetzt.
+- **Kontext:** D146 konsumiert nur, wenn charges>0 auf 0 fällt. Content-Pack-Trank
+  (charges=-1) lief im handle_use_item-Else-Zweig und wurde NIE verbraucht —
+  unendliche Healing Draughts, Wirtschaft kaputt, trotz grüner D146-Tests (die
+  nutzten props-charges=1).
+- **Entscheidung:** In handle_use_item normalisieren: kind potion/scroll mit
+  charges<0 ⇒ charges=1, danach übernimmt der getestete D146-Pfad. Andere
+  ladungslose Heiler (Stäbe) bleiben unbegrenzt — Test pinnt beide Richtungen.
+- **Grund:** Ein Trank ohne Zähler dokumentiert genau eine Dosis; „-1" kann nicht
+  „für immer" bedeuten, wenn das Item eine Einweg-Kategorie hat.
+- **Konsequenzen:** test_d152_uncounted_vial_consumes.py (3 Pins). E2E D ist damit
+  erst wahr: Use verbrauchte vorher lautlos nichts.
+
+## D153 — E2E-C-Suite + vier Stale-UI-Pfade
+- **Status:** umgesetzt.
+- **Kontext:** scripts/e2e_playability_suite.py (Szenarien C–G gegen echte
+  Live-Instanz) fand vier Bugs, die statischer Audit + API-Tests nicht sehen:
+  (1) refreshRoom malte ein OFFENES Sheet nicht neu — Grants/HP/Tod kamen erst
+  nach erneutem Klick an; (2) die Private-Card des Bundesgenossen hatte keinen
+  Death-Block — der D150-Stabilize-Button war für Spieler faktisch unerreichbar;
+  (3) POST /floors aktualisierte state.floors, aber das eigene offene Sheet
+  (ws floors_changed geht nur an die ANDERN); (4) der presence-Handler machte
+  immer .add() — das #online-Roster wuchs, Offline-Geister blieben grün.
+- **Entscheidung:** Alle vier gefixt (Sheet-Re-Mal-Guard: offen && !npcEdit &&
+  !npc; Death-Block + wireDeath in der Private-Card — tok.death ist öffentlicher
+  Table-State, die Inventar-Privatsphäre bleibt unangetastet; Re-Mal im
+  fl-add-Antwortzweig; presence: online?add:delete). Suite bleibt als
+  scripts/e2e_playability_suite.py liegen (C: Sterben/Tod/Sichern/Stabilize/
+  Initiative/Chip/Angriff, D: Grant/Use/give, E: Floor anlegen + Ebene wechseln,
+  F: Chat/Reload/Presence, G: Hilfe) und läuft gegen jede Live-Instanz.
+- **Grund:** Buttons, die auf totem Daten-Stand sitzen, sind für den Spieler
+  kaputt — egal ob der Server recht hat.
+- **Konsequenzen:** test_d153_ui_refresh_closure.py pinnt alle vier Stellen;
+  E2E A–G grün; Kanon 1093.
+
+## D154 — Massive Damage: Rest-Regel statt Rohschaden
+- **Status:** umgesetzt.
+- **Kontext:** health.py verglich den ROHEN (post-resistance) Schaden mit
+  max_hp: ein voller 20/20-Held starb bei exakt 20 Schaden (Rest 0!), und
+  Temp-HP-Absorption zählte mit in den Tötungs-Vergleich. Die Nacht-3-Doku
+  hatte die Abweichung als Regelentscheidung markiert; der Auftrag 4.0
+  entschied sie: 2024SRD — tödlich ist, was nach dem Fall auf 0 HP an
+  Schaden ÜBRIG bleibt und dabei min. max_hp erreicht.
+- **Entscheidung:** prev>0: dead iff (remaining - prev) >= max_hp.
+  prev<=0 (Schaden auf 0 HP): bleibt bei der bestehenden Regel — damage
+  >= max_hp => instant (und der übliche Fail + crit-double-Fail).
+  remaining = post-resistance, post-temp; hp = max(0, prev-remaining).
+  Der Integrations-Test, der -20 auf 20/20 als dead pinnte, wurde auf die
+  korrekte Grenze gesetzt (-20 => dying, -40 => dead) — Intention erhalten,
+  Zahl berichtigt, nicht abgeschwächt.
+- **Grund:** Eine Tötungsregel, die gesunden Helden bei Normal-Trefferwurf-
+  Maximum exekutiert, ist kein Hausrecht, sondern ein Zählfehler.
+- **Konsequenzen:** test_d154 (7 Fälle inkl. Temp-HP- und 0-HP-Grenzen).
+
+## D155 — Edge-Case-Sonden: Engine hielt; eine Abweichung sichtbar gemacht
+- **Status:** umgesetzt.
+- **Kontext:** Auftrag 4.0 verlangte einen systematischen Bruch-Versuch:
+  Ressourcen bei Refusal/Replay, Consumables, Heilung/Tod, Floor-Adjacenz,
+  Transfer-Races, Slot-Double-Send, CSV-Müll, NPC-Autorität.
+- **Entscheidung:** 12 deterministische Sonden (test_d155_edge_probes.py) —
+  alle grün, kein neuer Server-Bug. Zwei Ergebnisse werden pinnt statt
+  nur notiert: (1) Full-HP-Trank consumed trotzdem die Dosis (D152-Invari-
+  ante); (2) der bewusst pinnte Kurze-Rast-Pfad: ein Sterbender kann sich
+  mit Hit Dice selbst aufrichten — 2014-RAW verlangt Bewusstsein dafür.
+  Das ist bestehendes, seit D-Tagen getestetes Design (owner-or-DM,
+  hit-dice-basiert); es zu kippen wäre EINE NEUE Hausregel — daher
+  Doku + Manuell-Abnahme-Punkt, kein Autopilot-Wechsel.
+- **Grund:** Ein grüner Probe-Suite-Bestand ist ein Beweis, kein Nichts.
+- **Konsequenzen:** NPC-Angriff durch Spieler bleibt stilles Authz-Refusal
+  (kein Informationsleck); D145-Species-Grants sind bereits exactly-once
+  gepinnt; cross-floor Range/Adjacenz ist D114-versiegelt.
+
+## D156 — Hilfe-Wahrheits-Gate + G2 (DM-Reload) + Kamera-Erkenntnis
+- **Status:** umgesetzt.
+- **Kontext:** Die Hilfe (D149) nennt Buttons mit Klarnamen. Bislang gab es
+  kein Gate, das beim ersten Umbenennen eines Buttons rot würde. Dazu:
+  nach einem Reload sitzt die DM-Kamera nicht auf den Tokens — pixelgenaue
+  Klicks gehen ins Leere, bis der Nutzer panned.
+- **Entscheidung:** test_d156_help_ui_truth.py extrahiert jedes <b>-Label
+  der Hilfe und verlangt: im UI-Code ODER (bei zitierten Server-Absagen)
+  im Server-Code vorhanden. 55_diorama.js ist als claim-Ziel ausgenommen
+  (eingefroren). Neues E2E-Szenario G2: DM-Reload -> Re-Enter -> DM-/Game-/
+  Inv-Tab -> floor/init/grant-Handles sichtbar; Token-Selektion dort
+  synthetisch (renderSheet), da die Kamera nach Reload bewusst nicht
+  springt — der Canvas-Klick wird in C/D/E real gefahren.
+- **Grund:** Doku ohne Realitäts-Gate verrottet still; genau das war D149s
+  Vorgeschichte.
+- **Konsequenzen:** Hilfe-Drift kostet ab jetzt ein rotes Test-Item statt
+  einen verärgerten Spieler.
+
+## D157 — Raum-Löschung: vollständige Kaskade + bewusste Bestätigung
+- **Status:** umgesetzt.
+- **Kontext:** Manuelle Abnahme: „Delete … permanently“ ließ sich nicht
+  bestätigen. Der Lösch-Cascade (D76) kannte nur tokens/messages/room_state/
+  notes/quests/room_members. `item_defs` und `containers` referenzieren aber
+  rooms(id) OHNE `ON DELETE CASCADE`, und `foreign_keys=ON` ist aktiv. Ein Raum
+  mit Loot-Truhe, Custom-Item oder importiertem CSV-Item ließ `DELETE FROM rooms`
+  aufschlagen -> `db.tx()` rollte alles zurück -> HTTP 500, als einziges Feedback
+  ein 2,5-Sekunden-Toast „Internal server error“ („bestätigen tut nichts“). Die
+  UI war zudem ein Inline-Bewaffnen-mit-6s-Auto-Disarm — Fehlklick- und
+  No-op-Falle. Die bestehenden Delete-Tests erzeugten jene Zeilen nie und
+  blieben grün.
+- **Entscheidung:** (1) Backend: `ROOM_DELETE_CHILD_TABLES` als eine Wahrheit
+  (tokens … item_defs, containers, content, inv_ops); rooms zuletzt. Bewusst
+  KEINE Schema-Migration (Constraint-Anbau wäre destruktiv) — nur App-Kaskade.
+  (2) Frontend: statisches <dialog id="del-room-dlg">; der Löschknopf wird erst
+  scharf, wenn der exakte Raum-CODE getippt ist; Fehler erscheinen dauerhaft im
+  Dialog, nicht als Wegwerf-Toast; kein Auto-Disarm. Server-Autorität
+  (DM-owner-Check) bleibt alleinige Wahrheit. (3) Gate:
+  test_room_delete_all_tables.py verlangt 200+0-Waisen über JEDE room-scoped
+  Tabelle und prüft strukturell (PRAGMA foreign_key_list), dass jede
+  Nicht-CASCADE-Fremdschlüssel-Tabelle in der Löschliste steht — neue Tabellen
+  kosten ab sofort ein rotes Test-Item statt eines stillen 500.
+- **Grund:** Ein „grüner“ Löschtest, der die schuldigen Zeilen nie anlegt, ist
+  kein Beweis. Die Freigabe-Eingabe ist Bedienungssicherheit, kein Misstrauen
+  gegen den Server.
+- **Konsequenzen:** test_room_delete_all_tables (2), test_room_delete_client
+  (2, echter Client-Code + Live-Server inkl. 500-Pfad-Gegenprobe),
+  Browser-E2E-Szenario H. Hilfe-Eintrag „Deleting a room“ (EN). Bestehende
+  test_room_delete.py bleibt unverändert.
+
+## D158 — Etagen-Aufzug im Karten-Editor statt Ebenen-Dropdown
+- **Status:** umgesetzt.
+- **Kontext:** Der Karten-Editor hatte keine intuitive Etagenwahl; das
+  Bestecken einer bestimmten Etage erforderte ein verstreutes Dropdown +
+  Seitentab-Browsen. Der Nutzer wollte einen sofort verständlichen, vertikalen
+  Etagenwähler (Keller/Erdgeschoss/…/Dach als Beispiel), ohne feste
+  Ebenen-Obergrenze und ohne zweite Etagen-Engine.
+- **Entscheidung:** Der bestehende Edit-Ebenen-SSOT `state.viewFloor` wird
+  weiterverwendet; KEIN neues Modell. Im Editor (#editor) eine vertikale
+  Floor-Rail (`renderFloorRail`): höchste deklarierte Ebene oben, Primary/Ground
+  unten, aktive eindeutig markiert; Namen/Ebenennummern direkt aus
+  `[""]+FLOOR.parse`/`floors.level` (beliebig viele, frei benannt). Ein Klick
+  = `gotoEditFloor`: setzt viewFloor, `refreshRoom()` holt die Ebene vom Server,
+  `rearmEditBuffer()` zeigt den Edit-Puffer auf die neue Ebene — so treffen
+  Pinsel ausschließlich die gewählte Etage (Server schreibt pro Ebene nach
+  `floor_maps`). Das Ebenen-Dropdown (#view-floor) entfällt; Browsen ohne Edit
+  bleibt über #floorpanel. Spieler-Sicht bleibt strikt getrennt: Okklusion ist
+  bereits fail-closed über `openv` (vertical3d), 55_diorama.js bleibt unberührt;
+  `onPlane` spiegelt die Ebenenwahl nur im Editor.
+- **Grund:** Ein Fahrstuhl ist eine Darstellungsaufgabe, kein zweiter
+  Geometrie-Kern. Die Server-Geometrie war bereits richtig; sie fehlte nur als
+  klares Bedienelement.
+- **Konsequenzen:** test_floor_editor_active_plane (3: nur aktive Ebene,
+  Reload/Persistenz, kein Cross-Kontamination, Spieler/Unbekannt-Ebene refused),
+  test_floor_visibility_levels (3: Boden/OG/Dach massive Decke vs. Schacht
+  symmetrisch, DM-Edit-Ebene verschiebt Spieler-Perspektive nicht,
+  Canvas `onPlane`). Hilfe-Eintrag „Floors“ um Rail ergänzt (EN, Truth-Gate).
+
+## D159 — Offene Volumen: Nicht-Primary-Ebenen sind Luft, Levels signed, freie 3D-Flugbewegung
+- **Status:** umgesetzt.
+- **Kontext:** Bislang war eine unbenannte/nie bearbeitete Etage still eine
+  unsichtbare Kopie der Primary (Ground), und Ebenen waren nur positive Stapel
+  über dem Ground. Das erzeugte widersprüchliche Defaults: eine frisch
+  angelegte Etage war „massiv“, obwohl der DM sie als Luftraum/Dachboden
+  gemeint hatte; ein Keller unter dem Ground war nicht darstellbar; und eine
+  geflogene Kreatur konnte nicht frei durch durchgehenden Luftraum über mehrere
+  Geschosse steigen. Der Nutzer verlangte: Ground (E0) als Standard-Boden, alle
+  anderen nie bearbeiteten Ebenen als echte Luft, echte signed/negative Level,
+  massive gelegte Bodenflächen als deckungswirksame Platte, freie 3D-Flugbewegung
+  durch die bestehende Engine, Etagen-Kennzeichnungen und einen reinen
+  Anzeige-Filter — ohne Git, ohne Eingriff in 55_diorama.js, ohne zweite Engine.
+- **Entscheidung:** Ein viertes Terrain `air`(6): nicht begehbar, blockiert
+  weder Bewegung noch Sicht, ist „body_open“/offenes Volumen, aber KEINE Platte
+  (`slab`). Nie bearbeitete Nicht-Primary-Ebenen liefern über
+  `net.get_map()` ein `blank_map(base, AIR)`; die Primary bleibt Standard-Boden;
+  gespeicherte Kartenzellen bleiben byte-identisch (keine Neu-Interpretation).
+  Eine gelegte Fläche (walkable oder wall) ist `slab` und deckelt ihre Säule:
+  `boundary_open(lower,upper)= openv(lower) ODER NOT slab(upper)`;
+  `column_open`/`vertical_path_clear`/`body_planes`/`cross_plane_sight` arbeiten
+  über signierte, benachbarte Level und schlagen bei Lücken fail-closed fehl.
+  Etagen-Speicher abwärtskompatibel: flache Legacy-Liste = alles über Primary;
+  erst ein Below-Floor schreibt `{"below":[...],"above":[...]}`;
+  `floors.order` liefert den Stack bottom→top inkl. Primary,
+  `floors.level_map` signierte Level (Primary 0, above positiv, below negativ).
+  Freie 3D-Flugbewegung nutzt DIE EINE `path.find_path_3d`/`_move3d` und
+  `vertical3d.vertical_path_clear` — Mehrstöckiger Flug ist eine Kette benachbarter
+  offener Grenzen, diagonaler Flug die Komposition aus Horizontal+Vertikal;
+  Kollision/Budget/Größe/Berechtigung bleiben serverseitig. Frontend:
+  `state.floor_levels`, `floorBadge` (E0/E+1/E−1), Etagen-Rail/Panel mit
+  signierten Tags, Below-Add, Air-Pinsel, „All visible“/„This floor only“ als
+  reinen Anzeige-Filter (`onPlane`), Cross-Plane-Token mit Floor-Badge/Delta.
+- **Grund:** Defaults waren widersprüchlich; Luft ist das natürliche Nichts
+  über dem Ground. Die Geometrie war bereits openv-zentriert — es fehlte nur
+  ein ehrliches Default-Volumen, signed Levels und die Anzeige. Kein zweiter
+  Geometrie-Kern, keine Migrationslast.
+- **Konsequenzen:** Neue Tests `tests/test_d159_open_volumes.py` (Air-Default,
+  Air-Semantik, signed/below Levels, Platte vs. openv, Air-Stapel = ein
+  Volumen, Mehrgeschoss-Flug-Route, diagonale Flug-Komposition,
+  server-autoritäre Air-Aszension + verweigerte Platten-Decke,
+  Stored-Data-Roundtrip) und `tests/test_d159_view_frontend.py`
+  (Anzeige-Filter/Labels/Badge display-only auf echter Client-API).
+  Bestehende D114/D86/D102/D103/D158-Suiten auf die neue Wahrheit umgestellt:
+  frisch-Ebene==Air, Clamp-Max 6, massive-Decken-Fixtures legen jetzt Platte,
+  L4-Occupancy/Rider/Lamp/AoE/Ping-Suiten legen Zielfläche. Hilfe „Floors“/
+  „Seeing across floors“/Brushes (EN, Truth-Gate). VERTIKAL-Geometrie-Doku +
+   Feature-Matrix + Arbeitslog aktualisiert. `ray_clear_3d` bleibt als primitives
+   Werkzeug; die Sight-Lieferung bleibt bei offener-Säule+Pro-Ebene-LOS
+   (leckfrei), ein integrierter Diagonal-Ray bleibt optionale Folgearbeit.
+
+## D160 — Qualitäts-/Regressionstore DnDTable (vertikale 3D + Etagen)
+
+- **Status:** bestanden. Kein neues Feature; adversariale Prüfung des Systems aus
+  D114/D158/D159 über echte Server- und Browser-Pfade (Dual-Chromium), dokumentiert
+  in `docs/QUALITY_GATE_D160.md`.
+- **Beschluss:** Shaft-/Säulensicht bleibt Senkrechtprojektion + 2D-LOS je Ebene
+  (`ray_clear_3d` nur Primitives, kein Zustellpfad). Etagen-Löschen ist
+  **topologisch**: nur die äußerste Ebene je Seite; sonst `400` + verständlicher
+  Grund in der UI (Toast) statt stiller Ablehnung — denn ein Löschen der mittleren
+  Ebene würde sonst die Karten der darüberliegenden Ebenen still den falschen
+  Etagen zuordnen (Datenintegrität).
+- **Behoben (Bug Q2):** `app/floors.py` erlaubt Entfernen nur der äußersten Ebene;
+  `30_room.js` zeigt den Server-Grund. Fail-before/pass-after in
+  `test_d160_floors.py` (Stack, Level, Tokenposition, gespeicherte Karten bleiben
+  unverändert).
+- **Bewusst offengelegtes, korrektes Verhalten (nicht behoben, nur dokumentiert):**
+  Spielervisus = fester 6-Felder-Radius in nicht-dunkler Karte, Darkvision nur in
+  dunkler Karte, Sichtquelle ist besitzerbezogen (Kontrolle ≠ Besitz); eine
+  bearbeitete Ebene legt eine massive Platte und deckt damit eine Säule
+  (Shaft braucht offene Zwischenzelle); ein cross-plane Token, der durch einen
+  Karten-Edit sichtbar wird, erscheint sofort im maßgeblichen Pro-Viewer-`/state`,
+  der inkrementelle Live-WS kann ihn erst nach einem Client-Refresh nachschieben
+  (UX-Nachzieher am Live-Pfad, kein Sicht-/Sicherheitsfehler). Ruhender Flieger
+  wird nachträglicher Kartenänderung nicht revalidiert (Grenze, durch Test
+  dokumentiert).
+- **Konsequenzen:** Neue Tests `test_d160_floors.py` (3), `test_d160_geometry.py`
+  (20), `test_d160_authority.py` (8), `test_d160_perf.py` (1) = 32; echter Browser-
+  E2E `scripts/e2e_d160.mjs` (A–H) rc=0, Belege `e2e-evidence/e2e-d160-*.png`.
+  Kanon 1137 → **1169 passed, 0 skipped, 0 failed (rc=0)** (Zahl zweifach bestätigt:
+  Fortschritts-Marks + Collect). Feature-Matrix/Arbeitslog nachgezogen.
+
+## D162 — Operation: Keine Ausreden mehr (die acht P2-Lücken des D161-Audits)
+
+- **Status:** bestanden. Alle acht P2-Lücken aus
+  `docs/PLAY_SESSION_AUDIT_D161.md` plus `item_defs`-Raumkollision,
+  Wizard-Zauberwahl und laute DM-only-Ablehnung sind über echte UI-Pfade
+  geschlossen; Abschlussbericht `docs/FEATURE_COMPLETENESS_D162.md`.
+- **Beschlüsse (Regelkanon):**
+  - **Sturz (P2-7):** 1d6 Wuchtschaden je volle 10 ft Fallhöhe, Cap 20d6,
+    unter 10 ft nichts; Landung prone, wenn nicht sicher gelandet; Schaden
+    ausschließlich über `health.damage` (kein Direkt-UPDATE). Auslöser:
+    Bewegungsende ohne tragenden Untergrund, Zustands-/Würfel-Hooks und der
+    bewusste DM-Knopf `token_drop` („🪂 Drop“ im NPC-Bogen) für absichtliche
+    Würfe — der gezwungene Drop gilt dem Flieger als Sturz, nicht als Flug.
+  - **Schlossknacken (P2-4):** Spieleraktion per Shift-Klick an der Türkante =
+    Dex-Check über `opposed.check_roll` gegen `lock_dc` (clamp 5–25, Default
+    15, Tür-Editor). Ohne Diebeswerkzeug: nachteilig, kein Prof; mit Werkzeug
+    und Background-`tool_prof`: Prof. Ergebnis nur als Flüstern.
+  - **Schadens-Bestätigung (P2-5):** Item-Waffen-Treffer mit Ziel erzeugen
+    eine Bestätigungszeile im Game Log (kein Würfel-Fundus-Pfad, kein
+    naturlicher 20-Zauber ohne Ziel). Apply ist ein atomarer Claim
+    (Doppelklick/Neuverbindung sicher), Decline verwirft, Sweep räumt altes
+    ab; Fehler gibt den Claim für Retry zurück.
+  - **Pack-Upsert (P2-3):** dritter Importmodus `upsert` = wie `replace`,
+    aber der Report führt geänderte Zeilen als `updated` explizit auf;
+    identische Zeilen ändern nichts. `item_defs` tragen jetzt den
+    Composite-PK `(room_id,id)` (`migrate_item_defs`, Backup + Fail-Closed),
+  damit Räume gleiche Item-IDs unabhängig verwalten können.
+  - **Lautheit (Audit Ph5):** 14 DM-only-Verweigerungen antworten sichtbar
+    `error: "DM only"`; **alle** Leak-Schutz-Stummen (geheime Tür, Fremdes,
+    Fallen auf anderer Ebene) bleiben bewusst stumm — Lautheit wäre dort ein
+    Informationsleck. Beide Klassen sind in `test_d162_error_feedback.py`
+    fest genagelt.
+- **Dokumentierte Test-Umkehrungen:** `test_d100_integration.py` G9-Pins auf
+  `(room_id,id)` geflippt; `test_d129_exhaustion.py` erwartet die
+  Exhaustion-DM-Ablehnung jetzt laut (gewollter Wechsel, Alt-Pass bleibt).
+- **Konsequenzen:** Neue Tests `test_d162_*` (11 Dateien, +67); echter
+  Browser-E2E `scripts/e2e_d162.mjs` V0–V9 rc=0 („ALL SCENARIOS PASSED“,
+  V7 mit realem Fly-Move + Drop auf Primärebene), Belege
+  `e2e-evidence/d162-*.png`. Kanon 1192 → **1259 passed, 0 skipped, 0 failed
+  (rc=0)** (147 Dateien; Marks + Collect zweifach bestätigt). Feature-Matrix,
+  CSV-Guide (Upsert-Modus, `item_defs`-Raum-PK), Arbeitslog und
+  Abschlussdoku nachgezogen.
+
+## D163 — Operation: Letzte Codezeile (CSV-only-Annahme über echten Browser)
+
+- **Status:** bestanden, mit dokumentierten Grenzen. Neun Pakete
+  (Raum-Registry-Isolation, Werkzeug-/Waffen-Profizienz-Achsen, ASI-2024-Wahl,
+  ASI-Picker-Reparatur, Beutetabellen, Quest-CSV, tägliche Bereitungsliste,
+  Kreatur-CSV-Abwehrwerte, Inhalt-UI-Sichten) sind implementiert und
+  verhaltensgeprüft; Paket „Effekt-Grammatik“ wurde auditiert und als
+  **bewusste Sicherheitsgrenze** (Whitelist in `effectops.canon()/run()`)
+  bestätigt — keine Lücke, keine Änderung. Kernfrage beantwortet in
+  `docs/CSV_ONLY_FINAL_AUDIT_D163.md`.
+- **Beschlüsse (Regelkanon):**
+  - **Zauber-Bereitschaft aus CSV (Lücke geschlossen):** Das SPELL-Schema
+    bekam die bool-Spalten `prep` (Zauber hängt an der täglichen Liste) und
+    `prepared` (Startwert am ersten Tag). `_spell_display` las diese Felder
+    schon immer — das Schema hatte sie nie geliefert, der tägliche
+    Bereitungslauf war damit aus purem CSV unerreichbar. `_spell_display`
+    unverändert; die Zeilen liefern jetzt, was der Code erwartet.
+  - **Bereitungs-Gate auf der Ability-Schiene (echter Fund des E2E):**
+    charbuild legt jeden bekannten Klassenzauber in `characters.abilities`,
+    das Sheet rendert dafür `.cast-ab` → `ability_cast` — und dort fehlte das
+    D138-Gate komplett: Die bereitungs-gate-te Zauberliste wäre im echten
+    Spiel dekorativ gewesen. `abilities._consume_cost` (spell_slot-Zweig für
+    Charaktere) prüft jetzt dieselbe Regel wie `room.dice`
+    („… is not prepared“), Lesung in derselben Transaktion wie der
+    Slot-Verbrauch — kein Rennfenster. Fest genagelt in
+    `test_d163_prepare.py::test_ability_pipeline_cast_respects_the_daily_list`.
+  - **ASI-Picker 2024 (echter Fund des E2E):** Die Auswahl „asi“ in der
+    Assistenten-Zeile ließ den +2/+1-Picker nie erscheinen (onchange rief nur
+    die Zusammenfassung). `renderPrepWizard()`-Rebuild bei ASI-Auswahl macht
+    den Weg im Browser gangbar; E2E S2 beweist ihn (Bis-zu-Stufe-4-Build mit
+    Subklasse + ASI (+2 WIS/+1 INT) rein per Klick).
+  - **Slot-Progression pro Zeile:** `slot_progression` wird pro Klassenstufe
+    gelesen; leere Stufenzzeilen liefern keine Slots. Kanon wie im
+    Auslieferungspack: **Wert auf jeder Levelzeile wiederholen** (D163-Pack
+    angepasst). Keine Codeänderung — Datenkonvention dokumentiert.
+  - **Startausrüstung = UI-Zwei-Schritt:** Hintergrund- und Klassenausrüstung
+    werden über `🎒 Starting equipment` → `Grant equipment` im
+    Vorbereitungs-Screen verliehen (idempotent, Server-seitig gegen das Pack
+    validiert). E2E fährt genau diesen echten Pfad, nicht den DM-Transfer.
+  - **Beute- und Quest-Kanäle:** Beute-Ansage reitet die eine
+    Chat-Pipeline (`CHAT.post_chat` → „chat“-Event); `sys_msg` bleibt
+    DB-only. Mengenwürfel in `loottables.csv` werden mit `valid_dice`
+    („2d6+5“) geprüft und beim Speichern fail-closed nachvalidiert.
+    Quest-Upsert pro Raum behält DM-Fortschritt (Haken) bei Reimport.
+- **Konsequenzen:** Kanon 1296 → **1297 gesammelt, rc=0** (neuer Gate-Test;
+  Voll-Lauf gegen den finalen Build). Byte-Idempotenz des Pack-Generators
+  wiederhergestellt (generierter `spells.csv` enthält die neuen Spalten,
+  Scheibe neu erzeugt — `test_d109_mastery` grün). Echter Browser-E2E
+  `scripts/e2e_d163.mjs` S0–S14 als **Einzel-Lauf von Null: 19 Verdikte, alle
+  UI-OK** (DM + zwei Spieler, Zip-Import, Builds bis Stufe 4, Bereitungsliste
+  hin- und zurückgeschaltet, Zauber gegen Monster hp 33→21, Beute, Quest,
+  Reload-Persistenz, Upsert-Idempotenz, Raum-Isolation, Autorität); Belege
+  `e2e-evidence/d163-*.png` + `verdicts_d163.jsonl`. Abschluss-Audit
+  `docs/CSV_ONLY_FINAL_AUDIT_D163.md`.

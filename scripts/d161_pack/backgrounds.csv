@@ -1,0 +1,3 @@
+id,name,skill_prof,tool_prof,languages,starting_items,feature,asi_abilities,origin_feat,manual
+bg_veteran,Veteran,"athletics, intimidation",vehicles (land),Common,potion_heal,"Fieldcraft: you read a camp or battlefield at a glance","str, con, dex",feat_soldier,House-rule background modelled on the 2024 pattern (three ASI abilities + one origin feat).
+bg_acolyte,Acolyte,"insight, medicine",,Common,potion_heal,"Shrine Rites: you know temple lore and ritual","wis, cha, con",feat_devotion,House-rule background modelled on the 2024 pattern (three ASI abilities + one origin feat).

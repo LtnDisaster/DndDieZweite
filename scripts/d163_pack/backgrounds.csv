@@ -1,0 +1,2 @@
+id,name,skill_prof,tool_prof,languages,starting_items,feature,asi_abilities,origin_feat,manual
+bg_tinker,Tinker,"arcana, history",tinker's tools,Common,tool_hexkit,Spotlock: you know how things come apart,"int, wis, dex",feat_hexcat,D163 acceptance background — grants the tool axis from CSV

@@ -122,11 +122,97 @@ window.addEventListener("unhandledrejection", function(ev){
   </main>
 </section>
 
+<!-- ============ ROOM PREPARATION (D101) ============ -->
+<section id="view-prep" class="view hidden">
+  <header class="topbar">
+    <div class="row">
+      <button id="prep-back" class="ghost">← Lobby</button>
+      <h1 id="prep-title">Room</h1>
+      <span id="prep-code" class="code" title="Click to copy the join code"></span>
+      <span id="prep-role" class="badge"></span>
+    </div>
+  </header>
+  <main class="lobby-grid">
+    <div class="card">
+      <h2>My table</h2>
+      <div id="prep-check" class="meta" style="opacity:.85"></div>
+      <div class="row"><select id="prep-char" style="flex:1" title="One of my characters"></select></div>
+      <div class="row"><button id="prep-new-toggle" class="ghost">＋ New character</button></div>
+      <div id="prep-new" class="row hidden"><input id="prep-name" placeholder="Character name" maxlength="48"></div>
+      <div class="row">
+        <select id="prep-species" title="Species — from this room's imported rule pack"></select>
+        <select id="prep-class" title="Class — from this room's imported rule pack"></select>
+      </div>
+      <div class="row">
+        <select id="prep-bg" title="Background — from this room's imported rule pack"></select>
+        <button id="prep-id-save" class="ghost" title="Store species/class/background on this character">💾 Identity</button>
+        <button id="prep-create" class="primary hidden">Create character</button>
+      </div>
+      <p id="prep-char-msg" class="meta" style="opacity:.75"></p>
+      <details id="prep-wizbox">
+        <summary>⬆️ Build &amp; level-up (guided)</summary>
+        <div class="row">
+          <label class="tiny">to level</label>
+          <input id="prep-to" type="number" min="1" max="20" value="1" style="width:56px">
+          <button id="prep-plan" class="ghost">🧭 Plan</button>
+          <button id="prep-apply" class="primary">⬆ Apply</button>
+        </div>
+        <div id="prep-wiz" class="meta"></div>
+        <div class="row"><label class="tiny" title="Raw choices JSON for decision types the guided form cannot show">
+          <input id="prep-expert" type="checkbox"> Expert mode (raw choices JSON)</label></div>
+        <div class="row hidden" id="prep-choices-row">
+          <textarea id="prep-choices" spellcheck="false" placeholder='{"skills":["stealth"],"subclass":"…","levels":{"4":{"feat":"…"}}}'
+            style="width:100%;min-height:56px;font-size:.72rem"></textarea>
+        </div>
+        <div id="prep-out" class="meta"></div>
+      </details>
+      <div class="row">
+        <button id="prep-assign" class="primary">📌 Seat character at the table</button>
+      </div>
+      <div class="row">
+        <button id="prep-gear" class="ghost" title="Give the starting items this room's pack defines (background and class kit)">🎒 Starting equipment</button>
+      </div>
+      <div id="prep-gear-out" class="meta"></div>
+      <div class="row">
+        <button id="prep-species-card" class="ghost" title="D162: this species' traits and its ability bonuses — granted exactly once by the server ledger, never by the browser">🐾 Species traits &amp; bonuses</button>
+      </div>
+      <div id="prep-species-out" class="meta"></div>
+      <div class="row">
+        <button id="prep-origin" class="ghost" title="2024 origin: this background's ability increases and its Origin feat, validated against this room's rule pack">🧬 2024 Origin</button>
+      </div>
+      <div id="prep-origin-out" class="meta"></div>
+      <div class="row"><button id="prep-table" class="primary">🎲 Open the table</button></div>
+    </div>
+    <div class="card">
+      <h2>Room overview</h2>
+      <div id="prep-content-hint" class="meta hidden" style="opacity:.8"></div>
+      <div id="prep-roster"></div>
+      <details id="prep-dm-block" class="hidden">
+        <summary>📚 Rule packages (DM)</summary>
+        <div class="row" id="prep-kinds" style="opacity:.85">Loading…</div>
+        <div class="row"><input type="file" id="prep-ct-file" accept=".csv,.zip" multiple></div>
+        <div class="row">
+          <select id="prep-ct-mode" title="Import mode">
+            <option value="preview">Preview (validate only)</option>
+            <option value="apply">Apply (keep conflicts)</option>
+            <option value="replace">Replace (overwrite)</option>
+            <option value="upsert">Upsert (update changed rows)</option>
+          </select>
+          <button id="prep-ct-upload" class="primary">Upload</button>
+        </div>
+        <div id="prep-ct-report" class="journal-list" style="max-height:170px;overflow:auto"></div>
+        <div class="row"><small class="meta" style="opacity:.6">Guide: <code>docs/CSV_CONTENT_GUIDE.md</code></small></div>
+      </details>
+    </div>
+  </main>
+</section>
+
 <!-- ============ ROOM ============ -->
 <section id="view-room" class="view hidden">
   <header class="topbar">
     <div class="row">
-      <button id="btn-back" class="ghost">← Lobby</button>
+      <button id="btn-back" class="ghost">← Prep</button>
+      <button id="btn-prep" class="ghost" title="Room preparation: rule packs, characters, build">⚙</button>
       <h1 id="room-title">Room</h1>
       <span id="room-code" class="code"></span>
       <button id="btn-help" class="ghost" title="Help &amp; keyboard shortcuts (?)">?</button>
@@ -141,6 +227,19 @@ window.addEventListener("unhandledrejection", function(ev){
   </header>
   <main class="room-grid">
     <div class="mapwrap">
+      <div id="previewbar" class="hidden">
+        <span id="pv-text">👁 DM preview</span>
+        <button id="pv-refresh" class="ghost" title="Re-fetch what this character sees right now">↻ Refresh</button>
+        <button id="pv-exit" class="ghost" title="Back to the full DM view">✕ Exit preview</button>
+      </div>
+      <div id="viewfilter" class="viewfilter hidden" role="group"
+           title="D159: which floors the map shows you. This is a personal DISPLAY filter only — it never hides anything from your real vision or moves anyone.">
+        <span class="vf-lbl">Floors:</span>
+        <button id="vf-all" class="ghost" type="button" aria-pressed="false"
+                title="Show every floor your view can legitimately reach, badged with its floor tag">All visible</button>
+        <button id="vf-current" class="primary" type="button" aria-pressed="true"
+                title="Show only the floor you are on">This floor only</button>
+      </div>
       <canvas id="map"></canvas>
       <div id="toast"></div>
       <div id="narrative-overlay" class="narrative-overlay" aria-live="polite" data-style="overlay">
@@ -153,6 +252,10 @@ window.addEventListener("unhandledrejection", function(ev){
         <span id="mh-text"></span>
         <button id="mh-go" class="primary">Move</button>
         <button id="mh-cancel" class="ghost">Cancel</button>
+      </div>
+      <div id="traphud" class="hidden" title="Search or disarm a trap on your token's cell (a DM can target any adjacent cell)">
+        <button id="btn-trap-search" class="ghost">🔍 Search</button>
+        <button id="btn-trap-disarm" class="ghost">🔧 Disarm</button>
       </div>
     </div>
     <aside class="side">
@@ -268,18 +371,61 @@ window.addEventListener("unhandledrejection", function(ev){
             <select id="inv-def" title="DM item definition"></select>
             <input id="inv-qty" type="number" min="1" max="9999" value="1" style="width:64px">
             <button id="inv-grant">Grant</button>
+            <button id="inv-loaddef" class="ghost" title="load the selected definition into the editor below">✎ Edit</button>
           </div>
-          <div class="row">
-            <input id="inv-newname" placeholder="new item name" maxlength="48" style="flex:1">
-            <select id="inv-newkind" title="category"></select>
-            <label class="tiny" title="stacks as one entry"><input id="inv-newstack" type="checkbox">stk</label>
-            <input id="inv-newweight" type="number" min="0" max="9999" step="0.1" value="0" style="width:64px" title="weight">
-            <input id="inv-newdmg" type="text" maxlength="10" placeholder="dmg e.g. 1d8" style="width:88px" title="attack properties (only for kind weapon): damage dice — leave empty for a plain item">
-            <select id="inv-newdtype" style="width:96px" title="damage type"><option value="">type…</option><option>slashing</option><option>piercing</option><option>bludgeoning</option><option>fire</option><option>cold</option><option>lightning</option><option>poison</option><option>necrotic</option><option>radiant</option></select>
-            <select id="inv-newatab" style="width:88px" title="attack/damage ability"><option value="">abil…</option><option value="str">STR</option><option value="dex">DEX</option><option value="int">INT</option><option value="cha">CHA</option></select>
-            <label style="font-size:.72rem" title="adds the proficiency bonus to the attack roll"><input id="inv-newprof" type="checkbox"> prof</label>
-            <button id="inv-mkdef" title="save as reusable definition, then it can be granted and put into containers">+ Def</button>
-          </div>
+          <details class="sheet-sec" id="inv-defeditor"><summary>🧩 Item definition (weapon & magic)</summary>
+            <input type="hidden" id="inv-editid" value="">
+            <div class="row">
+              <input id="inv-newname" placeholder="item name" maxlength="48" style="flex:1">
+              <select id="inv-newkind" title="category"></select>
+              <label class="tiny" title="stacks as one entry"><input id="inv-newstack" type="checkbox">stk</label>
+              <input id="inv-newweight" type="number" min="0" max="9999" step="0.1" value="0" style="width:58px" title="weight (lb)">
+            </div>
+            <div class="row" title="weapon profile (kind weapon/wand/staff)">
+              <input id="inv-newdmg" type="text" maxlength="10" placeholder="dmg 1d8" style="width:80px" title="damage dice">
+              <input id="inv-newdmg2" type="text" maxlength="10" placeholder="2-h 1d10" style="width:80px" title="two-handed / versatile damage dice">
+              <label class="tiny"><input id="inv-newvers" type="checkbox" title="versatile: switchable grip picks the dice">ver</label>
+              <label class="tiny"><input id="inv-new2h" type="checkbox" title="two-handed: occupies both hands">2H</label>
+              <label class="tiny"><input id="inv-newfin" type="checkbox" title="finesse: uses the better of STR/DEX">fin</label>
+              <input id="inv-newreach" type="number" min="0" max="60" placeholder="reach" style="width:56px" title="reach (ft)">
+              <input id="inv-newrgn" type="number" min="0" max="600" placeholder="rng" style="width:52px" title="normal range (ft)">
+              <input id="inv-newrgl" type="number" min="0" max="600" placeholder="max" style="width:52px" title="long range (ft)">
+            </div>
+            <div class="row">
+              <select id="inv-newatab" style="width:80px" title="attack/damage ability"><option value="">abil…</option><option value="str">STR</option><option value="dex">DEX</option><option value="int">INT</option><option value="cha">CHA</option></select>
+              <label class="tiny"><input id="inv-newprof" type="checkbox" title="adds proficiency to the attack">prof</label>
+              <input id="inv-newatabonus" type="number" min="-10" max="10" placeholder="atk" style="width:52px" title="attack bonus (this weapon)">
+              <input id="inv-newdmbonus" type="number" min="-10" max="10" placeholder="dmg" style="width:52px" title="damage bonus (this weapon)">
+              <select id="inv-newdtype" style="width:92px" title="damage type"><option value="">type…</option><option>slashing</option><option>piercing</option><option>bludgeoning</option><option>fire</option><option>cold</option><option>lightning</option><option>poison</option><option>necrotic</option><option>radiant</option></select>
+              <input id="inv-newextra" type="text" maxlength="8" placeholder="+1d4" style="width:58px" title="extra damage dice">
+              <input id="inv-newextrat" type="text" maxlength="12" placeholder="fire" style="width:58px" title="extra damage type">
+            </div>
+            <div class="row" title="defence & character grants (active while worn/wielded)">
+              <input id="inv-newacbase" type="number" min="0" max="40" placeholder="AC" style="width:48px" title="armour base AC">
+              <input id="inv-newacbonus" type="number" min="-5" max="10" placeholder="+AC" style="width:52px" title="AC bonus">
+              <input id="inv-newacmaxdex" type="number" min="-1" max="99" placeholder="dexcap" style="width:60px" title="max dex to AC (-1 = unlimited)">
+              <input id="inv-newattrb" type="text" maxlength="32" placeholder="wis+2" style="width:74px" title="attribute bonus, e.g. wis+2,cha+2">
+              <input id="inv-newattrset" type="text" maxlength="16" placeholder="dex=15" style="width:70px" title="set score, e.g. dex=15">
+              <input id="inv-newdark" type="number" min="0" max="999" placeholder="dark" style="width:56px" title="darkvision ft">
+              <input id="inv-newspeed" type="number" min="-99" max="999" placeholder="spd" style="width:52px" title="speed bonus ft">
+            </div>
+            <div class="row" title="grants: skills/saves/expertise (comma lists) and charges/attunement">
+              <input id="inv-newskill" type="text" maxlength="48" placeholder="skills" style="width:110px" title="skill proficiencies, comma list">
+              <input id="inv-newexpert" type="text" maxlength="48" placeholder="expertise" style="width:110px" title="expertise, comma list">
+              <input id="inv-newsave" type="text" maxlength="24" placeholder="saves" style="width:90px" title="saving-throw proficiencies, comma list">
+              <input id="inv-newcharges" type="number" min="-1" max="999" placeholder="chg" style="width:52px" title="charges (-1 = none)">
+              <label class="tiny"><input id="inv-newrecharge" type="checkbox" title="recharge on a long rest">rechg</label>
+              <label class="tiny"><input id="inv-newmagic" type="checkbox" title="magic item">mag</label>
+              <label class="tiny"><input id="inv-newattune" type="checkbox" title="requires attunement">att</label>
+            </div>
+            <div class="row">
+              <input id="inv-newdesc" type="text" maxlength="200" placeholder="description / manual effect" style="flex:1" title="shown on the sheet">
+            </div>
+            <div class="row">
+              <button id="inv-mkdef" class="primary" title="save as a reusable definition (grants and containers can use it)">💾 Save definition</button>
+              <button id="inv-newclear" class="ghost" title="clear the editor for a new item">+ New</button>
+            </div>
+          </details>
         </div>
         <div id="inv-chest" class="hidden"></div>
       </div>
@@ -325,6 +471,49 @@ window.addEventListener("unhandledrejection", function(ev){
           <label title="Apply critical damage to selected token"><input id="hp-crit" type="checkbox"> crit</label>
         </div>
       </div>
+      <div class="panel hidden" id="floorpanel" data-tab="dm">
+        <h2>Floors</h2>
+        <div id="floor-list" class="journal-list"></div>
+        <div class="row">
+          <input id="floor-new" placeholder="New floor name" maxlength="24">
+          <button id="btn-floor-add" class="primary" title="Add another occupancy plane to this room">＋ Add</button>
+          <label title="Declare this plane UNDER the ground floor (a cellar: E−1, E−2…)"
+                 style="white-space:nowrap"><input id="floor-below" type="checkbox"> below</label>
+        </div>
+        <div class="row"><small class="meta" style="opacity:.6">Planes are independent: own map, own fog, own tokens. A new plane is open AIR until you lay a floor (D159) — the ground floor (E0) starts floored. Players change planes at a stair object; only the DM moves tokens between floors. Floors below E0 are cellars (E−1, E−2…).</small></div>
+      </div>
+      <div class="panel hidden" id="lightpanel" data-tab="dm">
+        <h2>Lights</h2>
+        <div id="light-list" class="journal-list"></div>
+        <div class="row">
+          <button id="btn-lamp-add" class="primary" title="Place a new lamp (bright 5) at the centre of your view">💡 ＋ Lamp</button>
+        </div>
+        <div class="row"><small class="meta" style="opacity:.6">Lamps light THEIR plane only, walls block the glow (the same LOS as sight). Toggling here is silent DM administration — players experience the world change, not a fake action. 🕯 toggles room-wide darkness; a token's own light/darkvision lives in its sheet.</small></div>
+      </div>
+      <div class="panel hidden" id="peekpanel" data-tab="dm">
+        <h2>Peek</h2>
+        <div class="row">
+          <select id="peek-who" style="flex:1"></select>
+          <button id="btn-peek" class="primary" title="See exactly what this character sees — server-computed, read-only">👁 View as</button>
+        </div>
+        <div class="row"><small class="meta" style="opacity:.6">The preview is the character's real server-side sight (fog, darkness, light, hidden tokens) — a moment-image; Refresh re-fetches it. Nothing you see here changes what anyone sees.</small></div>
+      </div>
+      <div class="panel hidden" id="trappanel" data-tab="dm">
+        <h2>Trap control <span class="tiny" style="opacity:.6">D162-5</span></h2>
+        <div class="row"><select id="tdm-tok" style="flex:1" title="A token standing on the trap's plane — its cell pre-fills the coordinates"></select></div>
+        <div class="row">
+          <input id="tdm-x" type="number" placeholder="x" style="width:64px" title="Trap cell x">
+          <input id="tdm-y" type="number" placeholder="y" style="width:64px" title="Trap cell y">
+          <select id="tdm-victim" style="flex:1" title="Victim token for Spring (search/disarm ignore it)"></select>
+        </div>
+        <div class="row">
+          <button id="tdm-search" title="Roll the DM's search for this cell (server-side)">🔍 Search</button>
+          <button id="tdm-disarm" title="Disarm without a check (the DM may always)">🔧 Disarm</button>
+          <button id="tdm-trigger" title="Spring the trap on the victim">💥 Spring</button>
+          <button id="tdm-remove" class="ghost" title="Remove the trap entity from this plane (D162-6)">🗑 Remove</button>
+        </div>
+        <div id="tdm-out" class="meta"></div>
+      </div>
       <div class="panel hidden" id="dmtools" data-tab="dm">
         <h2>DM Tools</h2>
         <div class="row">
@@ -341,10 +530,19 @@ window.addEventListener("unhandledrejection", function(ev){
           <button id="btn-long-rest" title="Restore HP, spell slots, hit dice and long-rest resources">🛌 Long rest</button>
           <label title="Do not clear arbitrary conditions unless checked"><input id="long-rest-conds" type="checkbox"> clear conditions</label>
         </div>
-        <div class="row hidden" id="view-floor-row" title="D88: browse another plane's map WITHOUT moving anyone. Your brushes, edits and dark toggle apply to the plane you view.">
-          <small class="meta" style="opacity:.6">Viewing plane</small>
-          <select id="view-floor"></select>
-        </div>
+        <details class="group" id="loot-group">
+          <summary>Loot tables</summary>
+          <div class="group-body">
+            <div class="row">
+              <select id="loot-tbl" style="flex:1" title="This room's CSV loot tables (loottables.csv)"></select>
+              <button id="btn-loot-refresh" class="ghost" title="Reload the room's loot tables">↻</button>
+            </div>
+            <div class="row">
+              <button id="btn-loot-roll" class="primary" title="Roll one weighted entry and announce it">🎲 Roll loot</button>
+              <small class="meta" style="opacity:.6">Tables come from loottables.csv — the result rides the chat.</small>
+            </div>
+          </div>
+        </details>
         <details class="group" open>
           <summary>Narration</summary>
           <div class="group-body">
@@ -424,27 +622,69 @@ window.addEventListener("unhandledrejection", function(ev){
               <input id="enc-qty" type="number" min="1" max="50" value="1" style="width:54px">
               <label class="tiny"><input id="enc-hidden" type="checkbox"> hidden flag</label>
               <button id="btn-enc-add-row" class="ghost">＋ Add</button></div>
-            <div id="enc-rows" class="journal-list"></div>
+             <div id="enc-rows" class="journal-list"></div>
+          </div>
+        </details>
+        <details class="group">
+          <summary>📚 Rule packages <small style="opacity:.7">(CSV content, D95)</small></summary>
+          <div class="group-body">
+            <div class="row">
+              <input type="file" id="ct-file" accept=".csv,.zip" multiple>
+            </div>
+            <div class="row">
+              <select id="ct-mode" title="Import mode">
+                <option value="preview">Preview (validate only)</option>
+                <option value="apply">Apply (keep conflicts)</option>
+                <option value="replace">Replace (overwrite)</option>
+                <option value="upsert">Upsert (update changed rows)</option>
+              </select>
+              <button id="btn-ct-upload" class="primary">Upload</button>
+            </div>
+            <div id="ct-report" class="journal-list" style="max-height:150px;overflow:auto"></div>
+            <div class="row"><small class="meta" style="opacity:.6" id="ct-kinds">Loading…</small></div>
+            <div class="row">
+              <select id="ct-export-kind" title="Export one kind"></select>
+              <button id="btn-ct-export" class="ghost">⬇ CSV</button>
+              <button id="btn-ct-export-zip" class="ghost">⬇ All (ZIP)</button>
+            </div>
+            <div class="row">
+              <button id="btn-ct-creatures" class="ghost">🐺 Review monster projections</button>
+              <small class="meta" style="opacity:.6" id="ct-creature-status">Not loaded</small>
+            </div>
+            <div id="ct-creatures" class="journal-list" style="max-height:170px;overflow:auto"></div>
+            <div class="row"><small class="meta" style="opacity:.6">Guide: <code>docs/CSV_CONTENT_GUIDE.md</code></small></div>
           </div>
         </details>
         <div id="editor" class="hidden">
+
+          <!-- D158: the elevator. A vertical floor stack — highest level at the
+               top, ground (primary) at the bottom, like a building. One click
+               picks the floor the brushes edit; names/levels come straight from
+               the room's floor model (no hardcoded floors). Tools never touch a
+               floor you are not standing on. -->
+          <div id="floor-rail" class="floor-rail" title="Choose the floor to edit. Every brush — walls, terrain, doors, light, openings — changes only this floor."></div>
           <div class="row brushes">
             <button class="brush" data-b="wall" title="Wall (blocks path)">🧱</button>
-            <button class="brush" data-b="floor" title="Floor">⬜</button>
+            <button class="brush" data-b="floor" title="Floor (walkable)">⬜</button>
+            <button class="brush" data-b="void" title="No floor — impassable pit/edge; sight passes over it">🕳️</button>
+            <button class="brush" data-b="air" title="Open air (D159): no floor, but free volume a flyer/thing passes through — the default of any plane above E0">🎈</button>
             <button class="brush" data-b="rough" title="Difficult terrain (2× walk)">🌿</button>
             <button class="brush" data-b="barrier" title="Barrier (blocks movement, not sight; climbable)">🚧</button>
             <button class="brush" data-b="low" title="Low obstacle (passable, 2× cost; climbable)">🪨</button>
             <button class="brush" data-b="raise" title="Raise elevation +1 (step = 1 unit)">⛰️+</button>
             <button class="brush" data-b="lower" title="Lower elevation −1">⛰️−</button>
+            <button class="brush" data-b="openv" title="Toggle a vertical opening in the ceiling above this cell (D114)">⬆️⬇️</button>
             <button class="brush" data-b="trap" title="Hidden trap">⚠️</button>
+            <button class="brush" data-b="traprm" title="Remove the trap on this cell (D162-6)">⚠️✕</button>
             <button class="brush" data-b="loot" title="Hidden loot">🎁</button>
+            <button class="brush" data-b="lootrm" title="Remove the loot on this cell (D162-6)">🎁✕</button>
             <button class="brush" data-b="obj" title="World object: lever/switch/chest — data-driven, allowlisted actions">🕹️</button>
             <button class="brush" data-b="objrm" title="Remove a world object">🕹️✕</button>
             <button class="brush" data-b="door" title="Door: click a cell edge">🚪</button>
             <button class="brush" data-b="doorrm" title="Remove a door">🚫</button>
             <button class="brush" data-b="pin" title="Place map pin">📍</button>
             <button class="brush" data-b="pinrm" title="Remove map pin">📌✕</button>
-            <button class="brush" data-b="erase" title="Erase cell">🧹</button>
+            <button class="brush" data-b="erase" title="Erase cell → back to this plane's default surface (floor on E0, open air on a named plane)">🧹</button>
             <button class="brush" data-b="reveal" title="Reveal explored fog">👁</button>
             <button class="brush" data-b="refog" title="Hide explored fog">🌫</button>
             <button class="brush" id="btn-fog-toggle" title="Show all terrain to every player. Hidden foes still need line of sight.">💡</button>
@@ -454,6 +694,12 @@ window.addEventListener("unhandledrejection", function(ev){
             <input id="trap-label" placeholder="Trap label" maxlength="80" value="Poison Needle">
             <input id="trap-dc" type="number" min="1" max="30" value="13" title="Save DC (DEX)" style="width:52px">
             <input id="trap-dmg" placeholder="dmg" maxlength="16" value="2d6" title="Damage dice" style="width:58px">
+            <input id="trap-search" type="number" min="0" max="30" placeholder="find DC" title="Search DC (0 = hidden until triggered)" style="width:64px">
+            <input id="trap-disarm" type="number" min="0" max="30" placeholder="disarm DC" title="Disarm DC (0 = cannot be disarmed)" style="width:72px">
+            <label title="Trap re-arms for the next creature instead of springing once"><input id="trap-repeat" type="checkbox"> repeat</label>
+          </div>
+          <div class="row trapfields hidden" id="trap-effect-row">
+            <textarea id="trap-effects" rows="2" placeholder='Data-driven effect cell (JSON). Leave empty to use the Save DC + dmg above. e.g. {"v":2,"ops":[{"op":"save","ability":"dex","dc":15,"success":[],"failure":[{"op":"condition","key":"prone","target":"target"}]}]}' style="width:100%;box-sizing:border-box"></textarea>
           </div>
           <div class="row trapfields hidden" id="pin-fields">
             <input id="pin-title" placeholder="Pin title" maxlength="80">
@@ -463,6 +709,7 @@ window.addEventListener("unhandledrejection", function(ev){
           </div>
           <div class="row trapfields hidden" id="door-fields">
             <label><input id="door-locked" type="checkbox"> start locked</label>
+            <label>lock DC <input id="door-lockdc" type="number" min="5" max="25" value="15" style="width:56px" title="Difficulty of picking this lock (D162-4)"></label>
             <label><input id="door-dmonly" type="checkbox"> DM-only</label>
             <label><input id="door-secret" type="checkbox"> hidden from players</label>
           </div>
@@ -476,8 +723,8 @@ window.addEventListener("unhandledrejection", function(ev){
               <option value="lamp">lamp: static light (interact to toggle)</option>
               <option value="container">container: chest/sack (contents stay server-side)</option>
             </select>
-            <span id="obj-stair-fields" class="hidden" title="D88: destination cell on the target plane — validated at use time; occupied or walled is refused">
-              <input id="obj-tfl" placeholder="to floor" maxlength="24" style="width:76px">
+            <span id="obj-stair-fields" class="hidden" title="D88: destination cell on the target plane — validated at use time; occupied or walled is refused. D162: the target is chosen from the room's real floors; the primary plane is selectable as Ground (primary).">
+              <select id="obj-tfl" style="width:110px" title="Target plane — D162: the empty-named primary plane is a first-class target"></select>
               <input id="obj-tx" type="number" placeholder="x" style="width:52px">
               <input id="obj-ty" type="number" placeholder="y" style="width:52px">
             </span>
@@ -489,6 +736,8 @@ window.addEventListener("unhandledrejection", function(ev){
           </div>
           <div class="row lootfields hidden" id="loot-fields">
             <input id="loot-label" placeholder="Loot (e.g. 25 gp and a silver ring)" maxlength="80">
+            <label class="tiny" style="display:flex;align-items:center;gap:3px" title="Real container: contents live on the server, opened by a click — never a note pickup">
+              <input id="loot-container" type="checkbox">Container</label>
           </div>
           <div class="row">
             <input id="ed-w" type="number" min="8" max="80" title="Width (cells)">
@@ -512,32 +761,37 @@ window.addEventListener("unhandledrejection", function(ev){
 <div id="help-overlay" class="help-overlay hidden">
   <div class="help-card panel">
     <div class="row"><h2 style="flex:1">How to play</h2><button id="btn-help-close" class="ghost">✕</button></div>
-    <p><b>Views.</b> Tactical is the top-down grid; Diorama is the same room and the same
-      server pathfinding in an isometric table view. Your token, movement and path previews
-      behave identically in both.</p>
-    <p><b>Movement.</b> Click your token, then click a destination: you get a path preview
-      first. Double-click the previewed goal (or press the confirm button) to walk.
-      The walk stops at traps, closed doors, and if you drop to 0 HP.</p>
-    <p><b>Fog of war.</b> Explored terrain stays explored. The DM's 💡 brush toggles
-      room-wide terrain reveal; hidden creatures still need line of sight either way.</p>
-    <p><b>Doors.</b> Click a door next to your token to open or close it. Locked doors
-      need the key — or the DM. Some doors only the DM can move at all (“it won't
-      budge”), and secret passages show up for the DM's map only.</p>
-    <p><b>DM & NPCs.</b> Create a token in 🎲 DM → add a name, click it, and the full
-      statblock editor opens: Identity, Combat, Abilities up top; conditions, defences,
-      spellcasting, attacks, actions and resources in collapsible sections.
-      “＋ Bestiary” saves the block as a template; Encounters spawn saved monsters.</p>
-    <p><b>Sidebar tabs.</b> ⚔ Game (initiative, party) · 👤 Chars (your character) ·
-      📜 Story (quests, journal) · 🎲 DM tools. Chat and dice stay visible always.</p>
-    <p><b>Audio.</b> ▶ starts or resumes the room ambience (self-hosted tracks resume
-      where they were; YouTube/Spotify embeds restart). ⏸ pauses, Stop clears the source.</p>
-    <p><b>Keys.</b> <kbd>?</kbd> help · <kbd>Esc</kbd> close / cancel path ·
-      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows pan the camera ·
-      middle/right-drag pans too.</p>
+    <input id="help-search" type="search" placeholder="Search the manual — rest, trap, grapple…" autocomplete="off">
+    <div id="help-cats" class="help-cats"></div>
+    <div id="help-list" class="help-list"></div>
     <p class="meta">Anything surprising? Tell your DM — the server decides everything
       that matters, so what you see is what really happened.</p>
   </div>
 </div>
+
+<!-- D157: deliberate room-deletion confirmation. Top-level (like the help
+     overlay) so a lobby re-render cannot unmount it mid-dialog. The destructive
+     button stays disabled until the DM types the room's exact CODE — a stray
+     click can never wipe a table. The server still re-checks DM ownership. -->
+<dialog id="del-room-dlg">
+  <div class="panel" style="max-width:340px">
+    <h2 style="margin:0 0 6px">Delete this room?</h2>
+    <p style="margin:0 0 4px">You are about to permanently delete
+      <b id="del-room-name">room</b>.</p>
+    <p class="meta" style="margin:0 0 10px">Room code: <b id="del-room-code"></b> —
+      everything in it (map, floors, tokens, chat, notes, items) is removed for good.
+      This cannot be undone.</p>
+    <label class="meta" style="display:block;margin-bottom:6px">Type the room code
+      <b id="del-room-code-hint"></b> to confirm:</label>
+    <input id="del-room-input" autocomplete="off" spellcheck="false"
+           style="width:100%;box-sizing:border-box" placeholder="room code">
+    <p id="del-room-err" class="err" style="min-height:1.2em;margin:6px 0 0"></p>
+    <div class="row" style="justify-content:flex-end;margin-top:8px">
+      <button id="del-room-cancel" class="ghost">Cancel</button>
+      <button id="del-room-confirm" class="primary" disabled>Delete permanently</button>
+    </div>
+  </div>
+</dialog>
 
 <script src="/static/js/10_core.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/20_lobby.js?v=__BUILDTOKEN__"></script>
@@ -546,6 +800,9 @@ window.addEventListener("unhandledrejection", function(ev){
 <script src="/static/js/50_canvas.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/55_diorama.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/60_main.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/65_help.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/70_content.js?v=__BUILDTOKEN__"></script>
+<script src="/static/js/80_prep.js?v=__BUILDTOKEN__"></script>
 <script src="/static/js/99_boot.js?v=__BUILDTOKEN__"></script>
 </body>
 </html>

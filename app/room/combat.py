@@ -2,50 +2,105 @@
 import json
 import random
 
-from .. import db, movecost, npc
+from .. import db, gear, movecost, npc
 from .. import conditions as C
 from . import authz, death as D, health
 from .dice import dex_mod
 from .net import broadcast, send_to, sys_msg
 
 
-def step_conditions(room_id):
+def step_conditions(room_id, events=None):
     """Advance timed conditions on every token by one round.
 
     Returns a list of ``(token_id, new_conds)`` for the tokens that changed, so the
     caller can stream the updates. Permanent (``rounds == 0``) conditions and the
     turn-anchored ones (``until`` = start/end — their clock is the turn hook below,
     never this one, D80) are kept untouched.
+    D111: with an ``events`` list passed in, the round wrap also COLLECTS the
+    condition-definition effect hooks — ``on_round`` for every held condition
+    and ``on_expire`` for every key that expired in this tick. Firing is the
+    async caller's job (``_fire_events``); this stays pure bookkeeping.
     """
     changed = []
     for tok in db.q("SELECT id, conds FROM tokens WHERE room_id=?", (room_id,)):
-        new, dirty = C.step_rounds(C.load(tok))
+        old = C.load(tok)
+        new, dirty = C.step_rounds(old)
         if dirty:
             db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(new), tok["id"]))
             changed.append((tok["id"], new))
+        if events is not None:
+            for key in C.expired_keys(old, new):
+                events.append((tok["id"], {"k": key}, "on_expire"))
+            for e in new:
+                if C.effects_for(e["k"], room_id, "on_round"):
+                    events.append((tok["id"], e, "on_round"))
     return changed
 
 
-def _tick_turn_conditions(room_id, token_id, phase):
+def _tick_turn_conditions(room_id, token_id, phase, events=None):
     """The ONE place a turn hook expires conditions (D80): advance the turn clock
     of ``token_id`` at its turn ``phase`` ("start"/"end"). Returns
-    ``(token_id, new_conds)`` when something changed, else None."""
+    ``(token_id, new_conds)`` when something changed, else None.
+    D109: the SAME hook also advances mastery markers anchored to this token
+    (conditions.step_src) — those live on OTHER tokens (victim/attacker) but
+    expire on THIS token's clock, so they tick nowhere else either.
+    D111: with an ``events`` list, collects ``on_start``/``on_end`` definition
+    hooks for the active token's OWN held conditions and ``on_expire`` for
+    everything that expired at this hook."""
     if token_id is None:
         return None
+    hook = "on_start" if phase == "start" else "on_end"
+    updates = []
     tok = db.q1("SELECT id, conds FROM tokens WHERE id=? AND room_id=?", (token_id, room_id))
-    if tok is None:
-        return None
-    new, dirty = C.step_turn(C.load(tok), phase)
-    if not dirty:
-        return None
-    db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(new), tok["id"]))
-    return (tok["id"], new)
+    if tok is not None:
+        old = C.load(tok)
+        new, dirty = C.step_turn(old, phase)
+        new, dirty2 = C.step_src(new, token_id, phase)
+        if dirty or dirty2:
+            db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(new), tok["id"]))
+            updates.append((tok["id"], new))
+        if events is not None:
+            for key in C.expired_keys(old, new):
+                events.append((tok["id"], {"k": key}, "on_expire"))
+            for e in new:
+                if e.get("src") is None and C.effects_for(e["k"], room_id, hook):
+                    events.append((tok["id"], e, hook))
+    for other in db.q("SELECT id, conds FROM tokens WHERE room_id=? AND id!=?",
+                      (room_id, token_id)):
+        old = C.load(other)
+        new, dirty = C.step_src(old, token_id, phase)
+        if dirty:
+            db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(new), other["id"]))
+            updates.append((other["id"], new))
+            if events is not None:
+                for key in C.expired_keys(old, new):
+                    events.append((other["id"], {"k": key}, "on_expire"))
+    return updates or None
+
+
+async def _fire_events(room_id, events, round_uid):
+    """Run collected condition-definition hooks through the guarded effect
+    core — AFTER the tick's writes and broadcasts, never inside them."""
+    if not events:
+        return
+    from .. import effectops
+    for token_id, entry, hook in events:
+        tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (token_id, room_id))
+        if tok is None:
+            continue
+        await effectops.fire(room_id, hook, token=tok, caster=None,
+                             conds=[entry], round_uid=str(round_uid or ""))
 
 
 def token_dex_mod(tok):
-    """DEX modifier for any token: an attached character, else an NPC stat block."""
+    """DEX modifier for any token: an attached character, else an NPC stat block.
+    AP-015 (audit F4): 2024 exhaustion applies its −2/level to Initiative rolls."""
     if tok["character_id"]:
-        return dex_mod(tok["character_id"])
+        ch = db.q1("SELECT * FROM characters WHERE id=?", (tok["character_id"],))
+        if ch is None:
+            return 0
+        sheet = gear.as_sheet(ch)
+        return gear.dex_mod(sheet) + gear.exhaustion_roll_mod(sheet)
     block = npc.load(tok)
     return npc.dex_mod(block) if block else 0
 
@@ -58,9 +113,52 @@ async def _cond_update(room_id, token_id, conds):
     from .visibility import send_cond_bump
     tok = db.q1("SELECT * FROM tokens WHERE id=?", (token_id,))
     if tok is None:
-        await _cond_update(room_id, token_id, conds)
+        # D111: this branch recursed forever (the row is still gone on the
+        # second read). The token left the world; a plain bump carries nothing
+        # that could be leaked about it any more.
+        from .net import broadcast
+        await broadcast(room_id, "cond", {"token_id": token_id, "conds": conds})
         return
     await send_cond_bump(room_id, tok, conds)
+
+
+async def _save_ends(room_id, token_id):
+    """D130 (AP-016): 'Save Ends' — a condition entry carrying a save ability
+    (``sa``) and a DC repeats the save at the END of the affected creature's
+    own turn, through the ONE existing save derivation (``opposed.save_roll``
+    judged by ``beats_dc``); success removes exactly that entry. No second
+    clock is invented — this rides the existing end-of-turn moment beside the
+    D80 ``until:"end"`` turn clock, which stays independent."""
+    if not token_id:
+        return
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (token_id, room_id))
+    if tok is None:
+        return
+    conds = C.load(tok)
+    targets = [c for c in conds if c.get("sa") and c.get("dc") is not None]
+    if not targets:
+        return
+    from . import opposed
+    from .concentration import _announce_roll
+    p = opposed.participant(room_id, tok)
+    if p is None:
+        return
+    new, changed = conds, False
+    for c in targets:
+        sv = opposed.save_roll(p, c["sa"])
+        dc = c["dc"]
+        ok = bool(sv) and not sv.get("auto_fail") and opposed.beats_dc(sv["total"], dc)
+        line = (f"🎲 {p['name']} — {c['k']} save at end of turn: "
+                + (f"{c['sa'].upper()} d20({sv['kept']}) {sv['mod']:+d} = {sv['total']} vs DC {dc}"
+                   if sv and not sv.get("auto_fail") else "AUTO-FAIL")
+                + (" — the condition ends" if ok else " — it stays"))
+        await _announce_roll(room_id, tok, line)
+        if ok:
+            new = [e for e in new if e is not c]
+            changed = True
+    if changed:
+        db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(new), tok["id"]))
+        await _cond_update(room_id, token_id, new)
 
 
 def get_init(room_id):
@@ -132,7 +230,7 @@ def advance(init):
     return begin_turn(init), wrapped
 
 
-def advance_turn(room_id, init):
+def advance_turn(room_id, init, events=None):
     """The ONE turn lifecycle (D80) — every turn advance goes through here:
 
       1. TURN END hooks of the token whose turn just ends (its "end"-anchored
@@ -146,23 +244,23 @@ def advance_turn(room_id, init):
     Returns ``(init, wrapped, cond_updates)`` with cond_updates a list of
     ``(token_id, conds)`` for the caller to broadcast."""
     updates = []
-    upd = _tick_turn_conditions(room_id, turn_token(init), "end")
+    upd = _tick_turn_conditions(room_id, turn_token(init), "end", events)
     if upd:
-        updates.append(upd)
+        updates.extend(upd)
     init, wrapped = advance(init)
     if wrapped:
-        updates.extend(step_conditions(room_id))
-    upd = _tick_turn_conditions(room_id, turn_token(init), "start")
+        updates.extend(step_conditions(room_id, events))
+    upd = _tick_turn_conditions(room_id, turn_token(init), "start", events)
     if upd:
-        updates.append(upd)
+        updates.extend(upd)
     return init, wrapped, updates
 
 
-def first_turn_hooks(room_id, init):
+def first_turn_hooks(room_id, init, events=None):
     """TURN START hooks for the token that begins combat (round 1 has no
     previous turn to advance through advance_turn). Returns cond_updates."""
-    upd = _tick_turn_conditions(room_id, turn_token(init), "start")
-    return [upd] if upd else []
+    upd = _tick_turn_conditions(room_id, turn_token(init), "start", events)
+    return upd or []
 
 
 def is_listed(init, token_id):
@@ -189,7 +287,13 @@ def move_remaining(init, token_id, mode=None):
     m = mode or t.get("move_mode") or "walk"
     entry = by.get(m)
     if entry is None:
-        return 0
+        # D144: swimming/climbing WITHOUT the speed draws on the WALK pool
+        # and pays the SRD surcharge per step (movecost) — the budget
+        # follows the creature's walk allowance, never a phantom 0.
+        if m in ("swim", "climb") and "walk" in by:
+            entry = by["walk"]
+        else:
+            return 0
     return max(0, int(entry["total"]) - int(entry["spent"]))
 
 
@@ -229,7 +333,8 @@ def spend_slot(room_id, token_id, slot):
 
 
 async def handle_init_start(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     order = []
     for tok in db.q("SELECT * FROM tokens WHERE room_id=? ORDER BY id", (room_id,)):
@@ -240,25 +345,31 @@ async def handle_init_start(ws, room_id, user, is_dm, msg):
     order.sort(key=lambda o: o["total"], reverse=True)
     init = {"combat": True, "round": 1, "order": order, "active": 0}
     begin_turn(init)
-    for token_id, conds in first_turn_hooks(room_id, init):
+    events = []
+    for token_id, conds in first_turn_hooks(room_id, init, events):
         await _cond_update(room_id, token_id, conds)
     set_init(room_id, init)
     sys_msg(room_id, "Combat started! — Round 1")
     await broadcast(room_id, "initiative", init)
+    await _fire_events(room_id, events, init.get("round"))
 
 
 async def handle_init_next(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     init = get_init(room_id)
     if init["combat"] and init["order"]:
-        init, wrapped, updates = advance_turn(room_id, init)
+        await _save_ends(room_id, turn_token(init))
+        events = []
+        init, wrapped, updates = advance_turn(room_id, init, events)
         for token_id, conds in updates:
             await _cond_update(room_id, token_id, conds)
         if wrapped:
             sys_msg(room_id, f"— Round {init['round']} —")
         set_init(room_id, init)
         await broadcast(room_id, "initiative", init)
+        await _fire_events(room_id, events, init.get("round"))
 
 
 async def _end_turn_common(ws, room_id, user, is_dm):
@@ -274,13 +385,16 @@ async def _end_turn_common(ws, room_id, user, is_dm):
         if not authz.controls(tok, user["id"], False):      # D82: or its assigned controller
             await send_to(ws, "error", {"msg": "Only the active token's owner (or the DM) can end the turn"})
             return
-    init, wrapped, updates = advance_turn(room_id, init)
+    await _save_ends(room_id, turn.get("token_id"))
+    events = []
+    init, wrapped, updates = advance_turn(room_id, init, events)
     for token_id, conds in updates:
         await _cond_update(room_id, token_id, conds)
     if wrapped:
         sys_msg(room_id, f"— Round {init['round']} —")
     set_init(room_id, init)
     await broadcast(room_id, "initiative", init)
+    await _fire_events(room_id, events, init.get("round"))
 
 
 async def handle_end_turn(ws, room_id, user, is_dm, msg):
@@ -291,29 +405,33 @@ async def handle_init_end_round(ws, room_id, user, is_dm, msg):
     """DM ends the current round: increment the round counter and return to the
     top of the (still fixed) initiative order. Initiative is rolled once per
     combat (D22), not re-rolled here."""
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     init = get_init(room_id)
     if not init["combat"] or not init["order"]:
         return
     updates = []
-    upd = _tick_turn_conditions(room_id, turn_token(init), "end")
+    events = []
+    upd = _tick_turn_conditions(room_id, turn_token(init), "end", events)
     if upd:
-        updates.append(upd)
+        updates.extend(upd)
     init["round"] = int(init.get("round", 1)) + 1
     init["active"] = 0
     begin_turn(init)
-    updates.extend(step_conditions(room_id))
-    updates.extend(first_turn_hooks(room_id, init))
+    updates.extend(step_conditions(room_id, events))
+    updates.extend(first_turn_hooks(room_id, init, events))
     set_init(room_id, init)
     for token_id, conds in updates:
         await _cond_update(room_id, token_id, conds)
     sys_msg(room_id, f"— Round {init['round']} —")
     await broadcast(room_id, "initiative", init)
+    await _fire_events(room_id, events, init.get("round"))
 
 
 async def handle_init_end(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     init = {"combat": False, "order": [], "active": -1, "round": 0, "turn": None}
     set_init(room_id, init)
@@ -339,6 +457,10 @@ async def handle_dash(ws, room_id, user, is_dm, msg):
     turn = init.get("turn") or {}
     if turn.get("token_id") != tok["id"]:
         await send_to(ws, "error", {"msg": "It is not your turn"})
+        return
+    if C.hook_bool(C.load(tok), room_id, "no_actions"):
+        # D134 (audit F5): Dash is an action — incapacitated forbids it.
+        await send_to(ws, "error", {"msg": "You can't take actions right now"})
         return
     if turn.get("action") == "used":
         await send_to(ws, "error", {"msg": "No action left this turn"})
@@ -397,7 +519,8 @@ async def handle_turn_mark(ws, room_id, user, is_dm, msg):
 
 
 async def handle_hp(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:

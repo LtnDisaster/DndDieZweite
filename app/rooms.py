@@ -6,7 +6,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import db, footprint, floors as FLOOR, gear, los, mapmodel, progression, ratelimit, ws
+from . import content as CONTENT, db, footprint, floors as FLOOR, gear, inventory as INV, los, mapmodel, progression, ratelimit, ws
 from . import quests as questlog
 from . import conditions as C
 from . import npc
@@ -15,6 +15,8 @@ from .room import death as D
 from . import events as game_events
 from .room import gamelog
 from .room import net as room_net
+from .room import vertical3d
+from .room.net import sys_msg
 from .auth import COOKIE, cookie_secure, hash_pw, make_token, require_user, room_of, verify_pw
 
 router = APIRouter(prefix="/api")
@@ -32,6 +34,9 @@ class CharIn(BaseModel):
     name: str = Field(min_length=1, max_length=48)
     race: str = ""
     char_class: str = ""
+    # D101: None = "leave the stored background untouched" — a PUT from a client
+    # that predates the field must never wipe it; "" is an explicit reset.
+    background: str | None = None
     level: int = Field(1, ge=1, le=20)
     stats: dict = {}
     hp: int = Field(10, ge=-999, le=9999)
@@ -98,13 +103,20 @@ def _clean_weapons(items):
     return out
 
 
-def _char_row(r, mask_items=False):
+def _char_row(r, mask_items=False, curse="strip"):
     if not r:
         return r
     r = dict(r)
     r["stats"] = db.j(r.get("stats"), {})
     r["weapons"] = db.j(r.get("weapons"), [])
-    r["items"] = gear.clean_items(db.j(r.get("items"), []))
+    # D106: curse disclosure is decided HERE, per viewer, and nowhere else.
+    # 'dm' = trusted load, full metadata; 'owner' = trusted load, revealed
+    # curses reduced to name+desc; 'strip' (default, fail-closed) = the old
+    # byte-identical behaviour — every caller that forgot the parameter is
+    # automatically safe.
+    r["items"] = gear.curse_view(
+        gear.clean_items(db.j(r.get("items"), []), keep_curse=(curse in ("dm", "owner"))),
+        curse)
     r["skills"] = gear.clean_skills(db.j(r.get("skills"), {}))
     r["spells"] = gear.clean_spells(db.j(r.get("spells"), []))
     r["spell_slots"] = gear.clean_slots(db.j(r.get("spell_slots"), {}))
@@ -121,6 +133,9 @@ def _char_row(r, mask_items=False):
     # D92: parsed BEFORE ac_total — compute_ac switches to equipped mode off
     # this column; clean_equipment drops dangling refs at READ time too.
     r["equipment"] = gear.clean_equipment(db.j(r.get("equipment"), {}), r["items"])
+    # D99: money is one integer of copper; size drives the encumbrance modifier.
+    r["wallet"] = gear.clean_wallet(r.get("wallet", 0))
+    r["size"] = gear.clean_size(r.get("size"))
     r["hit_dice_max"] = gear.hit_dice_max(r)
     r["hit_dice_spent"] = max(0, min(gear.hit_dice_max(r), int(r.get("hit_dice_spent") or 0)))
     r["has_spellbook"] = gear.has_spellbook(r["items"])
@@ -139,6 +154,19 @@ def _char_row(r, mask_items=False):
         "initiative": gear.dex_mod(r),
         "attack_profiles": gear.weapon_profiles(r),
         "attune_max": gear.ATUNE_MAX,
+        # D98: worn/wielded-derived values the sheet must show but must never
+        # recompute — darkvision granted by gear, and the effective walk speed
+        # (base + any speed_bonus_ft from worn items).
+        "darkvision_ft": gear.effective_gear(r)["darkvision_ft"],
+        "speed_effective": gear.clean_speeds(r)["walk"],
+        "hit_dice_bonus": gear.effective_gear(r)["hit_dice_bonus"],
+        # D99: the purse (copper + a display breakdown + the currency table the
+        # sheet renders) and the derived carrying report. Both are READ-only
+        # server derivations — the client renders, never recomputes, so a client
+        # can never inflate its own gold or shrink its own load.
+        "wallet": {"cp": r["wallet"], "coins": gear.cp_breakdown(r["wallet"]),
+                   "currencies": gear.currency_table()},
+        "encumbrance": gear.encumbrance(r, r["wallet"]),
     }
     return r
 
@@ -181,6 +209,7 @@ class CreatureIn(BaseModel):
     max_hp: int = 10
     ac: int = 10
     speed: int = 30
+    darkvision_ft: int = 0
     attacks: list = []
     spells: list = []
     spell_slots: dict = {}
@@ -191,6 +220,7 @@ class CreatureIn(BaseModel):
     notes: str = ""
     size: str = "Medium"
     disposition: str = ""
+    companion: bool = False
     tags: str = Field(default="", max_length=120)
 
 
@@ -202,6 +232,24 @@ def _load_char(cid: int, user_id: int):
     if ch is None:
         raise HTTPException(404, "Character not found")
     return ch
+
+
+def _preserve_curses(cur, new_items):
+    """D106: the raw sheet PUT round-trips the owner's items. Two rules:
+    (1) any curse arriving FROM the client was already stripped by the
+    untrusted clean_items — a sheet owner can neither forge a curse nor flip
+    'revealed'; (2) a curse that exists on the STORED entry of the same id is
+    re-attached — a plain sheet edit (notes, HP …) must never silently wipe
+    DM metadata. Same id inside the same sheet = same instance: ownership of
+    this character did not change, so 'revealed' stays exactly as stored."""
+    stored = {i["id"]: i.get("curse") for i in
+              gear.clean_items(db.j(cur.get("items"), []), keep_curse=True)
+              if i.get("curse")}
+    for it in new_items:
+        c = stored.get(it["id"])
+        if c:
+            it["curse"] = c
+    return new_items
 
 
 @router.post("/register")
@@ -242,39 +290,55 @@ def me(user=Depends(require_user)):
 
 @router.get("/characters")
 def list_chars(user=Depends(require_user)):
-    return [_char_row(r) for r in db.q(
+    return [_char_row(r, curse="owner") for r in db.q(
         "SELECT * FROM characters WHERE user_id=? ORDER BY name", (user["id"],))]
 
 
 @router.post("/characters")
 def create_char(ch: CharIn, user=Depends(require_user)):
     cid = db.x(
-        "INSERT INTO characters (user_id,name,race,char_class,level,stats,hp,max_hp,ac,speed,notes,weapons,items,skills,spells,spell_slots,saves,resources,defenses,hit_die) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (user["id"], ch.name, ch.race, ch.char_class, ch.level,
+        "INSERT INTO characters (user_id,name,race,char_class,background,level,stats,hp,max_hp,ac,speed,notes,weapons,items,skills,spells,spell_slots,saves,resources,defenses,hit_die) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (user["id"], ch.name, ch.race, ch.char_class, ch.background or "", ch.level,
          db.json_dumps(ch.stats), ch.hp, ch.max_hp, ch.ac, ch.speed, ch.notes,
          db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(gear.clean_items(ch.items)),
          db.json_dumps(gear.clean_skills(ch.skills)), db.json_dumps(gear.clean_spells(ch.spells)),
          db.json_dumps(gear.clean_slots(ch.spell_slots)),
          db.json_dumps(gear.clean_saves(ch.saves)), db.json_dumps(gear.clean_resources(ch.resources)),
          db.json_dumps(gear.clean_defenses(ch.defenses)), gear.clean_hit_die(ch.hit_die)))
-    return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)))
+    return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)), curse="owner")
 
 
 @router.put("/characters/{cid}")
 def update_char(cid: int, ch: CharIn, user=Depends(require_user)):
-    _load_char(cid, user["id"])
+    cur = _load_char(cid, user["id"])
+    # D100 autonomy lock: the raw character-editor PUT may no longer rewrite the
+    # SERVER-AUTHORISED progression fields. `level`, `spells` and `spell_slots` are
+    # kept EXACTLY as stored — a sheet owner cannot refill consumed slots,
+    # self-grant a spell list, or set their own level by hand. Authorised writers are untouched:
+    # the validated build/level-up (`charbuild.apply`), the DM `class_levels` transport,
+    # and the WS rest/ability/progression handlers. DMs never hit this endpoint at all
+    # (_load_char is owner-scoped). Everything else on the sheet stays editable.
+    # D106: items run through the UNTRUSTED cleaner (client curses can never be
+    # forged) and then re-attach the stored curses by entry id (a sheet edit can
+    # never wipe them either) — the write carries neither mint nor eraser.
+    items = _preserve_curses(cur, gear.clean_items(ch.items))
+    # D162-2: a stored species-bonus grant sets a floor for its abilities —
+    # the trusted-owner stats PUT can never silently undo a granted bonus.
+    from . import charbuild
+    stats = charbuild.protect_species_floor(cur, ch.stats)
     db.x(
-        "UPDATE characters SET name=?,race=?,char_class=?,level=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,"
-        "weapons=?,items=?,skills=?,spells=?,spell_slots=?,saves=?,defenses=?,resources=?,hit_die=? WHERE id=?",
-        (ch.name, ch.race, ch.char_class, ch.level, db.json_dumps(ch.stats),
+        "UPDATE characters SET name=?,race=?,char_class=?,background=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,"
+        "weapons=?,items=?,skills=?,saves=?,defenses=?,resources=?,hit_die=? WHERE id=?",
+        (ch.name, ch.race, ch.char_class,
+         ch.background if ch.background is not None else (cur.get("background") or ""),
+         db.json_dumps(stats),
          ch.hp, ch.max_hp, ch.ac, ch.speed, ch.notes,
-         db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(gear.clean_items(ch.items)),
-         db.json_dumps(gear.clean_skills(ch.skills)), db.json_dumps(gear.clean_spells(ch.spells)),
-         db.json_dumps(gear.clean_slots(ch.spell_slots)),
-         db.json_dumps(gear.clean_saves(ch.saves)), db.json_dumps(gear.clean_defenses(ch.defenses)),
+        db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(items),
+        db.json_dumps(gear.clean_skills(ch.skills)),
+        db.json_dumps(gear.clean_saves(ch.saves)), db.json_dumps(gear.clean_defenses(ch.defenses)),
          db.json_dumps(gear.clean_resources(ch.resources)), gear.clean_hit_die(ch.hit_die), cid))
-    return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)))
+    return _char_row(db.q1("SELECT * FROM characters WHERE id=?", (cid,)), curse="owner")
 
 
 @router.delete("/characters/{cid}")
@@ -291,11 +355,13 @@ def delete_char(cid: int, user=Depends(require_user)):
 def _creature_block(cr: "CreatureIn"):
     block = npc.clean_npc({"name": cr.name, "level": cr.level, "stats": cr.stats,
                            "hp": cr.hp, "max_hp": cr.max_hp, "ac": cr.ac, "speed": cr.speed,
+                           "darkvision_ft": cr.darkvision_ft,
                            "attacks": cr.attacks, "spells": cr.spells, "spell_slots": cr.spell_slots,
                            "saves": cr.saves, "defenses": cr.defenses,
                            "abilities": cr.abilities, "resources": cr.resources,
                            "notes": cr.notes,
-                           "size": cr.size, "disposition": cr.disposition})
+                            "size": cr.size, "disposition": cr.disposition,
+                            "companion": cr.companion})
     block["name"] = cr.name
     return block
 
@@ -539,16 +605,34 @@ def join_room(body: JoinIn, user=Depends(require_user)):
     return {"code": room["code"], "name": room["name"]}
 
 
+# Every room-scoped table delete_room must clear before removing the room
+# itself. `floor_maps` is deliberately absent: its FK is `ON DELETE CASCADE`,
+# so the schema removes it for us. The others (notably item_defs + containers,
+# D157) reference rooms(id) WITHOUT a cascade, so under `foreign_keys=ON` they
+# block `DELETE FROM rooms` unless listed here. tests/
+# test_room_delete_all_tables.py keeps this tuple and the schema in lockstep.
+ROOM_DELETE_CHILD_TABLES = ("tokens", "messages", "room_state", "notes", "quests",
+                            "room_members", "item_defs", "containers", "content",
+                            "inv_ops")
+
+
 @router.delete("/rooms/{code}")
 def delete_room(code: str, request: Request):
     """Delete a room permanently (D76). Only the room's DM (creator-equivalent
     membership role) may do this — a player crafting the HTTP request gets 403,
     a stranger gets 403/404 via room_of(); repeated calls 404 (idempotent-safe).
 
-    Cascades exactly this room's persistent rows, removes the room's own
-    background upload (never shared assets), and purges every in-memory trace
-    (clients, map locks, ghost memory, walks) with a final room_deleted event
-    so sockets land in the lobby instead of zombie-reconnecting."""
+    Cascades exactly this room's persistent rows (ROOM_DELETE_CHILD_TABLES +
+    the schema-cascaded floor_maps), removes the room's own background upload
+    (never shared assets), and purges every in-memory trace (clients, map
+    locks, ghost memory, walks) with a final room_deleted event so sockets land
+    in the lobby instead of zombie-reconnecting.
+
+    D157: the cascade list once omitted item_defs and containers — two room
+    child tables whose FK carries no ON DELETE CASCADE. With foreign_keys=ON a
+    room that ever held loot/custom items made `DELETE FROM rooms` raise, so
+    the whole transaction rolled back and the delete silently 500'd. A room is
+    now cleared of every child row, not only the ones D76 anticipated."""
     user, room = room_of(request, code)
     if room["_role"] != "dm" or user["id"] != room["dm_id"]:
         raise HTTPException(403, "Only the room's DM can delete the room")
@@ -556,8 +640,7 @@ def delete_room(code: str, request: Request):
     tok_ids = [t["id"] for t in db.q("SELECT id FROM tokens WHERE room_id=?", (room_id,))]
     image = room.get("map_image") or ""
     with db.tx() as c:
-        for table in ("tokens", "messages", "room_state", "notes", "quests",
-                      "room_members"):
+        for table in ROOM_DELETE_CHILD_TABLES:
             c.execute(f"DELETE FROM {table} WHERE room_id=?", (room_id,))
         c.execute("DELETE FROM rooms WHERE id=?", (room_id,))
     if image.startswith("/uploads/"):
@@ -578,6 +661,76 @@ def delete_room(code: str, request: Request):
     return {"ok": True, "deleted": code}
 
 
+def _viewer_token_view(room, user, tokens_all, view_floor, mp):
+    """D104 — THE player-view token/fog decision of the REST snapshot, in ONE
+    function: /state's player branch and the DM's view_as preview share this
+    exact code. A second visibility logic must never exist — the preview's
+    security promise (it IS the server's character sight, not a cosmetic
+    dimming) is anchored here. Pure read: nothing is written, revealed or
+    broadcast; explored fog and ghost memory are only READ."""
+    uid = user["id"]
+    visible = ws.viewer_visible_cells(room["id"], uid, mp, floor=view_floor)
+    # D86/D114: the planes this viewer stands on — home plane plus every plane
+    # their body legitimately reaches through an opening. Without an opening the
+    # set is exactly the token-floor planes, preserving D86.
+    vmaps = vertical3d.maps_for(room["id"])
+    vlm = vertical3d.level_map(room["id"])
+    planes = set()
+    for t in tokens_all:
+        if t["owner_user_id"] == uid or t.get("controller_user_id") == uid:
+            planes.update(vertical3d.body_planes(room["id"], t, vmaps, vlm))
+    _plane_cache = {"": (mp, visible)}
+    def _plane(fl):
+        # D88: sight must be evaluated on the map the token STANDS ON —
+        # never decide a crypt token's visibility from the tavern's fog.
+        if fl not in _plane_cache:
+            mp_p = room_net.get_map(room["id"], fl)
+            _plane_cache[fl] = (mp_p, ws.viewer_visible_cells(room["id"], uid,
+                                                              mp_p, floor=fl))
+        return _plane_cache[fl]
+    def _visible_token(t):
+        if t["owner_user_id"] == uid or t.get("controller_user_id") == uid:
+            return True                       # D82: controllers always see their token
+        # D114: a token on a plane the viewer stands on is seen on normal 2D LOS;
+        # a token on ANOTHER plane is seen only where it is legitimately joined to
+        # a plane the viewer stands on — its body protruding there, or an open
+        # shaft. observable_cells returns EMPTY for unjoined planes, so with no
+        # openings this is byte-identical to the old "different plane = elsewhere".
+        for P in planes:
+            obs = vertical3d.observable_cells(room["id"], t, P, vmaps, vlm)
+            if not obs:
+                continue
+            mp_p, vis_p = _plane(P)
+            if any((i := mapmodel.flat_idx(mp_p, x, y)) is not None and i in vis_p
+                   for (x, y) in obs):
+                return True                   # D72
+        return False
+    tokens = [t for t in tokens_all if _visible_token(t)]
+    for t in tokens:                                   # NPC stat blocks are DM-only
+        t["npc"] = None
+        if (t.get("character_id") is None and t.get("owner_user_id") is None
+                and t.get("controller_user_id") != uid):   # D83 duty: controllers keep the shape
+            t.pop("disposition", None)
+            t.pop("size", None)
+            t.pop("fw", None)                    # D81: hidden tokens leak no footprint
+            t.pop("fh", None)
+            t.pop("vw", None)                    # D82: nor the visual silhouette
+            t.pop("vh", None)
+            t.pop("rot", None)
+            t.pop("height_ft", None)             # D114: nor its vertical body
+            t.pop("elevation_ft", None)          # D114: nor how high it floats
+            t.pop("controller_user_id", None)    # D82: nor who leads it
+            t.pop("image", None)                 # D85: nor what artwork it wears
+            t.pop("floor", None)                 # D86: nor which plane it stands on
+            t.pop("light", None)                 # D87: nor how brightly it burns
+            t.pop("darkvision", None)            # D89: nor how well it sees
+    ws.hydrate_ghosts(room["id"], uid)          # D141: ghosts outlive a restart
+    last = ws._last_seen.get(room["id"], {}).get(uid, {})
+    vis_ids = {t["id"] for t in tokens}
+    ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]
+    return tokens, ghosts, visible
+
+
 @router.get("/rooms/{code}/state")
 def room_state(code: str, request: Request):
     user, room = room_of(request, code)
@@ -586,9 +739,13 @@ def room_state(code: str, request: Request):
         "FROM room_members m JOIN users u ON u.id=m.user_id WHERE m.room_id=?", (room["id"],))
     for m in members:
         masked = room["_role"] != "dm" and m["user_id"] != user["id"]
+        # D106: the DM's /state is the ONLY full-metadata channel; the sheet
+        # owner sees their revealed curses reduced to name+desc; peers get the
+        # fail-closed strip (their row is reduced to _peer_view anyway).
+        curse = "strip" if masked else ("dm" if room["_role"] == "dm" else "owner")
         m["char"] = _char_row(
             db.q1("SELECT * FROM characters WHERE id=?", (m["character_id"],)),
-            mask_items=masked) if m["character_id"] else None
+            mask_items=masked, curse=curse) if m["character_id"] else None
         # D93: a peer row is now the tactical allow-list — the old notes/
         # unidentified-magic redaction was the tip of a much bigger row.
         if masked:
@@ -611,58 +768,13 @@ def room_state(code: str, request: Request):
             or [t for t in tokens_all if t.get("controller_user_id") == user["id"]]
         view_floor = (pool[0].get("floor") or "") if pool else ""
     mp = room_net.get_map(room["id"], view_floor)
-    visible = set()
     if room["_role"] == "dm":
-        tokens, ghosts = tokens_all, []
+        tokens, ghosts, visible = tokens_all, [], set()
         for t in tokens:                                   # DM sees full stat blocks
             t["npc"] = db.j(t.get("npc"), None) or None
     else:
-        visible = ws.viewer_visible_cells(room["id"], user["id"], mp, floor=view_floor)
-        # D86: which planes this viewer stands on (floors of own/operated
-        # tokens). Tokens on other planes are ELSEWHERE, not hidden — they
-        # must not even be listed, so their plane leaks nothing either.
-        planes = {(t.get("floor") or "") for t in tokens_all
-                  if t["owner_user_id"] == user["id"]
-                  or t.get("controller_user_id") == user["id"]}
-        _plane_cache = {"": (mp, visible)}
-        def _plane(fl):
-            # D88: sight must be evaluated on the map the token STANDS ON —
-            # never decide a crypt token's visibility from the tavern's fog.
-            if fl not in _plane_cache:
-                mp_p = room_net.get_map(room["id"], fl)
-                _plane_cache[fl] = (mp_p, ws.viewer_visible_cells(room["id"], user["id"],
-                                                                  mp_p, floor=fl))
-            return _plane_cache[fl]
-        def _visible_token(t):
-            fl = t.get("floor") or ""
-            if fl not in planes:
-                return False                      # D86: different plane = elsewhere
-            if t["owner_user_id"] == user["id"] or t.get("controller_user_id") == user["id"]:
-                return True                       # D82: controllers always see their token
-            mp_p, vis_p = _plane(fl)
-            origin, side = footprint.occupied_origin(mp_p, t)
-            return any((i := mapmodel.flat_idx(mp_p, x, y)) is not None and i in vis_p
-                       for (x, y) in footprint.origin_cells(mp_p, origin, side))   # D72
-        tokens = [t for t in tokens_all if _visible_token(t)]
-        for t in tokens:                                   # NPC stat blocks are DM-only
-            t["npc"] = None
-            if (t.get("character_id") is None and t.get("owner_user_id") is None
-                    and t.get("controller_user_id") != user["id"]):   # D83 duty: controllers keep the shape
-                t.pop("disposition", None)
-                t.pop("size", None)
-                t.pop("fw", None)                    # D81: hidden tokens leak no footprint
-                t.pop("fh", None)
-                t.pop("vw", None)                    # D82: nor the visual silhouette
-                t.pop("vh", None)
-                t.pop("rot", None)
-                t.pop("controller_user_id", None)    # D82: nor who leads it
-                t.pop("image", None)                 # D85: nor what artwork it wears
-                t.pop("floor", None)                 # D86: nor which plane it stands on
-                t.pop("light", None)                 # D87: nor how brightly it burns
-                t.pop("darkvision", None)            # D89: nor how well it sees
-        last = ws._last_seen.get(room["id"], {}).get(user["id"], {})
-        vis_ids = {t["id"] for t in tokens}
-        ghosts = [dict(v, ghost=True) for tid, v in last.items() if tid not in vis_ids]
+        tokens, ghosts, visible = _viewer_token_view(room, user, tokens_all,
+                                                     view_floor, mp)
     for t in tokens:                                   # conditions/death ride with visible tokens
         t["conds"] = C.load(t)
         t["death"] = D.load(t)
@@ -670,17 +782,26 @@ def room_state(code: str, request: Request):
     for m in msgs:
         m["meta"] = db.j(m.get("meta"), {})
     chat_msgs = chat.chat_history_for_viewer(room["id"], user["id"], room["_role"] == "dm", 200)
+    _fl = FLOOR.order(room)                        # D159: true bottom→top stack
+    _lm = FLOOR.level_map(room)                    # name -> signed level
     return {
         "code": room["code"], "name": room["name"], "map": room["map_image"],
-        "role": room["_role"], "me": user["id"], "floors": [""] + FLOOR.parse(room),
+        "role": room["_role"], "me": user["id"], "floors": _fl, "floor_levels": _lm,
         "members": members, "tokens": tokens, "ghosts": ghosts, "messages": msgs,
         "chat": chat_msgs,
         "audio": audio.load_state(st.get("audio_json")),
         "view_floor": view_floor,
         "grid": mapmodel.visible_map(mp, user["id"], room["_role"] == "dm", visible),
         "initiative": db.j(st.get("initiative"), {"combat": False, "order": [], "active": -1}),
+        # D111: presentation-only view of the MERGED condition catalog (built-in
+        # + this room's conditions.csv) — labels/glyphs/colors for chips and
+        # canvas dots, never the definition's mechanics cells.
+        "cond_catalog": {k: {"n": d.get("name", k), "g": d.get("glyph", "•"),
+                             "c": d.get("color", "#7f8c8d"),
+                             "m": d.get("group") == "marker"}
+                         for k, d in C.catalog(room["id"]).items()},
         "quests": questlog.visible_for(room["id"], room["_role"] == "dm"),
-        "characters": [_char_row(c) for c in db.q("SELECT * FROM characters WHERE user_id=?", (user["id"],))],
+        "characters": [_char_row(c, curse="owner") for c in db.q("SELECT * FROM characters WHERE user_id=?", (user["id"],))],
         # D92: the DM's item-definition library travels to the DM only; players
         # receive [] (defs are authoring templates — no player has a use for a
         # peer's future loot). Container CONTENTS never appear here at all —
@@ -692,18 +813,66 @@ def room_state(code: str, request: Request):
     }
 
 
+@router.get("/rooms/{code}/view_as/{cid}")
+def room_view_as(code: str, cid: int, request: Request):
+    """D104 — DM preview: THE server-side sight of one character, read-only.
+    Runs the same _viewer_token_view the character's own /state runs — the
+    same LOS, the same dark/lamp/darkvision decision (it lives inside
+    viewer_visible_cells), the same hidden-token strips, the same fog
+    masking. Nothing is written: explored fog, ghost memory, broadcasts and
+    every real viewer's state stay untouched — the DM sees what the player
+    sees, and NOTHING gains what the DM sees. DM-only channel; to anyone
+    else it answers like a floor that does not exist (no oracle)."""
+    user, room = room_of(request, code)
+    if room["_role"] != "dm":
+        raise HTTPException(404, "Not found")
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (cid,))
+    owner = db.q1("SELECT * FROM users WHERE id=?", (ch["user_id"],)) if ch else None
+    tok = db.q1("SELECT * FROM tokens WHERE room_id=? AND character_id=?",
+                (room["id"], cid)) if ch else None
+    if owner is None or tok is None or not db.q1(
+            "SELECT 1 AS hit FROM room_members WHERE room_id=? AND user_id=?",
+            (room["id"], owner["id"])):
+        raise HTTPException(404, "Not found")
+    view_floor = tok.get("floor") or ""            # the preview FOLLOWS the character
+    tokens_all = db.q("SELECT * FROM tokens WHERE room_id=? ORDER BY id", (room["id"],))
+    mp = room_net.get_map(room["id"], view_floor)
+    tokens, ghosts, visible = _viewer_token_view(room, owner, tokens_all,
+                                                 view_floor, mp)
+    for t in tokens:
+        t["conds"] = C.load(t)
+        t["death"] = D.load(t)
+    return {"as": {"user_id": owner["id"], "username": owner["username"],
+                   "character_id": ch["id"], "character": ch["name"],
+                   "token_id": tok["id"]},
+            "view_floor": view_floor, "dark": bool(mp.get("dark")),
+            "grid": mapmodel.visible_map(mp, owner["id"], False, visible),
+            "tokens": tokens, "ghosts": ghosts}
+
+
 class FloorIn(BaseModel):
     name: str = Field(min_length=1, max_length=24)
+    below: bool = False          # D159: declare the plane UNDER the primary stack
+
+
+def _floors_payload(room_id):
+    """The floor stack the client shows: names in true bottom→top order (signed
+    levels, D159) plus the name->level map that renders `E+3` / `E-1` labels."""
+    room = db.q1("SELECT floors FROM rooms WHERE id=?", (room_id,)) or {"floors": "[]"}
+    lm = FLOOR.level_map(room)
+    order = FLOOR.order(room)
+    return {"floors": order, "floor_levels": lm}
 
 
 @router.post("/rooms/{code}/floors")
 async def add_floor_route(code: str, body: FloorIn, request: Request):
     user, room = _room_dm(request, code)
-    ok, res = FLOOR.add(room["id"], body.name)
+    ok, res = FLOOR.add(room["id"], body.name, below=body.below)
     if not ok:
         raise HTTPException(400, res)
-    await room_net.broadcast(room["id"], "floors_changed", {"floors": [""] + res})
-    return {"floors": [""] + res}
+    payload = _floors_payload(room["id"])
+    await room_net.broadcast(room["id"], "floors_changed", payload)
+    return payload
 
 
 @router.delete("/rooms/{code}/floors/{name}")
@@ -712,8 +881,36 @@ async def remove_floor_route(code: str, name: str, request: Request):
     ok, res = FLOOR.remove(room["id"], name)
     if not ok:
         raise HTTPException(400, res)
-    await room_net.broadcast(room["id"], "floors_changed", {"floors": [""] + res})
-    return {"floors": [""] + res}
+    payload = _floors_payload(room["id"])
+    await room_net.broadcast(room["id"], "floors_changed", payload)
+    return payload
+
+
+@router.patch("/rooms/{code}/floors/{name}")
+async def rename_floor_route(code: str, name: str, body: FloorIn, request: Request):
+    """D102 — rename a floor. Registry, plane map and tokens move atomically
+    in FLOOR.rename; stair destinations naming the old floor live INSIDE map
+    contents on every plane, so they are rewritten here before the room is
+    told anything changed. This handler awaits nothing between the rename and
+    the rewrites — the event loop is the serialiser against concurrent walks."""
+    user, room = _room_dm(request, code)
+    ok, res = FLOOR.rename(room["id"], name, body.name)
+    if not ok:
+        raise HTTPException(400, res)
+    for fl in [""] + list(res):                 # every named plane plus the primary
+        mp = room_net.get_map(room["id"], fl)
+        hits = False
+        for o in (mp.get("objects") or []):
+            op = (o.get("interact") or {}).get("op") or {}
+            if op.get("kind") == "stair" and str(op.get("floor") or "") == name:
+                op["floor"] = body.name
+                hits = True
+        if hits:
+            room_net.set_map(room["id"], mp, fl)
+    payload = _floors_payload(room["id"])
+    await room_net.broadcast(room["id"], "floors_changed", payload)
+    await room_net.broadcast(room["id"], "map_changed", None)
+    return payload
 
 
 @router.post("/rooms/{code}/assign")
@@ -721,22 +918,41 @@ def assign_char(code: str, body: AssignIn, request: Request):
     user, room = room_of(request, code)
     ch = _load_char(body.character_id, user["id"])
     color = COLORS[(user["id"] - 1) % len(COLORS)]
+    from . import charbuild
+    species = charbuild.species_projection(dict(ch), room["id"])
+    size = npc.clean_size(species.get("size")) if species and species.get("size") else "Medium"
     revealed = False
     with db.tx() as c:
         c.execute("UPDATE room_members SET character_id=? WHERE room_id=? AND user_id=?",
                   (ch["id"], room["id"], user["id"]))
         tok = c.execute("SELECT * FROM tokens WHERE room_id=? AND owner_user_id=?",
                         (room["id"], user["id"])).fetchone()
+        # footprint.* read via .get() — a raw Row (the SECOND bring for one user,
+        # i.e. any re-seat with an existing token) has no .get and 500'd there.
+        tok = dict(tok) if tok else None
+        if tok and not (species and species.get("size")):
+            size = tok.get("size") or size
         if tok:
-            c.execute("UPDATE tokens SET character_id=?, label=?, color=? WHERE id=?",
-                      (ch["id"], ch["name"], color, tok["id"]))
+            c.execute("UPDATE tokens SET character_id=?, label=?, color=?, size=? WHERE id=?",
+                      (ch["id"], ch["name"], color, size, tok["id"]))
             px, py = tok["x"], tok["y"]
         else:
-            c.execute("INSERT INTO tokens (room_id,owner_user_id,character_id,label,color,x,y) "
-                      "VALUES (?,?,?,?,?,400,300)", (room["id"], user["id"], ch["id"], ch["name"], color))
+            c.execute("INSERT INTO tokens (room_id,owner_user_id,character_id,label,color,x,y,size) "
+                      "VALUES (?,?,?,?,?,400,300,?)",
+                      (room["id"], user["id"], ch["id"], ch["name"], color, size))
             px, py = 400, 300
+        # D102: reveal on the plane the token STANDS ON — a re-seat onto a
+        # named floor must not poke holes into the primary map's fog.
+        fl = (tok.get("floor") or "") if tok else ""
         strow = c.execute("SELECT map_json FROM room_state WHERE room_id=?", (room["id"],)).fetchone()
-        mp = mapmodel.load(strow["map_json"] if strow else "")
+        base = mapmodel.load(strow["map_json"] if strow else "")
+        if fl:
+            frow = c.execute("SELECT map_json FROM floor_maps WHERE room_id=? AND floor=?",
+                             (room["id"], fl)).fetchone()
+            mp = mapmodel.fit(mapmodel.load(frow["map_json"] if frow else None), base)
+            mp["fog_off"] = bool(base.get("fog_off")) if frow else False
+        else:
+            mp = base
         size = tok["size"] if tok else "Medium"
         span = footprint.token_span(tok) if tok else footprint.token_span({"size": size})
         desired = footprint.origin_from_pixel(px, py, mp["cell"], mp)
@@ -759,11 +975,319 @@ def assign_char(code: str, body: AssignIn, request: Request):
         source = footprint.player_source_cells(mp, [tok_for_reveal])
         visible_indices = los.visible_cells(mp, source)
         if mapmodel.reveal_cells(mp, visible_indices):
-            c.execute("UPDATE room_state SET map_json=? WHERE room_id=?", (db.json_dumps(mp), room["id"]))
+            if fl:
+                c.execute("INSERT INTO floor_maps(room_id,floor,map_json) VALUES(?,?,?) "
+                          "ON CONFLICT(room_id,floor) DO UPDATE SET map_json=excluded.map_json",
+                          (room["id"], fl, db.json_dumps(mp)))
+            else:
+                c.execute("UPDATE room_state SET map_json=? WHERE room_id=?",
+                          (db.json_dumps(mp), room["id"]))
             revealed = True
     if revealed:
         ws.notify(room["id"], "map_changed", None)
     return {"ok": True}
+
+
+class GearIn(BaseModel):
+    character_id: int = 0
+    class_choices: dict | None = None
+
+
+def _gear_authz(request, code, cid):
+    user, room = room_of(request, code)
+    ch = db.q1("SELECT * FROM characters WHERE id=?", (cid,))
+    if ch is None:
+        raise HTTPException(404, "Unknown character")
+    if ch["user_id"] != user["id"]:
+        if room.get("_role") != "dm" or db.q1(
+                "SELECT 1 AS ok FROM room_members WHERE room_id=? AND character_id=?",
+                (room["id"], ch["id"])) is None:
+            raise HTTPException(403, "Not your character")
+    return user, room, ch
+
+
+def _gear_tokens(text):
+    """'dagger_surge, potion_heal x2' -> ([(item_id, qty)], [errors]). Strict:
+    lowercase id (≤24) plus an OPTIONAL ' xN' (1–999). A malformed token is an
+    ERROR, never a silently granted prefix or a dropped line (D105)."""
+    out, errs = [], []
+    for raw in str(text or "").split(","):
+        tok = raw.strip()
+        if not tok:
+            continue
+        m = re.fullmatch(r"([a-z0-9][a-z0-9_-]{0,23})(?: x([1-9]\d{0,2}))?", tok)
+        if not m:
+            errs.append(f"Malformed item token '{tok[:32]}'")
+            continue
+        out.append((m.group(1), int(m.group(2) or 1)))
+    return out, errs
+
+
+def _gear_choices(text):
+    """'weapon=bow_long|sword_versatile; kit=goggles_night|gloves_thief x2'
+    -> ([(label, [(item_id, qty), …])], [errors]). Each group needs at least
+    two alternatives; labels are unique and free of the group delimiters."""
+    groups, errs = [], []
+    for raw in str(text or "").split(";"):
+        grp = raw.strip()
+        if not grp:
+            continue
+        label, sep, rest = grp.partition("=")
+        label = label.strip()
+        if not sep or not label or len(label) > 24 or any(c in label for c in "|=,"):
+            errs.append(f"Malformed choice group '{grp[:32]}'")
+            continue
+        if any(g[0] == label.lower() for g in groups):
+            errs.append(f"Duplicate choice group '{label}'")
+            continue
+        opts, oerrs = _gear_tokens(rest.replace("|", ","))
+        errs.extend(oerrs)
+        if len(opts) < 2:
+            errs.append(f"Choice group '{label}' needs at least two alternatives")
+            continue
+        groups.append((label.lower(), opts))
+    return groups, errs
+
+
+def _class_gear_row(class_id, room_id):
+    cid = str(class_id or "").strip().lower()
+    if not cid:
+        return None
+    for r in CONTENT.load("class", room_id):
+        if int(r.get("level") or 0) != 1:
+            continue
+        if str(r.get("id") or "").lower() == cid or \
+                (r.get("name") or "").lower() == cid:
+            return r
+    return None
+
+
+def _class_gear_plan(row, picks):
+    """Resolve a class row's level-1 gear against the (optional) picks.
+    ALL-OR-NOTHING: returns (items, groups, errors, missing) where items is
+    populated ONLY when errors and missing are both empty — a broken or
+    unresolved definition can never mint a partial grant that the idempotency
+    claim would then freeze (D105)."""
+    fixed, errors = _gear_tokens(row.get("starting_items"))
+    groups, gerrs = _gear_choices(row.get("starting_choices"))
+    errors.extend(gerrs)
+    picks = picks if isinstance(picks, dict) else {}
+    labels = [g[0] for g in groups]
+    for key in picks:
+        if str(key).strip().lower() not in labels:
+            errors.append(f"Unknown choice group '{str(key)[:24]}'")
+    missing = []
+    for label, opts in groups:
+        pick = picks.get(label)
+        if pick is None:
+            pick = next((p for k, p in picks.items()
+                         if str(k).strip().lower() == label), None)
+        if pick is None:
+            missing.append(label)
+            continue
+        wanted = str(pick).strip().lower()
+        if not any(item == wanted for item, _q in opts):
+            errors.append(f"'{pick}' is not an offered alternative for '{label}'")
+            continue
+        fixed.append(next((item, qty) for item, qty in opts if item == wanted))
+    if errors or missing or not fixed:
+        return [], groups, errors, missing
+    return fixed, groups, errors, missing
+
+
+def _gear_report(room, ch):
+    """Server-side resolution of BOTH gear parts for one character — names and
+    problems only, never raw pack rows. The prep UI renders this; the POST
+    re-validates independently, so the report can never be a side channel."""
+    out = {"ok": True, "background": None, "class": None, "needs_choice": []}
+    bg_id = (ch.get("background") or "").strip()
+    if bg_id:
+        bg = next((r for r in CONTENT.load("background", room["id"])
+                   if r.get("id") == bg_id or (r.get("name") or "").lower() == bg_id.lower()),
+                  None)
+        if bg is None:
+            out["background"] = {"error": f"Background '{bg_id}' is not in this room's rule pack"}
+        else:
+            toks = [t.strip() for t in str(bg.get("starting_items") or "").split(",") if t.strip()]
+            items, skipped = [], []
+            for t in toks:
+                d = db.q1("SELECT name FROM item_defs WHERE id=? AND room_id=?", (t[:24], room["id"]))
+                if d is None:
+                    skipped.append(t)
+                else:
+                    items.append({"token": t[:24], "name": d["name"], "qty": 1})
+            out["background"] = {"id": bg["id"], "items": items, "skipped": skipped}
+    cls_id = (ch.get("char_class") or "").strip()
+    if cls_id:
+        row = _class_gear_row(cls_id, room["id"])
+        if row is None:
+            out["class"] = {"status": "not_in_pack", "id": cls_id}
+        else:
+            groups, gerrs = _gear_choices(row.get("starting_choices"))
+            fixed, ferrs = _gear_tokens(row.get("starting_items"))
+            errors = ferrs + gerrs
+            def named(iq):
+                item, qty = iq
+                d = db.q1("SELECT name FROM item_defs WHERE id=? AND room_id=?",
+                          (item, room["id"]))
+                return {"token": item, "name": d["name"] if d else item, "qty": qty,
+                        "resolved": d is not None}
+            unresolved = [i for i, _q in fixed if db.q1(
+                "SELECT 1 AS hit FROM item_defs WHERE id=? AND room_id=?",
+                (i, room["id"])) is None]
+            for label, opts in groups:
+                for item, _q in opts:
+                    if db.q1("SELECT 1 AS hit FROM item_defs WHERE id=? AND room_id=?",
+                             (item, room["id"])) is None:
+                        unresolved.append(item)
+            if unresolved:
+                errors.append("No item definition in this room's pack for: "
+                              + ", ".join(sorted(set(unresolved))))
+            groups_out = [{"label": label,
+                           "options": [named(iq) for iq in opts]} for label, opts in groups]
+            claimed = db.q1("SELECT 1 AS hit FROM inv_ops WHERE op_id=?",
+                            (f"{ch['id']}|class-gear-{row['id']}"[:40],)) is not None
+            out["class"] = {
+                "status": "already" if claimed else (
+                    "invalid" if errors else ("needs_choice" if groups_out else
+                          ("gear" if fixed else "none"))),
+                "id": row.get("id"),
+                "fixed": [named(iq) for iq in fixed],
+                "groups": groups_out,
+                "errors": errors,
+            }
+            if not errors and groups_out and not claimed:
+                out["needs_choice"] = [g["label"] for g in groups_out]
+    return out
+
+
+@router.get("/rooms/{code}/starting-gear/{cid}")
+def starting_gear_report(code: str, cid: int, request: Request):
+    """D105: the resolved gear report (fixed items, choice groups, AND every
+    error that the grant would refuse on) — shown BEFORE granting so a broken
+    pack fails visibly, never as a half-grant."""
+    _user, room, ch = _gear_authz(request, code, cid)
+    return _gear_report(room, ch)
+
+
+@router.post("/rooms/{code}/starting-gear")
+async def starting_gear_route(code: str, body: GearIn, request: Request):
+    """D101/D105: grant background AND class starting gear from THIS room's
+    rule pack — THE one grant path (no second route exists). Background part
+    keeps its D101 semantics (unresolvable tokens reported as skipped). The
+    class part is all-or-nothing: one malformed token, one missing item
+    definition or one unanswered group refuses the WHOLE class grant and
+    writes NO idempotency claim, so fixing the pack stays possible (D105).
+    Each part is exactly-once through the D94 inv_ops replay guard: a replay
+    answers 'already' and can never add items or overwrite the original
+    choice. Authorisation mirrors the build API EXACTLY (owner, or DM of an
+    assigned character) — mutation still runs through app/inventory.py, the
+    one SSOT."""
+    _user, room, ch = _gear_authz(request, code, body.character_id)
+    ratelimit.limit("starting-gear", request, max_n=10, window=60)
+    resp = {"ok": None, "granted": [], "skipped": [], "already": False, "error": "",
+            "class_status": "none", "class_granted": [], "class_errors": [],
+            "needs_choice": []}
+
+    # ---- background part (D101 semantics unchanged) ----
+    bg_done = False
+    bg_id = (ch.get("background") or "").strip()
+    if not bg_id:
+        resp["error"] = "This character has no background set"
+    else:
+        bg = next((r for r in CONTENT.load("background", room["id"])
+                   if r.get("id") == bg_id or (r.get("name") or "").lower() == bg_id.lower()),
+                  None)
+        if bg is None:
+            resp["error"] = f"Background '{bg_id}' is not in this room's rule pack"
+        else:
+            tokens = [t.strip() for t in str(bg.get("starting_items") or "").split(",")
+                      if t.strip()]
+            if not tokens:
+                resp["error"] = "This background lists no starting_items in the rule pack"
+            else:
+                entries, skipped = [], []
+                for tok in tokens:
+                    d = db.q1("SELECT * FROM item_defs WHERE id=? AND room_id=?",
+                              (tok[:24], room["id"]))
+                    if d is not None:
+                        entries.append(INV.entry_from_def(d, 1))
+                    else:
+                        skipped.append(tok)
+                resp["skipped"] = skipped
+                if entries:
+                    try:
+                        res = INV.grant(room["id"], ch["id"], entries,
+                                        f"starting-gear-{bg['id']}"[:40])
+                    except INV.InvError as ex:
+                        raise HTTPException(400, str(ex))
+                    if res == "replay":
+                        resp["already"] = True
+                    else:
+                        resp["granted"] = res
+                        await room_net.broadcast(room["id"], "inv_changed", None)
+                        names = ", ".join(f"{r['qty']} × {r['name']}" for r in res)
+                        sys_msg(room["id"],
+                                f"🎒 {ch['name']} receives starting equipment: {names}.")
+                bg_done = True
+
+    # ---- class part (D105, all-or-nothing, exactly-once) ----
+    cls_id = (ch.get("char_class") or "").strip()
+    if cls_id:
+        row = _class_gear_row(cls_id, room["id"])
+        if row is None:
+            resp["class_status"] = "not_in_pack"
+        elif db.q1("SELECT 1 AS hit FROM inv_ops WHERE op_id=?",
+                   (f"{ch['id']}|class-gear-{str(row.get('id') or '')}"[:40],)) is not None:
+            # exactly-once (D105): the kit was granted BEFORE — a later request
+            # answers 'already' whatever it carries. It can neither add items
+            # nor overwrite the original choice, so the picks are not even
+            # parsed. The claim key mirrors inventory._claim (ns = char id).
+            resp["class_status"] = "already"
+        else:
+            items, groups, errors, missing = _class_gear_plan(row, body.class_choices)
+            if errors:
+                resp["class_status"] = "invalid"
+                resp["class_errors"] = errors[:8]
+            elif missing:
+                resp["class_status"] = "needs_choice"
+                resp["needs_choice"] = missing
+            elif not items:
+                resp["class_status"] = "none"
+            else:
+                entries, unresolved = [], []
+                for item_id, qty in items:
+                    d = db.q1("SELECT * FROM item_defs WHERE id=? AND room_id=?",
+                              (item_id, room["id"]))
+                    if d is None:
+                        unresolved.append(item_id)
+                    else:
+                        entries.append(INV.entry_from_def(d, qty))
+                if unresolved:
+                    resp["class_status"] = "invalid"
+                    resp["class_errors"] = [
+                        "No item definition in this room's pack for: "
+                        + ", ".join(sorted(set(unresolved)))]
+                else:
+                    try:
+                        res = INV.grant(room["id"], ch["id"], entries,
+                                        f"class-gear-{row['id']}"[:40])
+                    except INV.InvError as ex:
+                        raise HTTPException(400, str(ex))
+                    if res == "replay":
+                        resp["class_status"] = "already"
+                    else:
+                        resp["class_status"] = "granted"
+                        resp["class_granted"] = res
+                        await room_net.broadcast(room["id"], "inv_changed", None)
+                        names = ", ".join(f"{r['qty']} × {r['name']}" for r in res)
+                        sys_msg(room["id"],
+                                f"🎒 {ch['name']} receives the "
+                                f"{row.get('name') or row['id']} kit: {names}.")
+
+    resp["ok"] = bg_done or bool(resp["class_granted"]) or \
+        (resp["class_status"] == "already" and not resp["error"])
+    return resp
 
 
 @router.delete("/rooms/{code}/members/{uid}")
