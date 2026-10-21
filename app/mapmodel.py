@@ -567,15 +567,24 @@ def sanitize(d):
             continue
         seen_edges.add(key)
         locked = bool(e.get("locked"))
-        doors.append({"id": str(e.get("id", ""))[:16] or f"d{len(doors)}",
-                      "x": x, "y": y, "dir": dir_,
-                      "closed": bool(e.get("closed", True)) or locked,
-                      "locked": locked,
-                      # dm_only: only the DM may operate it (locked stays physical).
-                      # secret: never transmitted to players at all (secret passages).
-                      "dm_only": bool(e.get("dm_only")),
-                      "secret": bool(e.get("secret")),
-                      "label": _label(e.get("label"), "Door")})
+        door = {"id": str(e.get("id", ""))[:16] or f"d{len(doors)}",
+                "x": x, "y": y, "dir": dir_,
+                "closed": bool(e.get("closed", True)) or locked,
+                "locked": locked,
+                # dm_only: only the DM may operate it (locked stays physical).
+                # secret: never transmitted to players at all (secret passages).
+                "dm_only": bool(e.get("dm_only")),
+                "secret": bool(e.get("secret")),
+                "label": _label(e.get("label"), "Door")}
+        if locked:
+            # D162-4: the pick difficulty of the LOCK (not a hidden value —
+            # any character may look at a lock and judge it). Clamped, 15 default.
+            try:
+                ldc = int(e.get("lock_dc", 15))
+            except (TypeError, ValueError):
+                ldc = 15
+            door["lock_dc"] = max(5, min(25, ldc))
+        doors.append(door)
     pins, pin_ids = [], set()
     for p in (d.get("pins") or [])[:200]:
         cp = _clean_pin(p, w, h, ox, oy)

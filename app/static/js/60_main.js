@@ -226,11 +226,42 @@ function wire(){
   if (osel) osel.onchange = () => {
     const sf = $("obj-stair-fields"), lf = $("obj-lamp-fields");
     if (sf) sf.classList.toggle("hidden", osel.value !== "stair");
-    if (lf) lf.classList.toggle("hidden", osel.value !== "lamp"); };
+    if (lf) lf.classList.toggle("hidden", osel.value !== "lamp");
+    if (osel.value === "stair") fillStairFloors(); };
   $("btn-long-rest").onclick = () => wsSend({ type: "long_rest",
     clear_conditions: !!($("long-rest-conds") && $("long-rest-conds").checked) });
   $("btn-aoe").onclick = () => { state.aoeArmed = !state.aoeArmed;
     $("btn-aoe").classList.toggle("active", state.aoeArmed); };
+  // D162-5/6: the DM trap panel. The server takes the plane from the chosen
+  // token; Spring additionally names a victim. Remove is the live map_remove op.
+  const tdmCell = () => {
+    const tok = tdmToken();
+    const c = tok ? tokenCenterCell(tok) : null;
+    const x = +($("tdm-x").value || (c ? c.cx : NaN));
+    const y = +($("tdm-y").value || (c ? c.cy : NaN));
+    return Number.isFinite(x) && Number.isFinite(y) ? {x, y} : null;
+  };
+  $("tdm-tok").onchange = () => { const tok = tdmToken();
+    if (tok){ const c = tokenCenterCell(tok); $("tdm-x").value = c.cx; $("tdm-y").value = c.cy; } };
+  for (const [id, action] of [["tdm-search", "search"], ["tdm-disarm", "disarm"], ["tdm-trigger", "trigger"]])
+    $(id).onclick = () => {
+      const tok = tdmToken(), cell = tdmCell();
+      if (!tok) return toast("Pick a token on the trap's plane");
+      if (!cell) return toast("Trap cell needed");
+      const m = { type: "trap", action, token_id: tok.id, x: cell.x, y: cell.y };
+      if (action === "trigger"){
+        const v = +($("tdm-victim").value || 0);
+        if (!v) return toast("Pick a victim token for Spring");
+        m.target_id = v;
+      }
+      wsSend(m);
+    };
+  $("tdm-remove").onclick = () => {
+    const tok = tdmToken(), cell = tdmCell();
+    if (!tok) return toast("Pick a token on the trap's plane (sets the floor)");
+    if (!cell) return toast("Trap cell needed");
+    wsSend({ type: "map_remove", kind: "trap", x: cell.x, y: cell.y, floor: tok.floor || "" });
+  };
   $("btn-ping").onclick = () => { state.pingArmed = !state.pingArmed;
     $("btn-ping").classList.toggle("active", state.pingArmed); };
   $("btn-ruler").onclick = () => {

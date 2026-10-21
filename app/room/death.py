@@ -180,7 +180,8 @@ async def handle_stabilize(ws, room_id, user, is_dm, msg):
 
 async def handle_death_clear(ws, room_id, user, is_dm, msg):
     """DM override: clear/reset the dying state on a token (revivify, story, etc.)."""
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None or tok["character_id"] is None:

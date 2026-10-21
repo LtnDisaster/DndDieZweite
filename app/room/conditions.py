@@ -32,6 +32,8 @@ async def handle_cond_add(ws, room_id, user, is_dm, msg):
     # state and, if it now blocks, clears the flag + every linked condition.
     from .concentration import enforce_after_condition
     await enforce_after_condition(room_id, tok)
+    from .fall import after_condition              # D162-3: flyer + let-go state
+    await after_condition(room_id, tok)
 
 
 async def handle_cond_remove(ws, room_id, user, is_dm, msg):
@@ -106,6 +108,8 @@ async def knock_prone(room_id, tok, actor="DM"):
     db.x("UPDATE tokens SET conds=? WHERE id=?", (db.json_dumps(conds), tok["id"]))
     sys_msg(room_id, f"{tok['label']} is knocked prone ({actor}).")
     await send_cond_bump(room_id, tok, conds)     # trap knocks too (D83 callers)
+    from .fall import after_condition              # D162-3: a flyer without hover falls
+    await after_condition(room_id, tok)
     return conds
 
 

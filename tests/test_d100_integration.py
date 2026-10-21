@@ -146,41 +146,42 @@ def test_g8b_prose_actions_still_roundtrip(client):
 
 
 # --------------------------------------------------------------------------
-# G9 / A13 — item_defs cross-room safety
+# G9 / A13 — item_defs cross-room safety (D162-9: composite key = isolation)
 # --------------------------------------------------------------------------
 
-def test_g9_definition_id_is_room_scoped_and_not_clobbered(client):
+def test_g9_definition_id_is_room_scoped_two_rooms_two_rows(client):
+    # D162-9 (documented inversion of the D100 refusal): the composite key
+    # (room_id,id) makes cross-room id collisions STRUCTURALLY harmless —
+    # both rooms keep independent definitions; delete/read stay room-scoped.
     dm_a, player_a, code_a, _ = base_room(client)
     dm_b, player_b, code_b, _ = base_room(client)
     did = "d100_blade_" + uuid.uuid4().hex[:6]
 
-    # room A creates a definition
     with ws_connect(client, dm_a, code_a) as wsa:
         wsa.send_json({"type": "item_def", "action": "create",
                        "defn": {"id": did, "name": "A Blade", "kind": "weapon", "weight": 3}})
         recv_until(wsa, "inv_changed")
     assert db.q1("SELECT name FROM item_defs WHERE room_id=? AND id=?", (rid_of(code_a), did))["name"] == "A Blade"
 
-    # room B with the SAME id is refused — no silent overwrite of A's row
+    # room B with the SAME id now gets its OWN row — no refusal, no clobber
     with ws_connect(client, dm_b, code_b) as wsb:
         wsb.send_json({"type": "item_def", "action": "create",
                        "defn": {"id": did, "name": "B Blade", "kind": "weapon", "weight": 3}})
-        assert "another room" in (recv_until(wsb, "error")["payload"]["msg"]).lower()
-    assert db.q1("SELECT name FROM item_defs WHERE id=?", (did,))["name"] == "A Blade"    # untouched
-    assert db.q1("SELECT 1 FROM item_defs WHERE room_id=? AND id=?", (rid_of(code_b), did)) is None
+        recv_until(wsb, "inv_changed")
+    assert db.q1("SELECT name FROM item_defs WHERE room_id=? AND id=?", (rid_of(code_b), did))["name"] == "B Blade"
+    assert db.q1("SELECT name FROM item_defs WHERE room_id=? AND id=?", (rid_of(code_a), did))["name"] == "A Blade"
 
-    # room B cannot read/delete/grant room A's definition even knowing the id
+    # room B cannot delete room A's definition even knowing the id
     with ws_connect(client, dm_b, code_b) as wsb:
         wsb.send_json({"type": "item_def", "action": "delete", "def_id": did})
         recv_until(wsb, "inv_changed")
-    assert db.q1("SELECT name FROM item_defs WHERE id=?", (did,))["name"] == "A Blade"    # survived B's delete
+    assert db.q1("SELECT 1 FROM item_defs WHERE room_id=? AND id=?", (rid_of(code_b), did)) is None
+    assert db.q1("SELECT name FROM item_defs WHERE room_id=? AND id=?", (rid_of(code_a), did))["name"] == "A Blade"    # survived
 
 
-def test_g9_import_refuses_shared_id_without_losing_content(client):
-    # item_defs.id is GLOBAL. Two rooms importing the SAME item id: the first owns
-    # the shared DM-library row; the second must STILL get its room-scoped content
-    # row (export SSOT) but must NOT clobber the first room's library row. Run-unique
-    # ids so these two rooms are the only claimants regardless of other tests.
+def test_g9_import_shared_id_is_isolated_per_room(client):
+    # D162-9: two rooms importing the SAME item id each get their own
+    # content row AND their own item_defs row (isolated by the composite key).
     import pathlib
     dm_a, _, code_a, _ = base_room(client)
     dm_b, _, code_b, _ = base_room(client)
@@ -190,11 +191,12 @@ def test_g9_import_refuses_shared_id_without_losing_content(client):
     a = content.import_package({"items.csv": items}, room_id=rid_of(code_a), mode="apply", apply=True)
     assert a["ok"]
     b = content.import_package({"items.csv": items}, room_id=rid_of(code_b), mode="apply", apply=True)
-    assert b["ok"]                                    # content stored per room regardless
+    assert b["ok"]
     assert db.q1("SELECT 1 FROM content WHERE kind='item' AND room_id=? AND id=?",
-                 (rid_of(code_b), sp))                 # room B has its OWN content row
-    # the shared item_defs row belongs to whoever imported first (A) and was not rewritten by B
-    assert db.q1("SELECT room_id FROM item_defs WHERE id=?", (sp,))["room_id"] == rid_of(code_a)
+                 (rid_of(code_b), sp))
+    for rid in (rid_of(code_a), rid_of(code_b)):
+        assert db.q1("SELECT 1 FROM item_defs WHERE room_id=? AND id=?", (rid, sp)), \
+            "both rooms own their DM-library row"
 
 
 # --------------------------------------------------------------------------

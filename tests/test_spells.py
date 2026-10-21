@@ -76,20 +76,34 @@ def abilities_of(char_id):
 # ---------- build: models, slot TABLE, choice-gating, class resource ----------
 
 def test_build_prepared_caster_castable_pool_and_slot_table(client):
+    """D162-10 inverted the old 'prepared -> whole class list auto-granted'
+    pin (this file's former assertion): prepared casters now PICK from the
+    class pool — the counts come from the class row, capped by the pool the
+    pack can offer. The sheet holds exactly what was picked (plus subclass
+    grants); slot TABLE semantics are unchanged."""
     _dm, player, _code, _ch, rid = room_pack(client)
     cid = make_char(client, player)["id"]
-    ok, res = CB.apply(cid, "adept", 5,
-                       {"subclass": "school_ember", "levels": {"4": {"ability": {"int": 2}}}}, rid)
-    assert ok and res["spell_model"] == "prepared"
+    rows = C.spell_pool("adept", rid)
+    pc = sorted(r["id"] for r in rows if str(r.get("level")) == "0")
+    ps = sorted(r["id"] for r in rows if str(r.get("level")) != "0")
+    ok, res = CB.apply(cid, "adept", 5, {
+        "subclass": "school_ember",
+        "levels": {"1": {"cantrips": pc, "spells": ps},
+                   "4": {"ability": {"int": 2}}}}, rid)
+    assert ok and res["spell_model"] == "prepared", res
     # full caster at class level 5 -> 1:4, 2:3, 3:2 (the class row's TABLE)
     assert res["slots"] == {1: 4, 2: 3, 3: 2}
-    pool = {r["id"] for r in C.spell_pool("adept", rid)}
-    assert pool <= abilities_of(cid)                         # prepared -> whole class list
+    pool = {r["id"] for r in rows}
+    assert pool <= abilities_of(cid)          # every PICK is castable
     disp = {s["id"] for s in gear.clean_spells(db.j(
         db.q1("SELECT spells FROM characters WHERE id=?", (cid,))["spells"], []))}
-    assert pool == disp
-    for sid in pool:                                         # sheet pool is castable
-        assert abilities.get(sid) is not None
+    assert pool == disp                       # picks (+ pool-internal grants)
+    # and WITHOUT a pick, nothing is auto-granted any more:
+    cid2 = make_char(client, player)["id"]
+    ok2, res2 = CB.apply(cid2, "adept", 1, {}, rid)
+    assert ok2 is False and any(n["kind"] == "spells" and n["level"] == 1
+                                for n in res2["needs_choice"])
+    assert abilities_of(cid2) == set()        # choice-gated: writes nothing
 
 
 def test_build_half_caster_slots_are_a_table_not_derived_from_total_level(client):

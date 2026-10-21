@@ -366,7 +366,9 @@ async def _teleport3d(ws, tok, msg):
     from . import vertical3d
     room_id = tok["room_id"]
     current = tok.get("floor") or ""
-    to_fl = str(msg["floor"] or current) if "floor" in msg else current
+    # the primary plane is named "" — an `or current` fallback would swallow
+    # every move whose destination IS the primary plane and no-op it silently
+    to_fl = str(msg["floor"]) if "floor" in msg and msg["floor"] is not None else current
     maps = vertical3d.maps_for(room_id)
     lm = vertical3d.level_map(room_id)
     if to_fl not in maps or current not in maps:
@@ -415,7 +417,9 @@ async def _move3d(ws, tok, msg, mode, budget):
     from . import vertical3d
     room_id = tok["room_id"]
     current = tok.get("floor") or ""
-    to_fl = str(msg["floor"] or current) if "floor" in msg else current
+    # the primary plane is named "" — an `or current` fallback would swallow
+    # every move whose destination IS the primary plane and no-op it silently
+    to_fl = str(msg["floor"]) if "floor" in msg and msg["floor"] is not None else current
     maps = vertical3d.maps_for(room_id)
     lm = vertical3d.level_map(room_id)
     if to_fl not in maps or current not in maps:
@@ -728,6 +732,9 @@ async def walk(room_id, token_id, path, mover_ws=None, budget=None, mode="walk",
     finally:
         if _walks.get(token_id) is asyncio.current_task():
             _walks.pop(token_id, None)
+        # D162-3: wherever the walk left the token is where support is decided.
+        from .fall import after_move
+        await after_move(room_id, token_id)
 
 
 async def handle_stop_move(ws, room_id, user, is_dm, msg):

@@ -28,12 +28,16 @@ const HELP = [
   { c:"start", t:"Moving your token", k:"move movement walk path preview double-click stop",
     h:"Click your token, then click a destination (<i>Move: then click the destination cell</i>): you get a path preview first. Double-click the previewed goal (or press the confirm button) to walk. The walk stops at traps, closed doors, and if you drop to 0 HP. <i>Route changed — please plan it again</i> means the map moved under your preview — click the goal again." },
   { c:"start", t:"Doors & keys", k:"door open close lock locked key secret",
-    h:"Click a door next to your token to open or close it. Locked doors need the key — or the DM. <i>It won't budge.</i> means the DM locked that door for players entirely. Secret passages show up on the DM's map only." },
+    h:"Click a door next to your token to open or close it. Locked doors need the key — or the DM. <i>It won't budge.</i> means the DM locked that door for players entirely. Secret passages show up on the DM's map only. <b>Lockpicking (D&D 2024):</b> stand next to a locked door and <kbd>Shift</kbd>-click its edge — your character makes a Dexterity check. Thieves' tools in your pack are strongly advised (without them you roll at disadvantage; the trained hands of a Criminal background help), and a good result makes <i>the lock clicks open</i>." },
   { c:"start", t:"Fog of war & revealed terrain", k:"fog explored darkness reveal light brush",
     h:"Explored terrain stays explored. The DM's 💡 brush toggles room-wide terrain reveal; hidden creatures still need line of sight either way. The DM can also <i>Hide explored fog</i> to re-shroud the room." },
   { c:"start", t:"Deleting a room", k:"delete remove room permanently code confirm owner creator",
     h:"In the lobby the room's DM sees <b>Delete</b> beside their own room. To stop a stray click, a dialog appears and asks you to type the room's code; only once you type it exactly does <b>Delete permanently</b> unlock. Only the room's creator-DM can delete it (the server refuses anyone else), and it removes everything inside for good — map, floors, tokens, chat, notes and items." },
 
+  { c:"dm", t:"Confirm attack damage (D&D 2024)", k:"damage apply decline pending hit confirm attack dice health",
+    h:"When one of your attacks with an item weapon hits a target, the roll lands in the <b>Game Log</b> with <b>Apply</b>/<b>Decline</b> buttons next to it — <i>dice only roll, the table still needs your call</i>. <b>Apply</b> moves that exact damage onto the target's sheet (double clicks can't double-charge; a reload shows the line again until you decide). <b>Decline</b> throws it away. Old unanswered lines sweep themselves after a while." },
+  { c:"dm", t:"DM trap panel & erasing traps/loot", k:"trap panel trapm trappanel search disarm trigger remove erase brush traprm lootrm",
+    h:"The DM tab has a <b>Traps</b> panel: search traps in range, disarm, <b>trigger</b> one early, or remove it — all through the same server checks as the brush. The map editor gained <b>erase-trap</b> and <b>erase-loot</b> brushes: click a cell that carries a trap or loot to remove just that item (a plain re-paint used to silently overwrite it — no longer needed)." },
   /* ---- characters ---- */
   { c:"chars", t:"Bring a character to the table", k:"character create join assign seat bring",
     h:"In the room screen choose one of your characters — the DM may also assign who seats where. <i>Bring a character to the table first</i> is this exact step still missing." },

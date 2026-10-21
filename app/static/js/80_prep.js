@@ -162,6 +162,8 @@ function renderPrepChecklist(ch){
          ch ? (led.applied_through ? `Build applied through level ${led.applied_through}` : "Build not applied yet — plan + apply below") : "Build (guided level-up)") +
     item(!!ch && !!led.origin,
          ch ? (led.origin ? `2024 Origin granted (${led.origin.background})` : "2024 Origin pending — 🧬 Origin card below") : "2024 Origin (background ASI + feat)") +
+    item(!!ch && (!!led.species_bonus || !ch.race),
+         ch ? (led.species_bonus ? `Species bonuses granted (${led.species_bonus.species})` : "Species bonuses pending — 🐾 Species card below") : "Species traits & bonuses") +
     item(assigned && ch && assigned === ch.id,
          assigned && ch && assigned === ch.id ? "Seated at the table" : "Seat this character at the table") +
     `<div style="margin-top:4px">Equipment: ${ch ? (ch.items || []).length : 0} item(s)${
@@ -254,7 +256,7 @@ function renderPrepWizard(){
   if (n.spell && n.spell.ability)
     parts.push(`<div><small style="opacity:.75">Casting ability: <b>${esc(n.spell.ability.toUpperCase())}</b> (class content row)</small></div>`);
   if (n.spell && n.spell.model === "prepared")
-    parts.push(`<div><small style="opacity:.7">Prepared caster: the server pre-parses from the class pool — no spell choice needed.</small></div>`);
+    parts.push(`<div><small style="opacity:.7">Prepared caster (D162-10): you choose the cantrips and spells listed on the level rows — your sheet will hold exactly what you picked. Re-preparing your daily list stays a table/long-rest step.</small></div>`);
   const missing = prepMissing();
   parts.push(`<div><b>${missing.length ? `Still missing: ${esc(missing.join(", "))}` : "All guided choices collected ✔"}</b></div>`);
   wiz.innerHTML = parts.join("");
@@ -502,6 +504,65 @@ async function prepGearGrant(){
    allowed abilities + their current values, the Origin feat, all refusal
    reasons), the client only ever picks a DISTRIBUTION — feat id and amounts are
    never sent. UI checks below are guidance, never authority. */
+/* D162-2: species card — traits + the pack's species ability increases.
+   THE BROWSER NEVER ADDS ANYTHING: the server's exactly-once ledger
+   (apply_species_bonus, D145) is the only writer of the bonus; this card only
+   GETs the report and POSTs an empty body. 2024 ability increases from the
+   BACKGROUND stay on the Origin card — the two grants commute by design. */
+async function prepSpecies(){
+  const ch = prepSelChar(), out = $("prep-species-out"); if (!ch) return toast("No character selected");
+  try {
+    state.prep.speciesReport = await api(`/build/${state.prep.code}/${ch.id}/species`);
+    renderSpeciesReport();
+  } catch (e){ out.innerHTML = `<span style="color:#e74c3c">${esc(e.message)}</span>`; }
+}
+function renderSpeciesReport(){
+  const p = state.prep, j = p.speciesReport, out = $("prep-species-out");
+  if (!j){ out.innerHTML = ""; return; }
+  const lbl = a => ((STATS.find(s => s[0] === a) || [a, a.toUpperCase()])[1]);
+  const parts = [];
+  if (!j.species){ out.innerHTML = `<span style="color:#f1c40f">${esc((j.errors || []).join("; ") || "Pick a species first.")}</span>`; return; }
+  const f = j.features || {};
+  const feats = [];
+  if (f.size) feats.push(`Size: ${esc(f.size)}`);
+  if (f.speed_ft) feats.push(`Speed ${f.speed_ft} ft`);
+  if (f.fly_ft) feats.push(`Fly ${f.fly_ft} ft`);
+  if (f.swim_ft) feats.push(`Swim ${f.swim_ft} ft`);
+  if (f.climb_ft) feats.push(`Climb ${f.climb_ft} ft`);
+  if (f.darkvision_ft) feats.push(`Darkvision ${f.darkvision_ft} ft`);
+  if ((f.languages || []).length) feats.push(`Languages: ${f.languages.map(esc).join(", ")}`);
+  for (const t of (f.traits || [])) feats.push(esc(t));
+  parts.push(`<b>${esc(j.species_name)}</b> — traits, speed and senses flow to the sheet and the token automatically.`);
+  if (feats.length) parts.push(feats.join(" · "));
+  if (j.applied){
+    const as = (j.applied.as || j.bonuses || []).map(b => `${esc(lbl(b.ability))} +${b.delta}`).join(", ");
+    out.innerHTML = parts.join("<br>") + `<br><span style="color:#9d9">Species bonuses already granted</span> — ${as || "none"} · the build ledger keeps the proof; nothing can be granted twice.`;
+    return;
+  }
+  if ((j.errors || []).length) parts.push(`<span style="color:#f1c40f">${esc(j.errors.join("; "))}</span>`);
+  if ((j.bonuses || []).length){
+    const pv = j.bonuses.map(b => `${esc(lbl(b.ability))} ${(j.current || {})[b.ability] ?? "—"} → <span style="color:#9d9">${(j.result || {})[b.ability] ?? "—"}</span>`);
+    parts.push(`This room's pack grants: ${pv.join(" · ")}`);
+    parts.push(`<span class="tiny" style="opacity:.75">D&D 2024 ability increases come from the background (🧬 Origin card). Species traits are above; the listed increases are this pack's species grant — applied by the server exactly once.</span>`);
+    parts.push(`<div class="row"><button id="prep-species-apply" class="primary" ${j.ready ? "" : "disabled"}>🐾 Grant species bonuses</button></div>` +
+               `<div id="prep-species-result" class="meta"></div>`);
+  }
+  out.innerHTML = parts.join("<br>");
+  const b = $("prep-species-apply"); if (b) b.onclick = prepSpeciesApply;
+}
+async function prepSpeciesApply(){
+  const p = state.prep, ch = prepSelChar(), res = $("prep-species-result"); if (!ch || !res) return;
+  try {
+    const j = await api(`/build/${p.code}/${ch.id}/species`, "POST", {});
+    if (j.ok)
+      res.innerHTML = j.result && j.result.already
+        ? "<i>Species bonuses were granted earlier — the ledger says: nothing added.</i>"
+        : "<span style='color:#9d9'>Species bonuses granted</span> — recorded in the build ledger.";
+    else res.innerHTML = `<span style="color:#e74c3c">${esc(j.error || "refused")}</span>`;
+    await prepRefresh();
+  } catch (e){ res.innerHTML = `<span style="color:#e74c3c">${esc(e.message)}</span>`; }
+}
+
 async function prepOrigin(){
   const ch = prepSelChar(), out = $("prep-origin-out"); if (!ch) return toast("No character selected");
   try {
@@ -632,6 +693,7 @@ function wirePrep(){
   };
   $("prep-assign").onclick = prepAssign;
   $("prep-gear").onclick = prepGear;
+  $("prep-species-card").onclick = prepSpecies;
   $("prep-origin").onclick = prepOrigin;
   $("prep-table").onclick = () => { const code = state.prep && state.prep.code; if (code) openRoom(code); };
   $("prep-ct-upload").onclick = prepUpload;

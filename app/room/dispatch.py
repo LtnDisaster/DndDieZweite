@@ -36,10 +36,49 @@ from .secret_events import handle_secret_event
 from .status import handle_exhaustion, handle_inspiration, handle_temp_hp
 from .traps import handle_trap                    # D113: data-driven discover/disarm
 from .tokens import (handle_add_token, handle_del_token, handle_token_controller,
+                     handle_token_drop,
                      handle_token_mount, handle_token_rotate, handle_token_span,
                      handle_token_visual, handle_update_npc, handle_token_image,
                      handle_token_floor, handle_token_light,
                      handle_token_darkvision, handle_token_height)
+
+
+from .pending import handle_damage_confirm
+
+
+async def handle_map_remove(ws, room_id, user, is_dm, msg):
+    """D162-6: remove the trap/loot entities on ONE cell of ONE plane — the
+    live counterpart of the editor's traprm/lootrm brushes. DM-only with a
+    LOUD refusal (D162-11); scoped by floor so other planes' entities are
+    provably untouched; runtime flags of surviving entities stay authoritative
+    (absence removes only the named cell's entries)."""
+    if not is_dm:
+        await send_to(ws, "error", {"msg": "DM only"})
+        return
+    kind = str(msg.get("kind") or "")
+    if kind not in ("trap", "loot"):
+        return await send_to(ws, "error", {"msg": "kind must be trap or loot"})
+    try:
+        cx, cy = int(msg.get("x")), int(msg.get("y"))
+    except (TypeError, ValueError):
+        return await send_to(ws, "error", {"msg": "cell x,y required"})
+    fl = str(msg.get("floor") or "")
+    if not floors.exists(room_id, fl):
+        return await send_to(ws, "error", {"msg": "No such floor"})
+    key = "traps" if kind == "trap" else "loot"
+    async with map_lock(room_id):
+        mp = get_map(room_id, fl)
+        before = len(mp.get(key) or [])
+        mp[key] = [e for e in (mp.get(key) or [])
+                   if not (e.get("x") == cx and e.get("y") == cy)]
+        removed = before - len(mp[key])
+        if removed:
+            set_map(room_id, mp, fl)
+    if not removed:
+        return await send_to(ws, "error", {"msg": "Nothing to remove on that cell"})
+    await send_to(ws, "whisper", {"msg": f"Removed {removed} {kind} entity(ies) "
+                                         f"on {fl or 'the ground floor'}."})
+    await broadcast(room_id, "map_changed", None)
 
 
 async def handle_map_edit(ws, room_id, user, is_dm, msg):
@@ -105,6 +144,33 @@ async def handle_map_edit(ws, room_id, user, is_dm, msg):
             if prev is not None:
                 loot["taken_by"] = prev.get("taken_by")
                 loot["hinted"] = bool(prev.get("hinted"))   # D133 runtime marker
+        # D162-1: stair targets are validated at AUTHORING time — a dangling
+        # plane name used to save cleanly and only answer "Nothing happens." at
+        # use time. The primary ("" ) is always a valid target. Legacy maps that
+        # already carry a dangling stair stay saveable (compatibility): only a
+        # NEW or CHANGED dangling target is refused, with an understandable msg.
+        def _stair_target(o):
+            op = ((o.get("interact") or {}).get("op")) or {}
+            return op["floor"] if op.get("kind") == "stair" else None
+        legacy_dangling = set()
+        for o in old.get("objects", []):
+            tf = _stair_target(o)
+            if tf is not None and not floors.exists(room_id, tf):
+                legacy_dangling.add((o.get("id"), tf))
+        bad_targets = []
+        for o in mp_new.get("objects", []):
+            tf = _stair_target(o)
+            if tf is None or floors.exists(room_id, tf):
+                continue
+            if (o.get("id"), tf) in legacy_dangling:
+                continue
+            bad_targets.append(tf)
+        if bad_targets:
+            return await send_to(ws, "error", {"msg":
+                "Stairs point at a floor that does not exist: "
+                + ", ".join(sorted(set(bad_targets)))
+                + " - pick a real floor from the dropdown "
+                "(the ground floor is selectable as Ground (primary))."})
         # D82: object runtime state (the generic boolean carrier) is authoritative
         # world state — a stale editor snapshot must not reset it (trap precedent).
         old_objs = {e.get("id"): e for e in old.get("objects", [])}
@@ -149,6 +215,7 @@ HANDLERS = {
     "lamp": handle_lamp,                                 # D104: DM-only lamp add/update/remove
     "add_token": handle_add_token,
     "del_token": handle_del_token,
+    "token_drop": handle_token_drop,        # D162-3: DM lets a flyer/body go
     "update_npc": handle_update_npc,
     "cond_add": handle_cond_add,
     "cond_remove": handle_cond_remove,
@@ -225,6 +292,8 @@ HANDLERS = {
     "pickpocket_take": handle_pickpocket_take,  # D112: auto-steal a DM-'pick' item
     "pickable": handle_pickable,               # D112: DM authorizes stealable items
     "trap": handle_trap,                        # D113: data-driven search/disarm/spring
+    "map_remove": handle_map_remove,            # D162-6: DM trap/loot removal by cell
+    "damage_confirm": handle_damage_confirm,  # D162-7: Apply/Decline rolled damage
 }
 
 

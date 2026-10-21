@@ -293,6 +293,7 @@ Im Regelwerk-Panel wählst du Datei(en) bzw. ein ZIP und einen **Modus**:
 | **Vorschau** (`preview`) | nur prüfen, **nichts** geschrieben. Liefert Fehler mit **Datei, Zeile, Spalte**. |
 | **Anwenden** (`apply`) | schreibt fehlerfreie Dateien. Bereits vorhandene, **unterschiedliche** ID = **Konflikt** (wird **nicht** überschrieben). |
 | **Ersetzen** (`replace`) | schreibt und überschreibt bestehende IDs. |
+| **Aktualisieren** (`upsert`) | wie Ersetzen, aber der Report führt geänderte bestehende IDs separat als **`updated`** auf (Seit-D162; für Nachführungen ohne Stillübersicht). |
 
 Regeln:
 * Scheitert **eine Zeile**, wird **nur die betroffene Datei** nicht geschrieben
@@ -319,7 +320,7 @@ Regeln:
 ## 7. Was die Engine wirklich umsetzt (vs. Anzeige)
 
 **Mechanisch getragen:**
-* Gegenstände projizieren in die DM-Bibliothek (`item_defs`); bewaffnete
+* Gegenstände projizieren in die DM-Bibliothek (`item_defs`); seit D162 ist die Item-ID **raumbezogen** `(room_id,id)` — gleiche IDs in verschiedenen Räumen sind unabhängig (Export/Import je Raum unverändert flach); bewaffnete
   Charaktere erhalten daraus server-seitige Angriff Profile:
   `attack_bonus`, `damage_bonus`, `damage_dice`(+`_two_handed`), `finesse`,
   `two_handed`, `versatile`, `range_ft`(aus `range_normal_ft`)/`range_long_ft`,
@@ -639,7 +640,7 @@ siehe Abschnitt 8.3.)*
 1. Vorlage aus dem Export oder dem `app/content_pack/` kopieren.
 2. Werte pflegen (Liste = Komma **oder** Semikolon; Würfel/Attributs-Boni wie oben).
 3. **Vorschau** laufen lassen, alle Fehler (Datei/Zeile/Spalte) beheben.
-4. **Anwenden**. Bei bewusster Überschreibung: **Ersetzen**.
+4. **Anwenden**. Bei bewusster Überschreibung: **Ersetzen**; zum Nachführen mit Sicht auf die geänderten IDs: **Aktualisieren** (`upsert`).
 5. **Export**, um die gespeicherte Wahrheit zu vergleichen / zu versionieren.
 
 ## 11. Eignung für D&D 5e (2024) — Stand D109 (Ursprungs- und Mastery-Schicht umgesetzt)

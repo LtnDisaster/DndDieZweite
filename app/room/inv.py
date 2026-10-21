@@ -59,18 +59,12 @@ async def handle_item_def(ws, room_id, user, is_dm, msg):
             await send_to(ws, "error", {"msg": "Invalid item definition"})
             return
         did = d.pop("id") or "def" + _rand()
-        # D100: item_defs.id is global. Never clobber another room's definition —
-        # a same-room id updates in place, a foreign id is refused outright (a
-        # per-room key would need a destructive rebuild, so the conflict is made
-        # explicit instead of silently overwriting the other room's library row).
-        owner = db.q1("SELECT room_id FROM item_defs WHERE id=?", (did,))
-        if owner is not None and owner["room_id"] != room_id:
-            await send_to(ws, "error", {"msg": "That definition id is already used by "
-                                               "another room — choose a different id"})
-            return
+        # D162-9: item_defs is keyed (room_id, id) — a same id in another room
+        # is simply another row. Within THIS room the upsert updates in place;
+        # cross-room isolation is structural, no ownership dance needed.
         db.x("INSERT INTO item_defs(id, room_id, name, desc, kind, weight, stackable,"
              " props, created_by, value) VALUES(?,?,?,?,?,?,?,?,?,?)"
-             " ON CONFLICT(id) DO UPDATE SET name=excluded.name, desc=excluded.desc,"
+             " ON CONFLICT(room_id, id) DO UPDATE SET name=excluded.name, desc=excluded.desc,"
              " kind=excluded.kind, weight=excluded.weight, stackable=excluded.stackable,"
              " props=excluded.props, value=excluded.value",
              (did, room_id, d["name"], d["desc"], d["kind"], d["weight"],
@@ -544,8 +538,10 @@ def _npc_dead(tok):
 async def handle_npc_inv(ws, room_id, user, is_dm, msg):
     """DM manages an NPC token's inventory. inspect / fill / remove /
     coins_fill / coins_remove — mutations go through app/inventory.py only.
-    Silent for non-DM (mirrors the dm_only world-container path)."""
-    if not is_dm:
+    D162-11: a non-DM now gets a loud 'DM only' refusal (the guard runs
+    before any token lookup, so it can never confirm or deny an NPC)."""
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
                 (msg.get("token_id", -1), room_id))

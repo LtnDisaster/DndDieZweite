@@ -25,6 +25,7 @@ async function openRoom(code){
   $("room-role").style.background = s.role === "dm" ? "var(--gold)" : "#2c3e50";
   for (const o of document.querySelectorAll(".dm-only")) o.style.display = s.role === "dm" ? "" : "none";
   $("dmtools").classList.toggle("hidden", s.role !== "dm");
+  if ($("trappanel")) $("trappanel").classList.toggle("hidden", s.role !== "dm");   // D162-5
   if ($("floorpanel")) $("floorpanel").classList.toggle("hidden", s.role !== "dm");
   renderViewFloor();   // D102: plane row + floor panel exist from the first render
   $("init-btns").classList.toggle("hidden", s.role !== "dm");
@@ -127,7 +128,40 @@ function renderFloorRail(){
   rail.classList.toggle("hidden", !(state.editing || floors.length > 1));
   for (const b of rail.querySelectorAll(".fl-rail"))
     b.onclick = () => gotoEditFloor(b.dataset.f);
+  // D162-1: keep an open stair-target list honest when floors change mid-edit.
+  if ($("obj-op") && $("obj-op").value === "stair") fillStairFloors();
 }
+
+// D162-1: the stair target is chosen from the room's REAL planes — including
+// the primary, whose true name is "" and which is a first-class option
+// ("Ground (primary)"), so a stair back down to the ground floor is authorable.
+function fillStairFloors(){
+  const sel = $("obj-tfl");
+  if (!sel) return;
+  const floors = (state.floors && state.floors.length ? state.floors : [""]);
+  const cur = sel.value;
+  sel.innerHTML = floors.map(f =>
+    `<option value="${esc(f)}">${esc(floorLabelOf(f))}</option>`).join("");
+  if (floors.includes(cur)) sel.value = cur;
+}
+
+// D162-5: DM trap panel. The server's trap channel already lets the DM
+// search/disarm/spring ANY cell (adjacency and discovery gates are DM-skipped)
+// — what was missing was a surface for a DM who has no token of their own.
+function renderTrapPanel(){
+  const panel = $("trappanel");
+  if (!panel || panel.classList.contains("hidden")) return;
+  const tokOpts = () => (state.tokens || []).map(t =>
+    `<option value="${t.id}">${esc(t.label || "token")} @ ${esc(floorLabelOf(t.floor || ""))}</option>`).join("");
+  for (const id of ["tdm-tok", "tdm-victim"]){
+    const s = $(id); if (!s) continue;
+    const cur = s.value;
+    s.innerHTML = `<option value="">— token —</option>` + tokOpts();
+    if ([...s.options].some(o => o.value === cur)) s.value = cur;
+  }
+}
+function tdmToken(){ const s = $("tdm-tok"); const id = +(s ? s.value : 0);
+  return (state.tokens || []).find(t => t.id === id) || null; }
 
 function editHasUnsaved(){
   return !!(state.editing && state.editMap && state._editOrig
@@ -334,6 +368,7 @@ async function refreshRoom(){
   updateMoveHud();
   renderParty(); renderInit(); renderMyChars();
   if (typeof renderPeek === "function") renderPeek();             // D104: character list
+  if (typeof renderTrapPanel === "function") renderTrapPanel();   // D162-5: DM trap panel
   if (typeof renderPreviewBar === "function") renderPreviewBar(); // D104: a preview survives refreshes
   state.quests = s.quests || []; renderQuests();
   state.itemDefs = s.item_defs || []; renderInv();   // D92: inventory window
@@ -425,7 +460,7 @@ async function loadNotes(role){
   try { state.notes = await api(`/rooms/${state.room.code}/notes`); } catch(e){ state.notes = []; }
   const sel = $("note-list"); if (!sel) return;
   sel.innerHTML = "";
-  if (!state.notes.length){ sel.innerHTML = "<option value=''>no journal entries</option>"; $("note-panel").classList.add("hidden"); return; }
+  if (!state.notes.length){ sel.innerHTML = "<option value=''>no journal entries</option>"; renderNote(role); return; }
   for (const n of state.notes){ const o=document.createElement("option"); o.value=n.id; o.textContent=`${n.title} (${n.visibility})`; if (n.id == state.noteId) o.selected=true; sel.appendChild(o); }
   if (!state.noteId || !state.notes.some(n => n.id == state.noteId)) state.noteId = state.notes[0].id;
   renderNote(role);
@@ -639,6 +674,22 @@ function feedEntry(m, kind){
   const time = kind === "log" ? `<small class="ts">${esc(_time(m))}</small> ` : "";
   const who = m.username && m.type !== "system" && m.type !== "whisper" ? `<b>${esc(m.username)}</b> ` : "";
   p.innerHTML = time + who + esc(m.body ?? m.text ?? "") + _visBadge(m);
+  // D162-7: rolled-but-unapplied damage carries its Apply/Decline right on
+  // the dice line — for the DM only. The server re-checks everything; an
+  // already-resolved row answers "already resolved", it never double-applies.
+  if (m.type === "dice" && m.meta && m.meta.pending && state.room && state.room.role === "dm"){
+    const badge = document.createElement("small");
+    badge.className = "visbadge"; badge.textContent = "pending";
+    p.appendChild(badge);
+    const mk = (txt, op, title) => {
+      const b = document.createElement("button");
+      b.className = "ghost"; b.textContent = txt; b.title = title;
+      b.onclick = () => wsSend({ type: "damage_confirm", op, pending_id: m.meta.pending });
+      p.appendChild(b);
+    };
+    mk("⚔ Apply", "apply", "Apply this damage to the target's HP");
+    mk("✕", "decline", "Decline — the dice line stays as a record");
+  }
   return p;
 }
 function stickToBottom(el){ return el.scrollHeight - el.scrollTop - el.clientHeight < 40; }
@@ -1027,8 +1078,13 @@ function renderInit(){
            `<button class="primary" data-a="endturn">End Turn</button>`;
     bar.innerHTML = h;
     bar.classList.remove("hidden");
-    bar.querySelector('[data-a="dash"]').onclick = () => wsSend({ type: "dash", token_id: t.token_id });
-    bar.querySelector('[data-a="endturn"]').onclick = () => wsSend({ type: "end_turn" });
+    // D161: Dash/End Turn only EXIST for the acting player or the DM — wiring
+    // them unconditionally threw a TypeError for every other viewer and killed
+    // openRoom: players could not enter a room while someone else's turn ran.
+    const _dash = bar.querySelector('[data-a="dash"]');
+    if (_dash) _dash.onclick = () => wsSend({ type: "dash", token_id: t.token_id });
+    const _end = bar.querySelector('[data-a="endturn"]');
+    if (_end) _end.onclick = () => wsSend({ type: "end_turn" });
     for (const b of bar.querySelectorAll(".slot-chip"))
       b.onclick = () => wsSend({ type: "turn_mark", token_id: t.token_id, slot: b.dataset.slot,
                                  value: (t[b.dataset.slot] === "used") ? "available" : "used" });
@@ -1482,6 +1538,15 @@ function renderSheet(tok){
             const opts = []; for (let l=sp.level;l<=maxSlot;l++) opts.push(`<option value="${l}"${l===sp.level?" selected":""}>L${l}</option>`);
             sel = `<select class="cast-lvl" title="upcast slot level">${opts.join("")}</select>`;
           }
+          // D161: SINGLE-targeted abilities (heals, Bane…) had NO target control —
+          // ability_cast shipped without target_id and the server answered "No
+          // target token", so the whole class of ally-targeted spells was
+          // uncastable from the sheet. Same visible-token list the attacks use.
+          if (taring === "single") {
+            const tg = state.tokens.filter(t => t.id !== tok.id)
+              .map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join("");
+            sel += `<select class="ab-tgt" title="target">${tg ? `<option value="">target…</option>${tg}` : `<option value="">— no target —</option>`}</select>`;
+          }
           btns += sel + `<button class="primary cast-ab" data-id="${sp.id}">${sp.level>0?"Cast ▸":"Use"}</button>`;
         } else {
           btns += `<button class="primary cast-sp" data-id="${sp.id}">${sp.level>0?"Cast ▸":"Use"}</button>`;
@@ -1619,6 +1684,8 @@ function renderSheet(tok){
     const sel = b.closest(".spbtns") && b.closest(".spbtns").querySelector(".cast-lvl");
     const msg = { type:"ability_cast", token_id: tok.id, ability_id: b.dataset.id, op_id: invOpId() };
     if (sel && sel.value) msg.cast_level = +sel.value;
+    const tgt = b.closest(".spbtns") && b.closest(".spbtns").querySelector(".ab-tgt");
+    if (tgt && tgt.value) msg.target_id = +tgt.value;      // D161
     wsSend(msg);
   };
   for (const b of body.querySelectorAll(".sv-roll")) b.onclick = () => wsSend({ type:"roll", kind:"save", ability: b.dataset.ab, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
@@ -1835,6 +1902,7 @@ function renderNpcSheet(tok){
       <button id="npc-save" class="primary">💾 Save NPC</button>
       <button id="npc-to-best" class="ghost">＋ Bestiary</button>
       <button id="npc-del" style="color:var(--red)">Remove</button>
+      <button id="npc-drop" class="ghost" title="Let go: a flyer or carried body falls from here (D162-3)">🪂 Drop</button>
     </div>`;
   for (const b of body.querySelectorAll(".npc-stat")) b.oninput = () => {
     n.stats = n.stats || {}; n.stats[b.dataset.k] = Math.max(1, Math.min(30, +b.value||10));
@@ -1900,6 +1968,7 @@ function renderNpcSheet(tok){
     toast("NPC saved");
   };
   $("npc-del").onclick = () => { if (confirm("Remove this NPC token?")) wsSend({ type:"del_token", token_id: tok.id }); };
+  $("npc-drop").onclick = () => wsSend({ type:"token_drop", token_id: tok.id });
   const ctl = $("npc-controller");
   if (ctl) ctl.onchange = () => wsSend({ type:"token_controller", token_id: tok.id,
                                          controller_id: (+ctl.value) || null });

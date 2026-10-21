@@ -37,21 +37,23 @@ async def import_content(request: Request, code: str,
     mode=preview  — validate only, nothing written (returns file/line/column).
     mode=apply    — write error-free files; a differing existing id is a conflict.
     mode=replace  — write and overwrite differing existing ids.
+    mode=upsert   — D162-8 follow-up delivery: write, overwrite differing ids
+                    and report WHICH ones were updated (applied.<kind>.updated).
     """
     room = _require_dm(request, code)
     ratelimit.limit("content-import", request, max_n=30, window=60)
     body = await request.body()
     if not body:
         raise HTTPException(400, "Empty upload")
-    if mode not in ("preview", "apply", "replace"):
-        raise HTTPException(400, "mode must be preview|apply|replace")
+    if mode not in ("preview", "apply", "replace", "upsert"):
+        raise HTTPException(400, "mode must be preview|apply|replace|upsert")
     fmt = "zip" if body[:4] == b"PK\x03\x04" else "csv"
     try:
         files = content.read_package(name, body, fmt)
     except Exception as e:
         raise HTTPException(400, f"Package rejected: {e}")
     report = content.import_package(files, room["id"],
-                                    mode=("replace" if mode == "replace" else "apply"),
+                                    mode=(mode if mode in ("replace", "upsert") else "apply"),
                                     apply=(mode != "preview"))
     report["mode"] = mode
     return report

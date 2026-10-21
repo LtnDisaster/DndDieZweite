@@ -323,12 +323,16 @@ def update_char(cid: int, ch: CharIn, user=Depends(require_user)):
     # forged) and then re-attach the stored curses by entry id (a sheet edit can
     # never wipe them either) — the write carries neither mint nor eraser.
     items = _preserve_curses(cur, gear.clean_items(ch.items))
+    # D162-2: a stored species-bonus grant sets a floor for its abilities —
+    # the trusted-owner stats PUT can never silently undo a granted bonus.
+    from . import charbuild
+    stats = charbuild.protect_species_floor(cur, ch.stats)
     db.x(
         "UPDATE characters SET name=?,race=?,char_class=?,background=?,stats=?,hp=?,max_hp=?,ac=?,speed=?,notes=?,"
         "weapons=?,items=?,skills=?,saves=?,defenses=?,resources=?,hit_die=? WHERE id=?",
         (ch.name, ch.race, ch.char_class,
          ch.background if ch.background is not None else (cur.get("background") or ""),
-         db.json_dumps(ch.stats),
+         db.json_dumps(stats),
          ch.hp, ch.max_hp, ch.ac, ch.speed, ch.notes,
         db.json_dumps(_clean_weapons(ch.weapons)), db.json_dumps(items),
         db.json_dumps(gear.clean_skills(ch.skills)),

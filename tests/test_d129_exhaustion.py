@@ -239,9 +239,12 @@ def test_set_clamps_to_srd_boundaries(client):
     assert db.q1("SELECT exhaustion FROM characters WHERE id=?", (ch["id"],))["exhaustion"] == 6
     death = db.j(db.q1("SELECT death FROM tokens WHERE id=?", (tok["id"],))["death"], None)
     assert death and death["dead"] is True
-    # players cannot self-exhaust themselves: the handler is DM-only
+    # players cannot self-exhaust themselves: the handler is DM-only.
+    # D162-11 (documented upgrade): the refusal is now LOUD — an "DM only"
+    # error frame — instead of the old silence the player could not see.
     with ws_connect(client, player, code) as ws:
         ws.send_json({"type": "exhaustion", "token_id": tok["id"], "action": "set", "level": 0})
-        drain(ws)
+        ev = recv_until(ws, "error", fail_on_error=False)
+        assert ev["kind"] == "error" and "only" in ev["payload"]["msg"].lower()
     assert db.q1("SELECT exhaustion FROM characters WHERE id=?", (ch["id"],))["exhaustion"] == 6
     assert not last_sys(code).endswith("exhaustion level 0")

@@ -353,13 +353,24 @@ def plan(class_id, to, room_id) -> dict:
         if expertise:
             needs["levels"].setdefault(str(lvl), {})["expertise"] = expertise
             info["needs_choice"] = True
-        # spell progression (D97): known-model classes pick new spells where the
-        # class row's totals increase; prepared casters choose none (re-prepare is
-        # a long-rest step the DM owns — never auto-faked).
-        if casting and casting["model"] == "known" and lvl >= casting["first"]:
+        # spell progression (D97): classes pick new spells where the class row's
+        # totals increase. D162-10: PREPARED casters pick too — the pool is the
+        # class list, the counts are the row's totals; re-PREPARING a day stays
+        # a table/long-rest step (D138 gate), the BUILD decision is the player's.
+        if casting and lvl >= casting["first"]:
             prev = rows.get(lvl - 1, {})
             cd = max(0, _int(r.get("cantrips_known")) - _int(prev.get("cantrips_known")))
             sd = max(0, _int(r.get("spells_known")) - _int(prev.get("spells_known")))
+            if casting["model"] == "prepared":
+                # D162-10: prepared counts are the class row's TOTALS (not the
+                # known-model deltas), capped by what the pack's class list can
+                # actually offer — a pick must always be satisfiable (a demo-row
+                # total above the pool size could never be picked otherwise).
+                cum_c = min(_int(r.get("cantrips_known")), len(pool["cantrips"]))
+                cum_s = min(_int(r.get("spells_known")), len(pool["spells"]))
+                cum_pc = min(_int(prev.get("cantrips_known")), len(pool["cantrips"]))
+                cum_ps = min(_int(prev.get("spells_known")), len(pool["spells"]))
+                cd, sd = max(0, cum_c - cum_pc), max(0, cum_s - cum_ps)
             if cd or sd:
                 ent = needs["levels"].setdefault(str(lvl), {})
                 ent["cantrips"], ent["spells"] = cd, sd
@@ -449,6 +460,41 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
             dec[k] = v
     dec.setdefault("levels", {})
 
+    # D162-10: FRESH spell picks must match the granted counts exactly — the
+    # wizard asks "pick N" and more than granted would over-grant known spells.
+    # Remembered/legacy decisions are never re-validated against count (the
+    # legacy prepared tolerance below records pools, not picks).
+    fresh = (choices or {}).get("levels") or {}
+    for lvl, spec in p["needs"].get("levels", {}).items():
+        got = fresh.get(str(lvl))
+        if not isinstance(got, dict):
+            continue
+        for key, label in (("cantrips", "cantrip"), ("spells", "spell")):
+            reqn = int(spec.get(key) or 0)
+            have_n = len(_split(got.get(key)))
+            if reqn and have_n > reqn:
+                return False, {"error": f"level {lvl}: {reqn} {label}(s) granted, "
+                                        f"{have_n} selected"}
+
+    # D162-10 legacy tolerance: a prepared caster built BEFORE the build-time
+    # choice step existed recorded no spell picks — their sheet was derived
+    # from the whole class pool. Re-applying (leveling) must NOT silently
+    # shrink that sheet: the missing pick for an ALREADY-APPLIED level is
+    # recorded as exactly the pool that built it (the sheet stays byte-true).
+    # Every NEW level above `applied` demands a real player pick.
+    casting = p["needs"].get("spell") or {}
+    if (casting.get("model") == "prepared" and applied > 0 and casting.get("first")
+            and str(class_id) == str(built or "").lower()):
+        pool = _spell_rows(class_id, room_id)
+        for lvl, spec in p["needs"].get("levels", {}).items():
+            if int(lvl) > applied or int(lvl) < int(casting["first"]):
+                continue
+            entry = dec["levels"].setdefault(str(lvl), {})
+            if spec.get("cantrips") and not entry.get("cantrips"):
+                entry["cantrips"] = list(pool["cantrips"])
+            if spec.get("spells") and not entry.get("spells"):
+                entry["spells"] = list(pool["spells"])
+
     needs_choice = _check_choices(p, dec, class_id, room_id)
     if needs_choice:
         return False, {"needs_choice": needs_choice}
@@ -497,6 +543,13 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
                        db.json_dumps(spell_state["spells"]),
                        db.json_dumps(spell_state["spell_slots"]),
                        db.json_dumps(spell_state["resources"]), ch["id"]))
+        elif payload.get("class_resources"):
+            # D161: a NON-caster class row may still carry class_resource
+            # (Action Surge, Rage, Ki). ``resources`` rode ONLY the spell_state
+            # write, so every non-caster silently lost it. Same projection,
+            # resources column only.
+            c.execute("UPDATE characters SET resources=? WHERE id=?",
+                      (db.json_dumps(payload["class_resources"]), ch["id"]))
         elif feat_abilities:
             cur = db.j(c.execute("SELECT abilities FROM characters WHERE id=?",
                                  (ch["id"],)).fetchone()[0], []) or []
@@ -691,6 +744,16 @@ def species_bonus_options(char, room_id=0):
         return out
     out["species"] = sp["id"]
     out["species_name"] = sp.get("name") or sp["id"]
+    # D162-2: the card shows the species' 2024 FEATURES too (traits, languages,
+    # size, speeds) — read-only display; seating engines already project them.
+    out["features"] = {"size": sp.get("size") or "",
+                       "speed_ft": sp.get("speed_ft"),
+                       "fly_ft": sp.get("fly_ft"),
+                       "swim_ft": sp.get("swim_ft"),
+                       "climb_ft": sp.get("climb_ft"),
+                       "darkvision_ft": sp.get("darkvision_ft"),
+                       "languages": sp.get("languages") or [],
+                       "traits": sp.get("traits") or []}
     bonuses = _parse_bonuses(sp.get("ability_bonuses"))
     if not bonuses:
         out["errors"].append("This species grants no ability bonuses")
@@ -762,6 +825,28 @@ def _apply_species_bonus_locked(c, char_id, room_id):
               (db.json_dumps(stats), db.json_dumps(skills), db.json_dumps(led), ch["id"]))
     return True, {"species_bonus": led["species_bonus"], "stats": stats,
                   "species": sp["id"], "species_name": sp.get("name") or sp["id"]}
+
+
+def protect_species_floor(cur, stats):
+    """D162-2: the raw character-editor PUT may rewrite `stats` freely (D100
+    trusted-owner seam) — but it must never silently UNDO a species bonus the
+    ledger has already granted. This clamps the granted abilities at the
+    base+delta floor; legitimate higher values (feats, ASI, items) pass.
+    Characters without a recorded species grant are untouched."""
+    led = ledger(cur)
+    sb = led.get("species_bonus")
+    base = led.get("base_stats")
+    if not (isinstance(sb, dict) and sb) or not isinstance(base, dict) or not base:
+        return stats
+    out = dict(_as_dict(stats))
+    for rec in (sb.get("as") or []):
+        ab, delta = str(rec.get("ability") or ""), _int(rec.get("delta"))
+        if ab not in ABILITY_SHORT or not delta:
+            continue
+        floor = max(1, min(30, _int(base.get(ab, 10)) + delta))
+        if _int(out.get(ab, 10)) < floor:
+            out[ab] = floor
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -866,14 +951,15 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
         grants = (set(_subclass_grants(subclass, room_id)) if subclass else set())
         grants |= set(_feat_grants(feats_applied, room_id))
         known = set()
-        if casting["model"] == "prepared":
-            known |= set(pool["cantrips"]) | set(pool["spells"])
-        else:
-            for lvl in range(casting["first"], to + 1):
-                pick = dec.get("levels", {}).get(str(lvl)) or {}
-                if isinstance(pick, dict):
-                    known |= {x for x in _split(pick.get("cantrips")) if x in pool["cantrips"]}
-                    known |= {x for x in _split(pick.get("spells")) if x in pool["spells"]}
+        # D162-10: BOTH models read the player's recorded picks — nothing is
+        # auto-granted from the pool any more. Legacy prepared sheets keep
+        # their old whole-pool list because apply() records the pool as their
+        # (historical) pick for already-applied levels (see D162-10 note).
+        for lvl in range(casting["first"], to + 1):
+            pick = dec.get("levels", {}).get(str(lvl)) or {}
+            if isinstance(pick, dict):
+                known |= {x for x in _split(pick.get("cantrips")) if x in pool["cantrips"]}
+                known |= {x for x in _split(pick.get("spells")) if x in pool["spells"]}
         known |= {g for g in grants if g in by_id}
         maxes = content.slot_table(rows.get(to, {}))
         prev = gear.clean_slots(db.j(ch.get("spell_slots"), {}))
@@ -896,6 +982,10 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
                   "feats_applied": feats_applied, "history": history,
                   "subclass": subclass, "spell_state": spell_state,
                   "casting": casting,
+                  # D161: projected class resource for EVERY class (casters get
+                  # it inside spell_state too) — the non-caster write path was
+                  # missing and silently lost Action Surge / Rage / Ki.
+                  "class_resources": _class_resources(rows, to, ch),
                   "class_proficiencies": _class_proficiencies(rows, to),
                   "species": _species_projection(ch, room_id)}
 

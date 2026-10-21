@@ -1,0 +1,4 @@
+id,name,requires,ability_boost,skill_prof,spells_grant,effect,category,effects,manual
+feat_soldier,Soldier's Burden,,str+1,,,,origin,,,"+1 Strength (max 20). Origin feat for the Veteran background.",
+feat_devotion,Devout Heart,,wis+1,,,,origin,,,"+1 Wisdom (max 20). Origin feat for the Acolyte background.",
+feat_sneak,Sneak Attack,,,,,"+1d6 piercing weapon damage, once per turn",general,"{""ops"":[{""expr"":""1d6"",""op"":""damage"",""target"":""target"",""type"":""piercing""}],""v"":1}","Castable ability feat_sneak. The once-per-turn limit is DM-adjudicated (grammar has no per-turn ledger — documented)."

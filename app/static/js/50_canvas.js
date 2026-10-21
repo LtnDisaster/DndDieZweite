@@ -727,8 +727,11 @@ function paint(cx, cy){
                      op: { kind:"lamp", bright: Math.max(1, Math.min(30, +$("obj-bright").value || 5)) } };
       o.state = { on: true };
     } else if ($("obj-op").value === "stair"){                  // D88 connector
-      const to = ($("obj-tfl").value || "").trim().slice(0,24);
-      if (!to){ toast("Stairs need a target floor name"); return; }
+      // D162-1: #obj-tfl is a SELECT of the room's real planes; value "" IS the
+      // primary plane — a legal target (server validates stairs at save time).
+      const sel = $("obj-tfl");
+      if (!sel || !sel.options.length){ toast("Floor list not ready — reopen the editor"); return; }
+      const to = String(sel.value).slice(0,24);
       o.interact = { label: act,
                      op: { kind:"stair", floor: to,
                            x: +$("obj-tx").value || 0, y: +$("obj-ty").value || 0 } };
@@ -743,6 +746,13 @@ function paint(cx, cy){
   }
   else if (b === "objrm"){
     gm.objects = (gm.objects||[]).filter(o => !(o.x===cx && o.y===cy));
+  }
+  // D162-6: targeted removal brushes — no re-paint-overwrite, no terrain touched.
+  else if (b === "traprm"){
+    gm.traps = (gm.traps||[]).filter(t => !(t.x===cx && t.y===cy));
+  }
+  else if (b === "lootrm"){
+    gm.loot = (gm.loot||[]).filter(l => !(l.x===cx && l.y===cy));
   }
 }
 function nearestDoor(gm, cx, cy){
@@ -811,8 +821,11 @@ function doorEdit(p){
   const locked = !!($("door-locked") && $("door-locked").checked);
   const dmOnly = !!($("door-dmonly") && $("door-dmonly").checked);
   const secret = !!($("door-secret") && $("door-secret").checked);
-  g.doors.push({ id: eid(), x: e.x, y: e.y, dir: e.dir, closed: true, locked,
-                 dm_only: dmOnly, secret, label: "Door" });
+  const lockdc = Math.max(5, Math.min(25, +(($("door-lockdc") || {}).value || 15) || 15));
+  const door = { id: eid(), x: e.x, y: e.y, dir: e.dir, closed: true, locked,
+                 dm_only: dmOnly, secret, label: "Door" };
+  if (locked) door.lock_dc = lockdc;                    // D162-4
+  g.doors.push(door);
 }
 function pinEdit(p){
   const g = state.editMap; if (!g) return;
@@ -957,7 +970,8 @@ function onDown(e){
   if (pin && !state.editing && !t){ showPin(pin); return; }
   if (!t){
     const d = doorHit(wx, wy);
-    if (d){ wsSend({ type:"door", x: d.x, y: d.y, dir: d.dir, action:"toggle" }); return; }
+    if (d){ wsSend({ type:"door", x: d.x, y: d.y, dir: d.dir,
+                     action: (e && e.shiftKey) ? "pick" : "toggle" }); return; }
     // D82: clicking an INTERACTABLE world object sends the intent; the server
     // validates reach/permission and runs the allowlisted operation. Objects
     // without an interact field are decoration — clicks pass through to move.
@@ -1085,6 +1099,7 @@ function editorOpen(){
   const of = $("obj-fields"); if (of) of.classList.add("hidden");
   $("ed-w").value = state.editMap.w; $("ed-h").value = state.editMap.h;
   if (typeof renderFloorRail === "function") renderFloorRail();   // D158: elevator on the active floor
+  if (typeof fillStairFloors === "function") fillStairFloors();   // D162-1: stair target list (incl. primary)
 }
 function editorClose(){ flushFogEdit(); state.editing = false; state.editMap = null; state._editOrig = null; $("editor").classList.add("hidden"); }
 // D158: after a floor-rail switch re-fetched the grid, point the edit buffer at

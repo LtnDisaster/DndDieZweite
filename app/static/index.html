@@ -174,6 +174,10 @@ window.addEventListener("unhandledrejection", function(ev){
       </div>
       <div id="prep-gear-out" class="meta"></div>
       <div class="row">
+        <button id="prep-species-card" class="ghost" title="D162: this species' traits and its ability bonuses — granted exactly once by the server ledger, never by the browser">🐾 Species traits &amp; bonuses</button>
+      </div>
+      <div id="prep-species-out" class="meta"></div>
+      <div class="row">
         <button id="prep-origin" class="ghost" title="2024 origin: this background's ability increases and its Origin feat, validated against this room's rule pack">🧬 2024 Origin</button>
       </div>
       <div id="prep-origin-out" class="meta"></div>
@@ -192,6 +196,7 @@ window.addEventListener("unhandledrejection", function(ev){
             <option value="preview">Preview (validate only)</option>
             <option value="apply">Apply (keep conflicts)</option>
             <option value="replace">Replace (overwrite)</option>
+            <option value="upsert">Upsert (update changed rows)</option>
           </select>
           <button id="prep-ct-upload" class="primary">Upload</button>
         </div>
@@ -493,6 +498,22 @@ window.addEventListener("unhandledrejection", function(ev){
         </div>
         <div class="row"><small class="meta" style="opacity:.6">The preview is the character's real server-side sight (fog, darkness, light, hidden tokens) — a moment-image; Refresh re-fetches it. Nothing you see here changes what anyone sees.</small></div>
       </div>
+      <div class="panel hidden" id="trappanel" data-tab="dm">
+        <h2>Trap control <span class="tiny" style="opacity:.6">D162-5</span></h2>
+        <div class="row"><select id="tdm-tok" style="flex:1" title="A token standing on the trap's plane — its cell pre-fills the coordinates"></select></div>
+        <div class="row">
+          <input id="tdm-x" type="number" placeholder="x" style="width:64px" title="Trap cell x">
+          <input id="tdm-y" type="number" placeholder="y" style="width:64px" title="Trap cell y">
+          <select id="tdm-victim" style="flex:1" title="Victim token for Spring (search/disarm ignore it)"></select>
+        </div>
+        <div class="row">
+          <button id="tdm-search" title="Roll the DM's search for this cell (server-side)">🔍 Search</button>
+          <button id="tdm-disarm" title="Disarm without a check (the DM may always)">🔧 Disarm</button>
+          <button id="tdm-trigger" title="Spring the trap on the victim">💥 Spring</button>
+          <button id="tdm-remove" class="ghost" title="Remove the trap entity from this plane (D162-6)">🗑 Remove</button>
+        </div>
+        <div id="tdm-out" class="meta"></div>
+      </div>
       <div class="panel hidden" id="dmtools" data-tab="dm">
         <h2>DM Tools</h2>
         <div class="row">
@@ -602,6 +623,7 @@ window.addEventListener("unhandledrejection", function(ev){
                 <option value="preview">Preview (validate only)</option>
                 <option value="apply">Apply (keep conflicts)</option>
                 <option value="replace">Replace (overwrite)</option>
+                <option value="upsert">Upsert (update changed rows)</option>
               </select>
               <button id="btn-ct-upload" class="primary">Upload</button>
             </div>
@@ -640,7 +662,9 @@ window.addEventListener("unhandledrejection", function(ev){
             <button class="brush" data-b="lower" title="Lower elevation −1">⛰️−</button>
             <button class="brush" data-b="openv" title="Toggle a vertical opening in the ceiling above this cell (D114)">⬆️⬇️</button>
             <button class="brush" data-b="trap" title="Hidden trap">⚠️</button>
+            <button class="brush" data-b="traprm" title="Remove the trap on this cell (D162-6)">⚠️✕</button>
             <button class="brush" data-b="loot" title="Hidden loot">🎁</button>
+            <button class="brush" data-b="lootrm" title="Remove the loot on this cell (D162-6)">🎁✕</button>
             <button class="brush" data-b="obj" title="World object: lever/switch/chest — data-driven, allowlisted actions">🕹️</button>
             <button class="brush" data-b="objrm" title="Remove a world object">🕹️✕</button>
             <button class="brush" data-b="door" title="Door: click a cell edge">🚪</button>
@@ -672,6 +696,7 @@ window.addEventListener("unhandledrejection", function(ev){
           </div>
           <div class="row trapfields hidden" id="door-fields">
             <label><input id="door-locked" type="checkbox"> start locked</label>
+            <label>lock DC <input id="door-lockdc" type="number" min="5" max="25" value="15" style="width:56px" title="Difficulty of picking this lock (D162-4)"></label>
             <label><input id="door-dmonly" type="checkbox"> DM-only</label>
             <label><input id="door-secret" type="checkbox"> hidden from players</label>
           </div>
@@ -685,8 +710,8 @@ window.addEventListener("unhandledrejection", function(ev){
               <option value="lamp">lamp: static light (interact to toggle)</option>
               <option value="container">container: chest/sack (contents stay server-side)</option>
             </select>
-            <span id="obj-stair-fields" class="hidden" title="D88: destination cell on the target plane — validated at use time; occupied or walled is refused">
-              <input id="obj-tfl" placeholder="to floor" maxlength="24" style="width:76px">
+            <span id="obj-stair-fields" class="hidden" title="D88: destination cell on the target plane — validated at use time; occupied or walled is refused. D162: the target is chosen from the room's real floors; the primary plane is selectable as Ground (primary).">
+              <select id="obj-tfl" style="width:110px" title="Target plane — D162: the empty-named primary plane is a first-class target"></select>
               <input id="obj-tx" type="number" placeholder="x" style="width:52px">
               <input id="obj-ty" type="number" placeholder="y" style="width:52px">
             </span>

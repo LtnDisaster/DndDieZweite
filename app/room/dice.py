@@ -449,6 +449,10 @@ async def _set_marker(room_id, tok, key, rounds=0, until="", src=None, ref=None)
     payload = db.json_dumps(conds)
     db.x("UPDATE tokens SET conds=? WHERE id=?", (payload, tok["id"]))
     await send_cond_bump(room_id, {**tok, "conds": payload}, conds)
+    if str(key or "").lower() in ("prone", "stunned", "paralyzed", "petrified",
+                                  "unconscious", "incapacitated"):
+        from .fall import after_condition          # D162-3: a flyer lets go
+        await after_condition(room_id, {**tok, "conds": payload})
 
 
 def _token_size_ok_for_push(t_tok):
@@ -737,8 +741,21 @@ async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
         line = _dmg_line(crit)
         if line:
             grand = line[1]
-            await dice_post(room_id, user, line[0], line[1], visibility=vis, is_dm=is_dm,
-                            meta={"mode": "crit" if crit else "normal", "item": item_id})
+            from . import pending as _PENDING          # D162-7
+            meta = {"mode": "crit" if crit else "normal", "item": item_id}
+            pid = None
+            if target is not None:
+                # the damage is REGISTERED, not applied: the DM resolves it
+                # (Apply/Decline) on this very chat line — the button id is
+                # meta.pending; health keeps its hands off until then.
+                pid = _PENDING.create(room_id, target["id"], grand,
+                                      prof.get("dmg_type") or "",
+                                      ch["name"], prof["name"], crit)
+                meta["pending"] = pid
+            mid = await dice_post(room_id, user, line[0], line[1], visibility=vis,
+                                  is_dm=is_dm, meta=meta)
+            if pid and mid:
+                _PENDING.bind_ref(pid, mid)
     if want:
         await _mastery_after_roll(room_id, ws, user, is_dm, ch, fresh, prof, tok,
                                   target, t2, tlabel, vis, want, hit, crit, grand)

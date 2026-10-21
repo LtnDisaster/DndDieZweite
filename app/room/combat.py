@@ -333,7 +333,8 @@ def spend_slot(room_id, token_id, slot):
 
 
 async def handle_init_start(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     order = []
     for tok in db.q("SELECT * FROM tokens WHERE room_id=? ORDER BY id", (room_id,)):
@@ -354,7 +355,8 @@ async def handle_init_start(ws, room_id, user, is_dm, msg):
 
 
 async def handle_init_next(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     init = get_init(room_id)
     if init["combat"] and init["order"]:
@@ -403,7 +405,8 @@ async def handle_init_end_round(ws, room_id, user, is_dm, msg):
     """DM ends the current round: increment the round counter and return to the
     top of the (still fixed) initiative order. Initiative is rolled once per
     combat (D22), not re-rolled here."""
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     init = get_init(room_id)
     if not init["combat"] or not init["order"]:
@@ -427,7 +430,8 @@ async def handle_init_end_round(ws, room_id, user, is_dm, msg):
 
 
 async def handle_init_end(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     init = {"combat": False, "order": [], "active": -1, "round": 0, "turn": None}
     set_init(room_id, init)
@@ -515,7 +519,8 @@ async def handle_turn_mark(ws, room_id, user, is_dm, msg):
 
 
 async def handle_hp(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:

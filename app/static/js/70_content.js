@@ -43,7 +43,9 @@ function ctRender(rep, boxId) {
   for (const [kind, st] of Object.entries(rep.applied || {})) {
     const row = document.createElement("div");
     row.style.cssText = "color:#9bd;font-size:.8rem";
-    row.textContent = `${kind}: +${st.inserted} new, ↻${st.replaced} replaced, =${st.unchanged}, ⚠${(st.conflicts || []).length} conflict(s)`;
+    row.textContent = `${kind}: +${st.inserted} new, ↻${st.replaced} replaced`
+      + ((st.updated || []).length ? `, ↑${st.updated.length} updated (${st.updated.slice(0, 6).join(", ")})` : "")
+      + `, =${st.unchanged}, ⚠${(st.conflicts || []).length} conflict(s)`;
     box.appendChild(row);
   }
 }

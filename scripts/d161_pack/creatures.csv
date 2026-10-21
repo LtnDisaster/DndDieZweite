@@ -1,0 +1,5 @@
+id,name,size,type,ac,hp,speed_ft,fly_ft,str,dex,con,int,wis,cha,cr,skills,saves,attacks,spells,abilities,darkvision_ft,tags,companion,image,manual
+goblin_brute,Goblin Brute,medium,humanoid,15,17,30,,15,14,14,8,10,8,1/4,"stealth, animal_handling",,Scimitar +4 to hit; 1d6+2 piercing,,,60,"humanoid, goblin",1,,
+goblin_archer,Goblin Archer,medium,humanoid,14,11,30,,8,16,12,8,10,8,1/4,stealth,,Shortbow +5 to hit; 1d6+2 piercing; reach 80 ft,,,,humanoid; goblin,1,,No range column in the grammar — reach 80 ft doubles as shot range (documented overload).
+sky_raider,Sky Raider,medium,monstrosity,13,26,20,60,14,16,13,6,12,8,1/2,perception,"dex, con",Claw +5 to hit; 2d6+3 slashing,,,60,"flyer, monstrosity",1,,
+garrison_wight,Garrison Wight,medium,undead,16,33,30,,14,12,16,9,13,10,2,"stealth, perception","wis",Flail +6 to hit; 2d8+3 bludgeoning; reach 5 ft,,,60,"undead, guardian",1,,Javelin line omitted from attacks: one projected attack per line is the grammar (documented).

@@ -474,7 +474,8 @@ async def handle_token_mount(ws, room_id, user, is_dm, msg):
 
 
 async def handle_add_token(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     label = str(msg.get("label", "NPC"))[:32]
     color = _clean_color(msg.get("color"))
@@ -544,7 +545,8 @@ async def handle_add_token(ws, room_id, user, is_dm, msg):
 
 async def handle_update_npc(ws, room_id, user, is_dm, msg):
     """DM edits an NPC token's stat block (abilities, HP/AC, spells, slots)."""
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None or tok["owner_user_id"] is not None or tok["character_id"] is not None:
@@ -592,8 +594,27 @@ async def handle_update_npc(ws, room_id, user, is_dm, msg):
     await broadcast(room_id, "snapshot", None)
 
 
-async def handle_del_token(ws, room_id, user, is_dm, msg):
+async def handle_token_drop(ws, room_id, user, is_dm, msg):
+    """D162-3: the DM lets go — a held flyer or a carried body falls from here.
+    Loud refusal for players (D162-11 posture); the physics decision lives
+    ENTIRELY in room/fall.py, this is only the trigger."""
     if not is_dm:
+        await send_to(ws, "error", {"msg": "DM only"})
+        return
+    tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?",
+                (msg.get("token_id", -1), room_id))
+    if tok is None:
+        return
+    from .fall import resolve_fall
+    if not await resolve_fall(room_id, tok["id"], forced=True, tag="drop"):
+        await send_to(ws, "whisper", {"text":
+            "Nothing to drop — the token stands on solid ground or holds the "
+            "air, and the column below is not a fall."})
+
+
+async def handle_del_token(ws, room_id, user, is_dm, msg):
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None:

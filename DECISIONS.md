@@ -3875,3 +3875,46 @@ lines name conditions by design (public table record, D90).
   E2E `scripts/e2e_d160.mjs` (A–H) rc=0, Belege `e2e-evidence/e2e-d160-*.png`.
   Kanon 1137 → **1169 passed, 0 skipped, 0 failed (rc=0)** (Zahl zweifach bestätigt:
   Fortschritts-Marks + Collect). Feature-Matrix/Arbeitslog nachgezogen.
+
+## D162 — Operation: Keine Ausreden mehr (die acht P2-Lücken des D161-Audits)
+
+- **Status:** bestanden. Alle acht P2-Lücken aus
+  `docs/PLAY_SESSION_AUDIT_D161.md` plus `item_defs`-Raumkollision,
+  Wizard-Zauberwahl und laute DM-only-Ablehnung sind über echte UI-Pfade
+  geschlossen; Abschlussbericht `docs/FEATURE_COMPLETENESS_D162.md`.
+- **Beschlüsse (Regelkanon):**
+  - **Sturz (P2-7):** 1d6 Wuchtschaden je volle 10 ft Fallhöhe, Cap 20d6,
+    unter 10 ft nichts; Landung prone, wenn nicht sicher gelandet; Schaden
+    ausschließlich über `health.damage` (kein Direkt-UPDATE). Auslöser:
+    Bewegungsende ohne tragenden Untergrund, Zustands-/Würfel-Hooks und der
+    bewusste DM-Knopf `token_drop` („🪂 Drop“ im NPC-Bogen) für absichtliche
+    Würfe — der gezwungene Drop gilt dem Flieger als Sturz, nicht als Flug.
+  - **Schlossknacken (P2-4):** Spieleraktion per Shift-Klick an der Türkante =
+    Dex-Check über `opposed.check_roll` gegen `lock_dc` (clamp 5–25, Default
+    15, Tür-Editor). Ohne Diebeswerkzeug: nachteilig, kein Prof; mit Werkzeug
+    und Background-`tool_prof`: Prof. Ergebnis nur als Flüstern.
+  - **Schadens-Bestätigung (P2-5):** Item-Waffen-Treffer mit Ziel erzeugen
+    eine Bestätigungszeile im Game Log (kein Würfel-Fundus-Pfad, kein
+    naturlicher 20-Zauber ohne Ziel). Apply ist ein atomarer Claim
+    (Doppelklick/Neuverbindung sicher), Decline verwirft, Sweep räumt altes
+    ab; Fehler gibt den Claim für Retry zurück.
+  - **Pack-Upsert (P2-3):** dritter Importmodus `upsert` = wie `replace`,
+    aber der Report führt geänderte Zeilen als `updated` explizit auf;
+    identische Zeilen ändern nichts. `item_defs` tragen jetzt den
+    Composite-PK `(room_id,id)` (`migrate_item_defs`, Backup + Fail-Closed),
+  damit Räume gleiche Item-IDs unabhängig verwalten können.
+  - **Lautheit (Audit Ph5):** 14 DM-only-Verweigerungen antworten sichtbar
+    `error: "DM only"`; **alle** Leak-Schutz-Stummen (geheime Tür, Fremdes,
+    Fallen auf anderer Ebene) bleiben bewusst stumm — Lautheit wäre dort ein
+    Informationsleck. Beide Klassen sind in `test_d162_error_feedback.py`
+    fest genagelt.
+- **Dokumentierte Test-Umkehrungen:** `test_d100_integration.py` G9-Pins auf
+  `(room_id,id)` geflippt; `test_d129_exhaustion.py` erwartet die
+  Exhaustion-DM-Ablehnung jetzt laut (gewollter Wechsel, Alt-Pass bleibt).
+- **Konsequenzen:** Neue Tests `test_d162_*` (11 Dateien, +67); echter
+  Browser-E2E `scripts/e2e_d162.mjs` V0–V9 rc=0 („ALL SCENARIOS PASSED“,
+  V7 mit realem Fly-Move + Drop auf Primärebene), Belege
+  `e2e-evidence/d162-*.png`. Kanon 1192 → **1259 passed, 0 skipped, 0 failed
+  (rc=0)** (147 Dateien; Marks + Collect zweifach bestätigt). Feature-Matrix,
+  CSV-Guide (Upsert-Modus, `item_defs`-Raum-PK), Arbeitslog und
+  Abschlussdoku nachgezogen.

@@ -156,7 +156,8 @@ async def handle_attune(ws, room_id, user, is_dm, msg):
 
 
 async def handle_identify(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     ch = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("char_id", -1),))
     if ch is None:
@@ -173,7 +174,8 @@ async def handle_identify(ws, room_id, user, is_dm, msg):
 
 
 async def handle_recharge(ws, room_id, user, is_dm, msg):
-    if not is_dm:
+    if not is_dm:                                   # D162-11: loud, safe refusal
+        await send_to(ws, "error", {"msg": "DM only"})
         return
     ch = db.q1("SELECT * FROM characters WHERE id=?", (msg.get("char_id", -1),))
     if ch is None:

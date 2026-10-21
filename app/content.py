@@ -572,15 +572,11 @@ def _project_item(room_id, row):
         return "invalid"
     defn_id = defn.pop("id") or did
     # D100: item_defs.id is a GLOBAL primary key — per-room duplicates would need a
-    # destructive table rebuild. If another room already owns this shared id, refuse
-    # rather than silently rewrite its DM-library row (its authoritative content row
-    # is already stored room-scoped, so nothing is LOST — only the shared library
-    # projection is skipped and reported). The caller surfaces it as a warning.
-    owner = db.q1("SELECT room_id FROM item_defs WHERE id=?", (defn_id,))
-    if owner is not None and owner["room_id"] != room_id:
-        raise ValueError("shared item id owned by another room")
+    # D162-9: item_defs is keyed (room_id, id) — same ids in two rooms are two
+    # independent library rows, so this projection simply UPSERTs within THIS
+    # room. (Before the composite key it refused cross-room id collisions.)
     db.x("INSERT INTO item_defs(id,room_id,name,desc,kind,weight,stackable,props,created_by,value) "
-         "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
+         "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(room_id, id) DO UPDATE SET name=excluded.name,"
          "desc=excluded.desc,kind=excluded.kind,weight=excluded.weight,"
          "stackable=excluded.stackable,props=excluded.props,value=excluded.value",
          (defn_id, room_id, defn["name"], defn["desc"], defn["kind"], defn["weight"],
@@ -681,8 +677,10 @@ def _project_spell(row):
 
 def apply_rows(kind, room_id, clean_rows, mode="apply"):
     """Write validated rows. mode 'apply' reports an existing DIFFERENT row as a
-    conflict (not overwritten); mode 'replace' overwrites. Returns {inserted,
-    replaced, unchanged, conflicts:[ids]}. Side projects (item/spell) run for
+    conflict (not overwritten); mode 'replace' overwrites; mode 'upsert' (D162-8)
+    also overwrites differing rows but additionally reports WHICH ids were
+    updated — the follow-up-delivery workflow the audit P2-3 asked for. Returns
+    {inserted, replaced, unchanged, conflicts:[ids]} (upsert: conflicts empty). Side projects (item/spell) run for
     every written row."""
     stats = {"inserted": 0, "replaced": 0, "unchanged": 0, "conflicts": []}
     for row in clean_rows:
@@ -694,11 +692,15 @@ def apply_rows(kind, room_id, clean_rows, mode="apply"):
             if (db.j(cur["data"], {}) or {}) == new_data:
                 stats["unchanged"] += 1
                 continue                                # identical: idempotent, skip
-            if mode != "replace":
+            if mode not in ("replace", "upsert"):
                 stats["conflicts"].append(row["id"] if kind not in ("class", "subclass")
                                           else f"{row['id']}@{row.get('level')}")
                 continue
             stats["replaced"] += 1
+            if mode == "upsert":
+                stats.setdefault("updated", []).append(
+                    row["id"] if kind not in ("class", "subclass")
+                    else f"{row['id']}@{row.get('level')}")
         else:
             stats["inserted"] += 1
         store(kind, room_id, row)
@@ -766,7 +768,8 @@ def read_package(name, body, fmt):
 
 
 def import_package(files, room_id, mode="apply", apply=True):
-    """Validate (always) and optionally apply a package. Returns a report:
+    """Validate (always) and optionally apply a package. D162-8: mode 'upsert'
+    writes like 'replace' but reports the UPDATED ids per kind. Returns a report:
     {ok, files:[{file, kind, rows, valid, errors:[...]}], applied:{...}}.
     Nothing is written unless apply=True and the file has zero errors."""
     report = {"ok": True, "files": [], "applied": {}}
@@ -807,7 +810,8 @@ def import_package(files, room_id, mode="apply", apply=True):
             report["ok"] = False
             continue
         if apply:
-            applied = apply_rows(kind, room_id, clean, mode="replace" if mode == "replace" else "apply")
+            applied = apply_rows(kind, room_id, clean,
+                                 mode=mode if mode in ("replace", "upsert") else "apply")
             report["applied"][kind] = applied
     return report
 

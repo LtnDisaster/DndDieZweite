@@ -1050,3 +1050,24 @@ nachgereicht. Details: `docs/RECOVERY_2026-10-17.md`.
 - Kanon: 1137 → **1169 passed, 0 skipped, 0 failed (rc=0)**; Zahl zweifach
   bestätigt (Fortschritts-Marks + Collect, da Image bei Pipe keine `passed`-Zeile
   druckt). Feature-Matrix + DECISIONS (D160) + Quality-Gate-Doku ergänzt.
+
+## D162 — „Operation: Keine Ausreden mehr“ (P2-Lücken aus D161 schließen)
+
+- Alle acht P2-Lücken des D161-Audits + `item_defs`-Raumkollision,
+  Wizard-Zauberwahl, laute DM-only-Ablehnung implementiert; je Aufgabe eigene
+  Testdatei `tests/test_d162_*.py` (fail-before/pass-after, 11 Dateien, +67).
+- UI-Pfade real: Etagenwahl `#obj-tfl` an Treppen, Species-Karte im Build,
+  Sturz-Hooks + 🪂-DM-Knopf `#npc-drop`, Shift-Klick-Schloss `lock_dc`,
+  DM-Fallenpanel `#trappanel`, Lösch-Pinsel `traprm`/`lootrm`,
+  Apply/Decline-Bestätigung im Game Log (`app/room/pending.py`, atomarer
+  Claim), Import-Modus `upsert` (Report `↑n updated`), prepared/cantrip-Pools,
+  14 stumme DM-only-Pfade laut (`error: "DM only"`), Leak-Stumme bleiben stumm.
+- `migrate_item_defs`: Composite-PK `(room_id,id)` mit Backup + Fail-Closed;
+  G9-Pins dokumentiert geflippt.
+- E2E `scripts/e2e_d162.mjs` (V0–V9) gegen Wegwerf-`d162-app:8022`: grüner
+  Gesamtdurchlauf rc=0; V7 nutzt realen Flug-Modus übers Tower-Volumen + Drop
+  (Landung ground mit Fallschaden); V6 per Apply-Button 60→53 real; V9
+  Idempotenz nach Erstanwendung belegt. Screenshots `e2e-evidence/`.
+- Kanon: 1192 → **1259 passed, 0 skipped, 0 failed (rc=0)** (Marks + Collect);
+  Bericht `docs/FEATURE_COMPLETENESS_D162.md`, DECISIONS D162, Matrix +
+  CSV-Guide nachgezogen.
