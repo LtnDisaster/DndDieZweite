@@ -1071,3 +1071,43 @@ nachgereicht. Details: `docs/RECOVERY_2026-10-17.md`.
 - Kanon: 1192 → **1259 passed, 0 skipped, 0 failed (rc=0)** (Marks + Collect);
   Bericht `docs/FEATURE_COMPLETENESS_D162.md`, DECISIONS D162, Matrix +
   CSV-Guide nachgezogen.
+
+## D163 — „Operation: Letzte Codezeile“ (CSV-only über echten Browser beweisen)
+
+- Neun Pakete (Raum-Registry, Profienzen, ASI 2024 + Picker, Tools, Beute,
+  Quests, Prepare, Kreatur-CSV, Inhalt-UI) verhaltensgeprüft; Paket
+  Effekt-Grammatik als **bewusste Whitelist-Grenze** auditiert (kein Befund).
+- **Zwei echte UI-Bugs, gefunden nur durch ehrlichen Browserlauf:**
+  (1) ASI-2024-Picker blieb unsichtbar — `.pw-lvl`-onchange baute nur die
+  Zusammenfassung; Fix: `renderPrepWizard()` bei ASI-Auswahl (`80_prep.js`).
+  (2) Das Bereitungs-Gate (D138) lebte nur im `cast`-Pfad, Klassenzauber
+  laufen aber über `ability_cast` — Gate in `abilities._consume_cost`
+  (spell_slot/Charakter, gleiche Tx wie Slotverbrauch, gleiche Meldung)
+  ergänzt + Regressionstest. Beides waren keine E2E-Locator-Fehler.
+- **CSV-only-Lücke geschlossen:** SPELL-Schema bekam `prep`/`prepared`
+  (bool) — `_spell_display` las die Felder längst, das Schema lieferte sie
+  nie; damit war die tägliche Liste aus purem CSV unerreichbar.
+  Pack-Generator neu erzeugt (`test_d109_mastery` Byte-Idempotenz grün).
+- Datenkonventionen dokumentiert: `slot_progression` auf **jeder** Levelzeile
+  (leere Zeile = keine Slots), Startausrüstung über den echten
+  Zwei-Schritt `🎒 Starting equipment → Grant equipment`, Einzel-CSV-Upload
+  braucht kanonischen Dateinamen (`spells.csv` …).
+- E2E `scripts/e2e_d163.mjs` (S0–S14, DM + 2 Spieler) gegen Wegwerf-`d163-app
+  :8023`: **Einzel-Lauf von Null = 19 Verdikte, alle UI-OK** — Zip-Import
+  (alle 11 Dateien-Kinde), Builds bis L4 inkl. Subklasse + ASI, Bereitungs-Gate an/aus am
+  Sheet („Hex Blight is not prepared“ ↔ durch), +1-Waffe anlegen,
+  Werkzeug-Check mit Profienz, Kreatur → Bestiarium → Encounter → Spawn
+  (CSV-Resistenzen live), Spruch ins Monster (hp 33→21, Vulnerable zählt),
+  Beute-Ansage an alle, Quest-Haken, Reload-Persistenz, Upsert 0-changes,
+  Raum-Isolation (gleiche ID, zwei Definitionen), Autorität. Echte
+  E2E-Erkenntnisse (dokuverankert in den `e2e`-Kommentaren): der
+  Plan-Platzhaltertext war länger als die Race-Bedingung → auf ein echtes
+  Feld warten, `selectOption(/regex/)` wählte hier
+  still nichts → exakte Werte, Begegnungs-Bauer liegt im **DM**-Tab,
+  Nebel des Krieges: Monster außerhalb des Lichts fehlt im Spieler-Snapshot
+  → echter DM-Drag (Middle-Drag-Pan + Links-Drag), Long-Rest-Knopf als
+  ehrliche Slotquelle vor dem finalen Kampf.
+- Kanon: 1296 → **1297 collected / 0 failed / rc=0** (finaler Build,
+  `--collect-only`-Summe); JS-Gates (`node --check` alle Dateien) +
+  Python-Syntax grün. Abschluss-Audit **`docs/CSV_ONLY_FINAL_AUDIT_D163.md`**
+  mit Fähigkeitsmatrix, Honest-Labels und Kern-Urteil.

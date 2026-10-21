@@ -311,6 +311,14 @@ def init_db():
     migrate("characters", "skills", "skills TEXT DEFAULT '{}'")
     migrate("characters", "spells", "spells TEXT DEFAULT '[]'")
     migrate("characters", "spell_slots", "spell_slots TEXT DEFAULT '{}'")
+    # D163-3/-4: proficiency AXSES (tools / weapon groups / armor groups).
+    # Additive with defaults — pre-D163 sheets keep working untouched; the
+    # axes fill on the next build apply/replay (no silent auto-migration).
+    migrate("characters", "tool_profs", "tool_profs TEXT DEFAULT '[]'")
+    migrate("characters", "weapon_profs", "weapon_profs TEXT DEFAULT '[]'")
+    migrate("characters", "armor_profs", "armor_profs TEXT DEFAULT '[]'")
+    migrate("characters", "prepared_spells", "prepared_spells TEXT DEFAULT '[]'")
+    migrate("quests", "src", "src TEXT DEFAULT ''")
     migrate("tokens", "npc", "npc TEXT DEFAULT ''")
     migrate("tokens", "conds", "conds TEXT DEFAULT '[]'")
     migrate("tokens", "death", "death TEXT")

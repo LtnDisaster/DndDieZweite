@@ -520,6 +520,17 @@ async def _item_attack(room_id, ws, user, is_dm, ch, msg, kind, adv, vis):
     if want and want != prof["mastery"]:
         await send_to(ws, "error", {"msg": f"This weapon has no {want} mastery"})
         return
+    # D163-4: SRD 2024 — lacking the proficiency for a weapon's group gives
+    # disadvantage AND no mastery property (masteries require proficiency).
+    untrained = bool(prof.get("untrained"))
+    if untrained and nick_mode:
+        await send_to(ws, "error", {"msg": "A nick attack needs proficiency with the weapon"})
+        return
+    if untrained and want:
+        await send_to(ws, "error", {"msg": "Masteries need proficiency with the weapon"})
+        return
+    if untrained:
+        adv = "dis"
     allowed = charbuild.allowed_masteries(fresh or ch)
     if (want and want not in allowed) or (nick_mode and "nick" not in allowed):
         await send_to(ws, "error", {"msg": "This character has no such mastery"})
@@ -1204,6 +1215,36 @@ async def handle_roll(ws, room_id, user, is_dm, msg):
             f"[{', '.join(map(str, rolls))}] {mod:+d} = {total}")
     await dice_post(room_id, user, text, total, visibility=vis, is_dm=is_dm,
                     meta={"mode": "crit" if crit else "normal"})
+
+
+async def handle_spell_prepare(ws, room_id, user, is_dm, msg):
+    """D163-7: choosing the daily PREPARED list (2024 prepared casters).
+    Before this the prepared flag lived only on the CSV row — fixed forever.
+    The list is validated against the character's own known leveled spells,
+    persisted on the sheet (characters.prepared_spells, rebuild-safe) and the
+    castable list-wide gate (D138) then reads exactly this pick."""
+    ch = roller_char(room_id, user["id"])
+    if ch is None:
+        await send_to(ws, "error", {"msg": "Bring a character to the table first"})
+        return
+    spells = db.j(ch["spells"], []) or []
+    if not any(x.get("prep") for x in spells):
+        await send_to(ws, "error", {"msg": "This character does not prepare spells"})
+        return
+    by = {str(x.get("id")): x for x in spells}
+    want = [str(x)[:16] for x in (msg.get("spell_ids") or [])][:64]
+    bad = [i for i in want if i not in by or not by[i].get("prep")
+           or int(by[i].get("level") or 0) < 1]
+    if len(set(want)) != len(want) or bad:
+        await send_to(ws, "error", {"msg": "Only your own preparable spells, once each"})
+        return
+    for x in spells:
+        if x.get("prep"):
+            x["prepared"] = str(x.get("id")) in set(want)
+    db.x("UPDATE characters SET spells=?, prepared_spells=? WHERE id=?",
+         (db.json_dumps(spells), db.json_dumps(sorted(set(want))), ch["id"]))
+    sys_msg(room_id, f"{ch['name']} prepares {len(set(want))} spell(s).")
+    await broadcast(room_id, "snapshot", None)
 
 
 async def handle_cast(ws, room_id, user, is_dm, msg):

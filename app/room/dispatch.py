@@ -15,8 +15,9 @@ from .doors import handle_door
 from .encounters import handle_spawn_encounter
 from .grapple import handle_escape, handle_grapple, handle_shove
 from .dice import (handle_cast, handle_long_rest, handle_npc_attack, handle_resource,
-                   handle_roll, handle_short_rest)
+                   handle_roll, handle_short_rest, handle_spell_prepare)
 from .items import handle_attune, handle_identify, handle_recharge, handle_use_item
+from .loot import handle_roll_loot
 from .fog import handle_fog_edit, handle_fog_toggle
 from .interact import handle_interact
 from .lights import handle_lamp                          # D104: DM light management
@@ -250,6 +251,8 @@ HANDLERS = {
     "identify": handle_identify,
     "recharge": handle_recharge,
     "cast": handle_cast,
+    "spell_prepare": handle_spell_prepare,
+    "roll_loot": handle_roll_loot,
     "long_rest": handle_long_rest,
     "short_rest": handle_short_rest,
     "resource": handle_resource,

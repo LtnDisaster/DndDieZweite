@@ -152,13 +152,12 @@ async def take_loot(room_id, tok, loot) -> bool:
 # D113 Phase 5 / D114: data-driven traps — discovery, disarming and a DM
 # force-spring, all through the SAME engines (opposed.participant/check_roll for
 # the roll, the effect grammar in hit_trap for the resolution). No second engine.
-# Disarm is a server Dexterity CHECK. IMPORTANT (documented open engine gap,
-# D114): a real Thieves'-tools check would fold in a tool proficiency, but the
-# engine models NO tool proficiency (characters carry skills+saves only, no tools
-# column is read at roll time). So this is a plain DEX check and is LABELED as
-# such — NOT a "Thieves' tools" check. DM-granted advantage is a stopgap, not a
-# substitute for the missing proficiency; the proficiency model is deferred. The
-# whole surface is leak-safe: a hidden trap is never named or acknowledged.
+# Disarm is a server Dexterity CHECK. D163-3 CLOSED the D114 gap: tool
+# proficiency is a real character axis now, so a disarmer who CARRIES thieves'
+# tools and is TRAINED with them (tool_profs from background/class/feat rows)
+# adds the proficiency bonus — a true Thieves'-tools check, labelled as such.
+# Without tools or training it remains the plain DEX check (anyone may try).
+# The whole surface stays leak-safe: a hidden trap is never named or acknowledged.
 # ---------------------------------------------------------------------------
 
 TRAP_ACTIONS = ("search", "disarm", "trigger")
@@ -287,7 +286,10 @@ async def handle_trap(ws, room_id, user, is_dm, msg):
         if p is None:
             await send_to(ws, "error", {"msg": "This token cannot roll"})
             return
-        r = opposed.check_roll(p, "dex", kind="check", adv=adv)
+        tool_prof = (gear.tool_available(p["sheet"], "thieves")
+                     and gear.tool_trained(p["sheet"], "thieves tools"))
+        r = opposed.check_roll(p, "dex", kind="check", adv=adv, prof=tool_prof)
+        how = " with thieves' tools" if tool_prof else ""
         if r is None:
             await send_to(ws, "error", {"msg": "Cannot roll"})
             return
@@ -296,11 +298,11 @@ async def handle_trap(ws, room_id, user, is_dm, msg):
             trap["triggered"] = True            # a disarmed trap never springs again
             set_map(room_id, mp, fl)
             await broadcast(room_id, "map_changed", None)
-            await reply(f"🔧 Dexterity check {r['kept']}+{r['mod']} = {r['total']} "
+            await reply(f"🔧 Dexterity{how} check {r['kept']}+{r['mod']} = {r['total']} "
                         f"vs DC{dc} → {trap.get('label')} disarmed.")
             sys_msg(room_id, f"{_label_name(tok)} disarmed a trap")
         else:
-            await reply(f"🔧 Dexterity check {r['kept']}+{r['mod']} = {r['total']} "
+            await reply(f"🔧 Dexterity{how} check {r['kept']}+{r['mod']} = {r['total']} "
                         f"vs DC{dc} → you fail to disarm {trap.get('label')}.")
         return
 

@@ -530,6 +530,19 @@ window.addEventListener("unhandledrejection", function(ev){
           <button id="btn-long-rest" title="Restore HP, spell slots, hit dice and long-rest resources">🛌 Long rest</button>
           <label title="Do not clear arbitrary conditions unless checked"><input id="long-rest-conds" type="checkbox"> clear conditions</label>
         </div>
+        <details class="group" id="loot-group">
+          <summary>Loot tables</summary>
+          <div class="group-body">
+            <div class="row">
+              <select id="loot-tbl" style="flex:1" title="This room's CSV loot tables (loottables.csv)"></select>
+              <button id="btn-loot-refresh" class="ghost" title="Reload the room's loot tables">↻</button>
+            </div>
+            <div class="row">
+              <button id="btn-loot-roll" class="primary" title="Roll one weighted entry and announce it">🎲 Roll loot</button>
+              <small class="meta" style="opacity:.6">Tables come from loottables.csv — the result rides the chat.</small>
+            </div>
+          </div>
+        </details>
         <details class="group" open>
           <summary>Narration</summary>
           <div class="group-body">

@@ -175,13 +175,16 @@ def _feat_prereq_errors(row, stats, skills, feats_applied):
     return out
 
 
-def _feat_choice_options(room_id, stats, skills, feats_applied):
+def _feat_choice_options(room_id, stats, skills, feats_applied, level=None):
     rows = _feat_rows(room_id)
     out = []
     taken = {str(f.get("id") or "").strip().lower() for f in feats_applied}
     taken |= {str(f.get("name") or "").strip().lower() for f in feats_applied}
     for feat_id in sorted(rows):
         row = rows[feat_id]
+        cat = str(row.get("category") or "")
+        if level is not None and cat == "epic_boon" and level < 19:
+            continue          # D163-5: Epic Boons belong to level 19+ only
         missing = _feat_prereq_errors(row, stats, skills, feats_applied)
         if feat_id in taken or str(row.get("name") or "").strip().lower() in taken:
             missing = missing + ["already chosen"]      # D139: no feat twice
@@ -415,7 +418,8 @@ def plan_for_character(char_id, class_id, to, room_id=0):
         feats_applied = [{"id": sp["origin_feat"]}] + feats_applied   # D139
     for lvl, spec in (p.get("needs") or {}).get("levels", {}).items():
         if spec.get("feat_choice") or spec.get("ability_boost_or_feat"):
-            spec["feat_options"] = _feat_choice_options(room_id, stats, skills, feats_applied)
+            spec["feat_options"] = _feat_choice_options(room_id, stats, skills,
+                                                    feats_applied, int(lvl))
         if spec.get("expertise"):
             spec["expertise_skills"] = _expertise_options(p["class_id"], room_id, ch)
     return p
@@ -530,12 +534,17 @@ def apply(char_id, class_id, to, choices=None, room_id=0):
         if not progression.set_class_levels(ch["id"],
                                             [{"class_id": class_id, "level": to}], c=c):
             return False, {"error": "invalid class levels"}
+        axes = payload.get("axes") or {}          # D163-3/-4: persisted axes
         c.execute("UPDATE characters SET char_class=?, hit_die=?, max_hp=?, hp=?, "
-                  "stats=?, skills=?, saves=?, build=? WHERE id=?",
+                  "stats=?, skills=?, saves=?, build=?, "
+                  "tool_profs=?, weapon_profs=?, armor_profs=? WHERE id=?",
                   (class_id, payload["hit_die"], payload["max_hp"], payload["max_hp"],
                    db.json_dumps(stats), db.json_dumps(skills),
                    db.json_dumps({k: v for k, v in saves.items() if v}),
-                   db.json_dumps(led), ch["id"]))
+                   db.json_dumps(led),
+                   db.json_dumps(axes.get("tool") or []),
+                   db.json_dumps(axes.get("weapon") or []),
+                   db.json_dumps(axes.get("armor") or []), ch["id"]))
         if spell_state:
             c.execute("UPDATE characters SET abilities=?, spells=?, spell_slots=?, "
                       "resources=? WHERE id=?",
@@ -705,6 +714,7 @@ def _apply_origin_locked(c, char_id, background, asi, room_id):
             return False, payload
         stats, skills = payload["stats"], payload["skills"]
         led["class_proficiencies"] = payload["class_proficiencies"]
+        axes = payload.get("axes") or {}
     else:
         stats = dict(led["base_stats"])
         _replay_species(led, stats)
@@ -712,8 +722,16 @@ def _apply_origin_locked(c, char_id, background, asi, room_id):
         ok, note = _replay_origin(led["origin"], room_id, stats, skills, feats_applied)
         if not ok:
             return False, {"error": note}
-    c.execute("UPDATE characters SET stats=?, skills=?, build=? WHERE id=?",
-              (db.json_dumps(stats), db.json_dumps(skills), db.json_dumps(led), ch["id"]))
+        axes = _prof_axes({}, room_id, led, feats_applied)   # origin-only: no class rows yet
+        axes["weapon"] = sorted(set(axes["weapon"]) | set(gear._axis_list(ch, "weapon_profs")))
+        axes["armor"] = sorted(set(axes["armor"]) | set(gear._axis_list(ch, "armor_profs")))
+        axes["tool"] = sorted(set(axes["tool"]) | set(gear._axis_list(ch, "tool_profs")))
+    c.execute("UPDATE characters SET stats=?, skills=?, build=?, "
+              "tool_profs=?, weapon_profs=?, armor_profs=? WHERE id=?",
+              (db.json_dumps(stats), db.json_dumps(skills), db.json_dumps(led),
+               db.json_dumps(axes.get("tool") or []),
+               db.json_dumps(axes.get("weapon") or []),
+               db.json_dumps(axes.get("armor") or []), ch["id"]))
     feat_row = _feat_rows(room_id).get(led["origin"]["feat"], {})
     return True, {"origin": led["origin"], "background": row["id"],
                   "background_name": row.get("name", row["id"]),
@@ -853,6 +871,43 @@ def protect_species_floor(cur, stats):
 # recompute core (D96 chronology + D108 origin replay) — the single mutation
 # arithmetic behind apply() and apply_origin()
 # --------------------------------------------------------------------------
+def _prof_axes(rows, room_id, led, feats_applied):
+    """D163-3/-4: the persisted proficiency AXSES (weapon groups / armor groups /
+    tool keys) — projected from the class rows (weapon_prof/armor_prof/tool_prof),
+    the origin background's tool_prof and every applied feat's tool_prof. These
+    are the columns the combat engines read (gear.weapon_proficient /
+    armor_proficient / tool_trained); before D163 the same CSV strings existed
+    only as ledger text."""
+    def iter_rows():
+        if isinstance(rows, dict):
+            for v in rows.values():
+                if isinstance(v, dict):
+                    yield v
+        else:
+            for v in (rows or []):
+                if isinstance(v, dict):
+                    yield v
+
+    def words(text):
+        return [w for w in _split(text) if w]
+    wp, ap = set(), set()
+    tp = set()
+    for r in iter_rows():
+        wp.update(w.lower() for w in words(r.get("weapon_prof")))
+        ap.update(w.lower() for w in words(r.get("armor_prof")))
+        tp.update(gear.tool_key(w) for w in words(r.get("tool_prof")) if gear.tool_key(w))
+    bg = str((led.get("origin") or {}).get("background") or "").strip()         if isinstance(led.get("origin"), dict) else ""
+    if bg:
+        row = _background_row(bg, room_id)
+        if row:
+            tp.update(gear.tool_key(w) for w in words(row.get("tool_prof")) if gear.tool_key(w))
+    frows = _feat_rows(room_id)
+    for f in feats_applied or []:
+        frow = frows.get(str(f.get("id") or "").strip().lower()) or {}
+        tp.update(gear.tool_key(w) for w in words(frow.get("tool_prof")) if gear.tool_key(w))
+    return {"weapon": sorted(wp), "armor": sorted(ap), "tool": sorted(tp)}
+
+
 def _recompute(ch, led, class_id, to, p, dec, room_id):
     """Full recompute 1..to from the ledger's base_stats snapshot — idempotent
     by construction. The D108 origin grant (if the ledger has one) replays at
@@ -903,7 +958,9 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
             if not ok:
                 return False, {"error": note}
         elif isinstance(ch_level, dict) and ch_level.get("ability"):
-            _apply_ability_boost(ch_level["ability"], stats)
+            ok, note = _apply_level_asi(ch_level["ability"], stats)
+            if not ok:
+                return False, {"error": f"level {lvl}: {note}"}
             entry["ability"] = ch_level["ability"]
         if isinstance(ch_level, dict) and ch_level.get("expertise"):
             requested_expertise[lvl] = _split(ch_level["expertise"])
@@ -969,9 +1026,18 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
             slots_out[lv] = {"max": mx, "used": min(prev[lv]["used"], mx)}
         abilities_out = list(dict.fromkeys(
             [a for a in (db.j(ch.get("abilities"), []) or [])] + sorted(known)))
+        book = gear.clean_spells(_spell_display(known, by_id))
+        # D163-7: an explicit daily pick (spell_prepare) overrides the static
+        # per-row prepared flag — for prep-gated lists only, so known-spell
+        # casters and pre-D163 sheets are untouched.
+        picks = set(gear._axis_list(ch, "prepared_spells"))
+        if picks and any(x.get("prep") for x in book):
+            for x in book:
+                if x.get("prep"):
+                    x["prepared"] = x.get("id") in picks
         spell_state = {
             "abilities": abilities_out,
-            "spells": gear.clean_spells(_spell_display(known, by_id)),
+            "spells": book,
             "spell_slots": slots_out,
             "resources": _class_resources(rows, to, ch),
             "casting_ability": casting.get("ability") or "",
@@ -987,6 +1053,7 @@ def _recompute(ch, led, class_id, to, p, dec, room_id):
                   # missing and silently lost Action Surge / Rage / Ki.
                   "class_resources": _class_resources(rows, to, ch),
                   "class_proficiencies": _class_proficiencies(rows, to),
+                  "axes": _prof_axes(rows, room_id, led, feats_applied),
                   "species": _species_projection(ch, room_id)}
 
 
@@ -1110,7 +1177,7 @@ def _apply_feat(feat_id, room_id, stats, skills, applied, category=None):
         name = row.get("name") or feat_id
         return False, f"feat '{name}' prerequisites not met: {'; '.join(missing)}"
     for ab, delta in _parse_bonuses(row.get("ability_boost")):
-        _bump(stats, ab, delta)
+        _bump(stats, ab, delta, cap=20)            # D163-5: SRD score cap 20
     for sk in _split(row.get("skill_prof")):
         if sk in gear.SKILLS:
             skills[sk] = max(skills.get(sk, 0), 1)
@@ -1128,9 +1195,50 @@ def _apply_ability_boost(boost, stats):
             _bump(stats, ab, delta)
 
 
-def _bump(stats, ab, delta):
+def _bump(stats, ab, delta, cap=30):
     if ab in ABILITY_SHORT:
-        stats[ab] = max(1, min(30, _int(stats.get(ab, 10)) + _int(delta)))
+        stats[ab] = max(1, min(cap, _int(stats.get(ab, 10)) + _int(delta)))
+
+
+def _apply_level_asi(decision, stats):
+    """D163-5: the 2024 Ability Score Improvement (SRD 5.2.1): +2 to one score
+    and +1 to a different one, OR +1 to three different scores — never above 20.
+    The SAME two modes the origin ASI already speaks (plus2_plus1 | three).
+    A plain string/dict delta from pre-D163 decisions stays accepted (no silent
+    rewrite of existing ledgers) but is now capped at 20 as the SRD demands."""
+    if isinstance(decision, dict) and isinstance(decision.get("asi"), dict):
+        asi = decision["asi"]
+        mode = str(asi.get("mode") or "").strip().lower()
+        if mode == "plus2_plus1":
+            a = str(asi.get("plus2") or "").strip().lower()
+            b = str(asi.get("plus1") or "").strip().lower()
+            if a not in ABILITY_SHORT or b not in ABILITY_SHORT or a == b:
+                return False, "ASI +2/+1 needs two DIFFERENT abilities"
+            _bump(stats, a, 2, cap=20)
+            _bump(stats, b, 1, cap=20)
+            return True, ""
+        if mode == "three":
+            abils = list(asi.get("abilities") or [])
+            abils = [str(x).strip().lower() for x in abils]
+            if (len(abils) != 3 or len(set(abils)) != 3
+                    or any(x not in ABILITY_SHORT for x in abils)):
+                return False, "ASI three needs exactly three DIFFERENT abilities"
+            for x in abils:
+                _bump(stats, x, 1, cap=20)
+            return True, ""
+        return False, f"unknown ASI mode '{mode}' (plus2_plus1|three)"
+    _apply_ability_boost_cap(decision, stats)
+    return True, ""
+
+
+def _apply_ability_boost_cap(boost, stats):
+    """Pre-D163 ASI shapes kept compatible; scores stop at 20 (D163-5)."""
+    if isinstance(boost, dict):
+        for ab, delta in boost.items():
+            _bump(stats, str(ab).lower(), _int(delta), cap=20)
+    else:
+        for ab, delta in _parse_bonuses(boost):
+            _bump(stats, ab, delta, cap=20)
 
 
 def _parse_bonuses(v):

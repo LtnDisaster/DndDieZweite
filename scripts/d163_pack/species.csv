@@ -1,0 +1,2 @@
+id,name,size,speed_ft,fly_ft,swim_ft,climb_ft,darkvision_ft,ability_bonuses,languages,traits,origin_feat,image,manual
+sp_gremlin,Gremlin,tiny,30,,,,60,dex+2,Common; Deep Speech,Darkvision 60 ft; Small and untrustworthy,,,D163 acceptance species — house-rule build on the 2024 pattern

@@ -1,0 +1,3 @@
+id,name,level,school,casting_ability,targeting,shape,size_ft,range_ft,casting_time,duration,concentration,resolution,save,on_save,damage_dice,damage_type,heal_dice,upcast_step,upcast_scaling,scale_tiers,class_list,scaling_note,effects,prep,prepared,manual
+hex_spark,Hex Spark,0,evocation,wis,single,,,60,1 action,instant,,attack,,,1d8,radiant,,,,,hedgehex,,,,,D163 cantrip
+hex_blight,Hex Blight,1,necromancy,wis,single,,,30,1 action,instant,,auto,,,,,,,,,hedgehex,,"[{""op"":""damage"",""expr"":""2d6"",""type"":""necrotic""},{""op"":""save"",""ability"":""dex"",""dc"":""auto"",""success"":[],""failure"":[{""op"":""condition"",""key"":""cursed_glint"",""rounds"":2}]}]",1,1,D163 multi-effect spell: damage + Dex save + custom condition

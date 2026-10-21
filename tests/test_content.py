@@ -7,7 +7,7 @@ formula-injection is escaped on export but round-trips on import, items project
 into the DM library (weapon_profiles reads the typed combat props incl. range),
 spells register as castable abilities and reload from the DB on "restart",
 non-DM/unauthorised writers are refused, and the SHIPPED pack imports clean
-across all eight kinds and re-imports byte-idempotently.
+across all eleven kinds and re-imports byte-idempotently.
 """
 import io
 import re
@@ -102,7 +102,7 @@ def test_spell_maps_to_a_valid_ability_definition():
     assert abilities.register(defn) is not None
 
 
-# ---------- shipped pack (all eight kinds) ----------
+# ---------- shipped pack (all eleven kinds) ----------
 
 def test_shipped_pack_imports_clean_across_all_kinds(client):
     dm, _player, code, _ch = base_room(client)
@@ -206,12 +206,16 @@ def test_spells_register_and_reload_from_db_on_restart(client):
     rid = db.q1("SELECT id FROM rooms WHERE code=?", (code,))["id"]
     spells = (PACK / "spells.csv").read_text(encoding="utf-8")
     assert _post(client, dm, code, spells.encode(), name="spells.csv").json()["ok"]
-    assert abilities.get("bolt") is not None
+    # D163-1: live registration is room-scoped. The old getter read the bare
+    # key, where ANY room's import reflected — the exact cross-room clobber
+    # D163-1 removes. Reading the owning room's lane is the same assertion,
+    # now actually about THIS room's spell.
+    assert abilities.get("bolt", rid) is not None
     # simulate a restart: registry is cleared, reload repopulates from the DB
     abilities.clear_registry()
-    assert abilities.get("bolt") is None
+    assert abilities.get("bolt", rid) is None
     assert C.load_registered_abilities() >= 1
-    assert abilities.get("bolt") is not None
+    assert abilities.get("bolt", rid) is not None
 
 
 def test_export_escapes_formula_injection(client):

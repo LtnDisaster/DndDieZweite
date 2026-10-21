@@ -1,0 +1,5 @@
+id,level,name,hit_die,hp_base,hp_per_level,saves,skill_options,skill_count,weapon_prof,armor_prof,tool_prof,features,expertise,subclass_family,subclass_choice,ability_boost_or_feat,feat_choice,class_resource,spellcasting_ability,cantrips_known,spells_known,prepared,slot_progression,upcast_scaling,spell_first_level,spell_replace,class_resource_reset,manual,starting_items,starting_choices,mastery_gain,mastery_options
+hedgehex,1,Hedgehex,8,8,4,wis,arcana; history; investigation; nature; religion,2,simple,light,tinker's tools,Hexing Touch,,hedge_paths,,,,,wis,1,2,1,1:2,,1,,,"D163 acceptance class — prepared caster, ASI at 4",dagger_misery,,,
+hedgehex,2,,,,,,,,,,,Hexen Bark,,,,,,,,,,,1:2,,,,,,,,,
+hedgehex,3,,,,,,,,,,,,,,1,,,,,,,,1:2,,,,,,,,,
+hedgehex,4,,,,,,,,,,,,,,,1,,,,,,,1:2,,,,,,,,,

@@ -1393,7 +1393,7 @@ function renderSheet(tok){
                    it.attuned ? "🔗" : "", (it.charges >= 0 && !it.unidentified) ? `⚡${it.charges}/${it.chargesMax != null ? it.chargesMax : it.charges}` : ""].filter(Boolean).join(" ");
     const btns = [];
     const known = !it.magic || it.identified;
-    if (isDM || own) { if (it.heal && known && it.charges !== 0) btns.push(`<button data-a="use" data-id="${it.id}">Use</button>`);
+    if (isDM || own) { if ((it.heal && known && it.charges !== 0) || (it.props && it.props.tool && known)) btns.push(`<button data-a="use" data-id="${it.id}">Use</button>`);
       if (it.attunable) btns.push(`<button data-a="attune" data-id="${it.id}">${it.attuned ? "Untune" : "Attune"}</button>`);
       // D98: a versatile weapon carried in the main hand can be re-gripped; the grip
       // decides the actual damage dice (validated atomically server-side).
@@ -1527,6 +1527,8 @@ function renderSheet(tok){
       const registered = castable.has(sp.id);
       const taring = sp.targeting || "single";
       let btns = "";
+      const prepTag = (own && sp.prep)
+        ? `<label class="tiny" title="Daily preparation (2024)"><input type="checkbox" class="prep-sp" data-id="${sp.id}"${sp.prepared ? " checked" : ""}> prep</label>` : "";
       if (own){
         if (sp.cast === "attack") btns += `<button class="roll-sp" data-k="spell_attack" data-id="${sp.id}">Atk +${atk}</button>`;
         if (sp.cast === "save") btns += `<button class="roll-sp" data-k="spell_dc" data-id="${sp.id}">DC ${dc}</button>`;
@@ -1552,7 +1554,7 @@ function renderSheet(tok){
           btns += `<button class="primary cast-sp" data-id="${sp.id}">${sp.level>0?"Cast ▸":"Use"}</button>`;
         }
       }
-      return `<div class="sprow"><span>${sp.level>0?`<small>${sp.level}L</small>`:"<small>✨</small>"} ${esc(sp.name)}</span> <small style="opacity:.6">${esc(sp.school||"")}${sp.dmg?(" · "+esc(sp.dmg)):""}</small><span class="spbtns">${btns}</span></div>`;
+      return `<div class="sprow"><span>${sp.level>0?`<small>${sp.level}L</small>`:"<small>✨</small>"} ${esc(sp.name)} ${prepTag}</span> <small style="opacity:.6">${esc(sp.school||"")}${sp.dmg?(" · "+esc(sp.dmg)):""}</small><span class="spbtns">${btns}</span></div>`;
     }).join("");
     bookBlock = `<details class="sheet-sec" open><summary><h3>📖 Spellbook ${slotLine.length?`<small style="opacity:.6"> · ${slotLine.join(" ")}</small>`:`<small style="opacity:.6"> · no slots</small>`}</h3></summary>${spRows||`<div class="meta" style="opacity:.6">No spells learned.</div>`}</details>`;
   }
@@ -1679,6 +1681,9 @@ function renderSheet(tok){
   const _vis = () => ($("sr-vis") && $("sr-vis").value) || "public";
   for (const b of body.querySelectorAll(".sk-roll")) b.onclick = () => wsSend({ type:"roll", kind:"skill", skill: b.dataset.skill, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
   for (const b of body.querySelectorAll(".roll-sp")) b.onclick = () => wsSend({ type:"roll", kind: b.dataset.k, spell_id: b.dataset.id, crit: b.dataset.crit === "1", visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null });
+  for (const c of body.querySelectorAll(".prep-sp")) c.onchange = () =>
+    wsSend({ type: "spell_prepare",
+             spell_ids: [...body.querySelectorAll(".prep-sp")].filter(x => x.checked).map(x => x.dataset.id) });
   for (const b of body.querySelectorAll(".cast-sp")) b.onclick = () => wsSend({ type:"cast", spell_id: b.dataset.id, visibility:_vis(), adv: ($("sr-adv") && $("sr-adv").value) || null, op_id: invOpId() });
   for (const b of body.querySelectorAll(".cast-ab")) b.onclick = () => {
     const sel = b.closest(".spbtns") && b.closest(".spbtns").querySelector(".cast-lvl");
@@ -2354,7 +2359,7 @@ function renderInv(){
                   `<button data-a="splitcancel">✕</button>`);
       // D153: Use lived only on the sheet — the inventory window itself had no
       // consumable path. Same server gate (use_item), same known/charges guard.
-      if (it.heal && known && it.charges !== 0)
+      if ((it.heal && known && it.charges !== 0) || (it.props && it.props.tool && known))
         btns.push(`<button data-a="use" data-id="${it.id}">Use</button>`);
       if (it.stackable)
         btns.push(`<button data-a="combine" data-id="${it.id}" ${state.invCombine === it.id ? "class='active'" : ""}>${state.invCombine === it.id ? "pick other" : "Combine"}</button>`);

@@ -19,9 +19,9 @@ ABILITIES = gear.ABILITIES
 SIZES = ("Tiny", "Small", "Medium", "Large", "Huge", "Gargantuan")
 DISPOSITIONS = ("", "friend", "neutral", "hostile")
 _ATTACK_RE = re.compile(
-    r"(?P<name>[^;\n]+?)\s+(?P<hit>[+-]\d+)\s+to hit\b[^\d]*?"
-    r"(?P<dmg>\d{0,3}d\d+(?:[+-]\d+)?)",
+    r"(?P<name>[^;\n]+?)\s+(?P<hit>[+-]\d+)\s+to hit\b",
     re.I)
+_DMG_RE = re.compile(r"\d{0,3}d\d+(?:[+-]\d+)?", re.I)   # first dice AFTER "to hit"
 
 
 def _content_list(value):
@@ -31,17 +31,22 @@ def _content_list(value):
 
 
 def _project_attack(text):
-    match = _ATTACK_RE.search(str(text or "").strip())
+    text = str(text or "").strip()
+    match = _ATTACK_RE.search(text)
     if not match:
         return None
     try:
         hit = int(match.group("hit"))
     except (TypeError, ValueError):
         return None
-    reach = re.search(r"reach\s+(\d+)\s*ft", str(text or ""), re.I)
+    # D163-2: SRD attack lines put plain numbers between "to hit" and the dice
+    # ("+4 to hit, reach 5 ft: 1d4+6") — the old single regex anchored the dice
+    # directly after "to hit" and silently dropped exactly those lines.
+    dice = _DMG_RE.search(text, match.end())
+    reach = re.search(r"reach\s+(\d+)\s*ft", text, re.I)
     return {"id": re.sub(r"[^a-z0-9]+", "_", match.group("name").lower()).strip("_")[:24] or "attack",
             "name": match.group("name").strip()[:32] or "Attack",
-            "to_hit": hit, "dmg": (match.group("dmg") or "")[:16],
+            "to_hit": hit, "dmg": (dice.group(0) if dice else "")[:16],
             "reach": int(reach.group(1)) if reach else 5}
 
 
@@ -88,10 +93,26 @@ def project_creature(row, spell_rows=()):
     if row.get("abilities"):
         unsupported.append(f"abilities: {row['abilities']}")
     notes = " | ".join(unsupported + ([manual] if manual else []))[:1000]
+    defenses = {"resist": _content_list(row.get("resistances")),
+                "immune": _content_list(row.get("immunities")),
+                "vulnerable": _content_list(row.get("vulnerabilities"))}
+    cond_immune = _content_list(row.get("condition_immunities"))
+    resources = []
+    for part in re.split(r"[,;]+", str(row.get("recharge") or "")):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r"^(.*\S)\s+(\d{1,2})$", part)
+        if m:
+            resources.append({"name": m.group(1).strip()[:32], "max": int(m.group(2))})
+        else:
+            resources.append({"name": part[:32], "max": 1})
     block = clean_npc({
         "name": raw_name[:32], "level": 1, "stats": {a: row.get(a) for a in ABILITIES},
         "hp": row.get("hp"), "max_hp": row.get("hp"), "ac": row.get("ac"),
         "speed": row.get("speed_ft"), "fly": row.get("fly_ft"),
+        "swim": row.get("swim_ft"), "climb": row.get("climb_ft"),
+        "defenses": defenses, "cond_immune": cond_immune, "resources": resources,
         "darkvision_ft": row.get("darkvision_ft"),
         "attacks": attacks, "spells": spells, "saves": saves,
         "skills": skills, "notes": notes, "size": row.get("size"),
@@ -194,6 +215,7 @@ def clean_npc(d):
         "skills": gear.clean_skills(d.get("skills", {})),
         "saves": gear.clean_saves(d.get("saves", {})),
         "defenses": gear.clean_defenses(d.get("defenses", {})),
+        "cond_immune": _clean_cond_immune(d.get("cond_immune")),
         "size": clean_size(d.get("size")),
         "disposition": clean_disposition(d.get("disposition")),
         "companion": bool(d.get("companion", False)),
@@ -201,6 +223,17 @@ def clean_npc(d):
         "resources": _clean_resources(d.get("resources")),
         "notes": str(d.get("notes", ""))[:1000],
     }
+
+
+def _clean_cond_immune(v):
+    """D163-2: normalized condition-immunity keys (data from creatures.csv,
+    read by conditions.immune at every effect application)."""
+    out = []
+    for k in (v if isinstance(v, (list, tuple)) else []):
+        k = re.sub(r"[\x00-\x20]+", " ", str(k)).strip().lower()[:24]
+        if k and k not in out:
+            out.append(k)
+    return out[:12]
 
 
 def _clean_abilities(v):

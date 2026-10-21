@@ -93,6 +93,7 @@ SCHEMAS = {
         ("saves", False, "ab", ""), ("skill_options", False, "skills", ""),
         ("skill_count", False, "int:0-8", 0),
         ("weapon_prof", False, "text", ""), ("armor_prof", False, "text", ""),
+        ("tool_prof", False, "text", ""),           # D163-3: class tool grants
         ("features", False, "text", ""), ("expertise", False, "bool", False),
         ("subclass_family", False, "str", ""),
         ("subclass_choice", False, "bool", False),
@@ -155,6 +156,11 @@ SCHEMAS = {
         # entitlement lives in the build ledger (charbuild masteries).
         ("mastery", False, "choices:" + "|".join(MASTERIES), ""),
         ("effects", False, "effects", ""),      # D111: use/equip/on_hit/on_damaged ops
+        # D163-3/-4: the tool axis (`tool` = what the item IS, `tool_ability` =
+        # which score a check with it uses) and the proficiency group a weapon
+        # or armour belongs to ("simple", "martial", "light", "medium", …).
+        ("tool", False, "str", ""), ("tool_ability", False, "text", ""),
+        ("prof_group", False, "str", ""),
         ("image", False, "asset", ""), ("desc", False, "text", ""), ("manual", False, "text", ""),
     ],
     "spell": [
@@ -173,6 +179,10 @@ SCHEMAS = {
         ("scale_tiers", False, "str", ""),
         ("class_list", False, "str", ""), ("scaling_note", False, "text", ""),
         ("effects", False, "effects", ""),      # D111: versioned op list (optional)
+        # D163-7: preparation gating from CSV — 'prep'=1 gates the spell behind
+        # the daily list (2024 prepared caster), 'prepared'=1 is the first-day
+        # default; the player owns the list from then on (spell_prepare).
+        ("prep", False, "bool", False), ("prepared", False, "bool", False),
         ("manual", False, "text", ""),
     ],
     "background": [
@@ -191,6 +201,7 @@ SCHEMAS = {
         ("id", True, "id", ""), ("name", True, "str", ""),
         ("requires", False, "str", ""), ("ability_boost", False, "ability_bonuses", ""),
         ("skill_prof", False, "skills", ""), ("spells_grant", False, "str", ""),
+        ("tool_prof", False, "text", ""),           # D163-3: feat tool grants
         ("effect", False, "text", ""),
         # D108: 2024 feat categories (SRD 5.2.1 "Feats": Origin, General,
         # Fighting Style, Epic Boon). Empty on old packs — display default
@@ -198,6 +209,23 @@ SCHEMAS = {
         # Origin feat.
         ("category", False, "choices:|origin|general|fighting_style|epic_boon", ""),
         ("effects", False, "effects", ""),      # D111: active feat -> castable effect
+        ("manual", False, "text", ""),
+    ],
+    # D163-8: loot tables — one row per table, entries carry label/weight/qty.
+    "loottable": [
+        ("id", True, "id", ""), ("name", True, "str", ""),
+        ("die", False, "dice", ""),           # optional fixed die (else: weight-sum)
+        ("entries", True, "loot", ""),
+        ("manual", False, "text", ""),
+    ],
+    # D163-9: quests — projected INTO the live quests table on import (see
+    # _sync_quest); the content row stays the export SSOT.
+    "quest": [
+        ("id", True, "id", ""), ("title", True, "str", ""),
+        ("description", False, "text", ""),
+        ("objectives", False, "text", ""),     # comma list of objective texts
+        ("status", False, "choices:|active|done|failed", "active"),
+        ("visibility", False, "choices:|party|dm", "party"),
         ("manual", False, "text", ""),
     ],
     "condition": [   # D111: the condition DEFINITION layer (instances unchanged)
@@ -227,11 +255,21 @@ SCHEMAS = {
         ("darkvision_ft", False, "int:0-999", 0), ("tags", False, "str", ""),
         ("companion", False, "bool", False), ("image", False, "asset", ""),
         ("manual", False, "text", ""),
+        # D163-2: reach the engine capabilities that already existed in the
+        # NPC block (defenses / swim+climb speeds / resources) from CSV, and
+        # condition immunity as data. None of these are decoration: project_
+        # creature + health.apply_defense + conditions.immune consume them.
+        ("resistances", False, "dmgt", ""), ("immunities", False, "dmgt", ""),
+        ("vulnerabilities", False, "dmgt", ""),
+        ("condition_immunities", False, "ckeys", ""),
+        ("swim_ft", False, "int:0-999", 0), ("climb_ft", False, "int:0-999", 0),
+        ("recharge", False, "str", ""),
     ],
 }
 # filename (basename) -> kind
 FILE_KIND = {
     "species.csv": "species", "classes.csv": "class", "subclasses.csv": "subclass",
+    "loottables.csv": "loottable", "quests.csv": "quest",
     "items.csv": "item", "spells.csv": "spell", "backgrounds.csv": "background",
     "feats.csv": "feat", "creatures.csv": "creature",
     "conditions.csv": "condition",
@@ -371,6 +409,19 @@ def coerce(kind, key, vtype, raw):
         if bad:
             return None, f"unknown ability in {bad} (str/dex/con/int/wis/cha)"
         return items, None
+    if vtype == "dmgt":                              # D163-2: damage-type list
+        from . import gear as _G
+        items = _parse_list(s)
+        bad = [x for x in items if x not in _G.DAMAGE_TYPES]
+        if bad:
+            return None, f"unknown damage type in {bad}"
+        return items, None
+    if vtype == "ckeys":                             # D163-2: condition-key list
+        items = _parse_list(s)
+        bad = [x for x in items if not x or len(x) > 24]
+        if bad:
+            return None, "condition keys are 1-24 chars"
+        return items, None
     if vtype == "ab1":
         if not s:
             return "", None
@@ -398,6 +449,34 @@ def coerce(kind, key, vtype, raw):
     if vtype == "attribute_set":
         v, e = _parse_attribute_set(s)
         return (None, e) if e else (v, None)
+    if vtype == "loot":
+        # D163-8: a loot table is one CSV row: [{"label":…, "weight":…, "qty":…}]
+        # weight defaults to 1; qty is a dice string ("2d6+5") or a whole number.
+        import json as _j
+        try:
+            arr = _j.loads(s)
+        except ValueError:
+            return None, "loot must be a JSON list"
+        if not isinstance(arr, list) or not arr:
+            return None, "loot must be a non-empty JSON list"
+        out = []
+        for e in arr:
+            if not isinstance(e, dict) or not str(e.get("label") or "").strip():
+                return None, "each loot entry needs a label"
+            try:
+                w = int(str(e.get("weight", 1)).strip() or 1)
+            except ValueError:
+                return None, f"loot weight '{e.get('weight')}' is not a number"
+            if w < 1 or w > 10000:
+                return None, "loot weight must be 1..10000"
+            q = str(e.get("qty", 1)).strip().lower()
+            # D163-8: the qty die rides do_roll — validate against THAT
+            # grammar (_BASE_DICE: "2d6+5"), not the narrow bonus regex.
+            if q and not valid_dice(q) and not q.isdigit():
+                return None, f"loot qty '{q}' is not a number or dice"
+            out.append({"label": str(e["label"]).strip()[:80], "weight": w,
+                        "qty": q or "1"})
+        return _j.dumps(out, sort_keys=True, separators=(",", ":")), None
     if vtype == "effects":
         # D111: strict effect-grammar cell -> canonical JSON (byte-stable for
         # export/generator). An invalid definition refuses the ROW.
@@ -523,13 +602,76 @@ def class_levels(class_id, room_id):
 def store(kind, room_id, row, source="csv"):
     cols = [c[0] for c in SCHEMAS[kind]]
     data = {c: row.get(c) for c in cols}
+    # D163-8: structured blob columns re-validate HERE, at the ONE persistence
+    # chokepoint — a malformed loot blob would otherwise lie in the DB until a
+    # handler chokes on it. Import validates first anyway, so valid rows are
+    # byte-stable through this second pass; direct/programmatic writes cannot
+    # smuggle junk past it (fail-closed: nothing is written).
+    for key, _req, vtype, _default in SCHEMAS[kind]:
+        if vtype == "loot" and data.get(key):
+            _v, err = coerce(kind, key, vtype, data[key])
+            if err:
+                return False
     db.x("INSERT INTO content(kind,room_id,id,name,data,source,version,updated_at) "
          "VALUES(?,?,?,?,?,?,?,datetime('now')) "
          "ON CONFLICT(kind,room_id,id) DO UPDATE SET name=excluded.name,"
          "data=excluded.data,source=excluded.source,"
          "version=content.version+1,updated_at=datetime('now')",
-         (kind, room_id, store_key(kind, row), row.get("name", ""),
+         (kind, room_id, store_key(kind, row), row.get("name") or row.get("title", ""),
           db.json_dumps(data), source, 1))
+    if kind == "quest":
+        _sync_quest(room_id, data)
+    return True
+
+
+def _sync_quest(room_id, data):
+    """D163-9: project a validated quest row INTO the live quest log.
+
+    Keyed by ``quests.src`` = the content id. A first import CREATES the quest
+    (CSV status/visibility included); every re-import refreshes only the book
+    text (title/description/objectives/visibility) and NEVER touches ``status``
+    — once live, DM progress always wins over the pack. Deleting the CSV row
+    therefore never deletes the table's quest (the log is game state, not
+    pack state); the DM deletes quests in the log UI. objectives stay a plain
+    JSON list of strings — quests._clean_objectives canonicalises it on read.
+    """
+    from . import quests as Q
+    sid = str(data.get("id") or "").strip()[:24]
+    if not sid:
+        return
+    title = str(data.get("title") or "").strip()[:120]
+    desc = str(data.get("description") or "").strip()[:2000]
+    objs = []
+    for part in re.split(r"[,;]+", str(data.get("objectives") or "")):
+        t = part.strip()[:200]
+        if t and t not in objs:
+            objs.append(t)
+        if len(objs) >= Q.MAX_OBJECTIVES:
+            break
+    vis = str(data.get("visibility") or "party").lower()
+    if vis not in Q.VISIBILITIES:
+        vis = "party"
+    row = db.q1("SELECT * FROM quests WHERE room_id=? AND src=?", (room_id, sid))
+    if row is None:
+        if not title:
+            return
+        # CSV vocabulary -> engine vocabulary ("done" is "completed" here).
+        status = {"active": "active", "done": "completed",
+                  "failed": "failed"}.get(str(data.get("status") or "active"),
+                                          "active")
+        qid = db.x("INSERT INTO quests (room_id,src,title,description,objectives,"
+                   "visibility,status) VALUES (?,?,?,?,?,?,?)",
+                   (room_id, sid, title, desc, db.json_dumps(objs), vis, status))
+        q = Q.row(qid)
+        if q:
+            Q._emit("quest_started", q, None)
+    else:
+        db.x("UPDATE quests SET title=?, description=?, objectives=?, "
+             "visibility=?, updated_at=datetime('now') WHERE id=?",
+             (title or row["title"], desc, db.json_dumps(objs), vis, row["id"]))
+        q = Q.row(row["id"])
+        if q:
+            Q._emit("quest_updated", q, None)
 
 
 def _project_item(room_id, row):
@@ -543,7 +685,7 @@ def _project_item(room_id, row):
                "skill_prof", "save_prof", "expertise", "attribute_set", "attribute_bonus",
                "attune", "versatile", "finesse", "damage_dice_two_handed", "trigger",
                "duration", "light", "hands", "charges", "recharge", "carry_bonus",
-               "mastery", "effects"):
+               "mastery", "effects", "tool", "tool_ability", "prof_group"):
         v = row.get(pk)
         if v in ("", None, 0, False, []):
             continue
@@ -666,12 +808,12 @@ def spell_pool(class_id, room_id):
 
 
 
-def _project_spell(row):
+def _project_spell(row, room_id=0):
     from . import abilities
     defn = map_to_ability(row)
     if defn is None:
         return "manual"
-    abilities.register(defn)
+    abilities.register(defn, room_id)           # D163-1: room-scoped registration
     return "ok"
 
 
@@ -713,7 +855,7 @@ def apply_rows(kind, room_id, clean_rows, mode="apply"):
                     + (f" ({ex})" if str(ex) else ""))
         elif kind == "spell":
             try:
-                _project_spell(row)
+                _project_spell(row, room_id)
             except Exception:
                 stats.setdefault("warnings", []).append(
                     f"spell '{row['id']}' stored but not registered (manual)")
@@ -721,7 +863,7 @@ def apply_rows(kind, room_id, clean_rows, mode="apply"):
             d = feat_to_ability(row)             # D111: active feats are abilities
             if d is not None:
                 from . import abilities as _AB
-                _AB.register(d)
+                _AB.register(d, room_id)        # D163-1
     if kind == "condition":
         from . import conditions as _CND
         _CND.invalidate(room_id)               # merged catalog is cached per room
@@ -870,21 +1012,21 @@ def load_registered_abilities():
     when the feat is taken), same _rollable_by gate as any spell."""
     from . import abilities
     n = 0
-    for r in db.q("SELECT data FROM content WHERE kind='spell'"):
+    for r in db.q("SELECT data, room_id FROM content WHERE kind='spell'"):
         row = db.j(r["data"], {}) or {}
         try:
             defn = map_to_ability(row)
             if defn is not None:
-                abilities.register(defn)
+                abilities.register(defn, r["room_id"])   # D163-1
                 n += 1
         except Exception:                              # a bad row must not break boot
             continue
-    for r in db.q("SELECT data FROM content WHERE kind='feat'"):
+    for r in db.q("SELECT data, room_id FROM content WHERE kind='feat'"):
         row = db.j(r["data"], {}) or {}
         try:
             defn = feat_to_ability(row)
             if defn is not None:
-                abilities.register(defn)
+                abilities.register(defn, r["room_id"])   # D163-1
                 n += 1
         except Exception:
             continue

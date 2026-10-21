@@ -1,0 +1,2 @@
+id,name,level,casting_ability,targeting,shape,size_ft,range_ft,casting_time,duration,concentration,resolution,save,on_save,damage_dice,damage_type,heal_dice,upcast_step,upcast_scaling,scale_tiers,class_list,scaling_note,effects,manual
+hex_spark,Hex Spark OF B,0,wis,single,,,60,1 action,instant,,attack,,,1d10,fire,,,,,hedgehex,Same id — room B's own definition (D163-1 isolation probe),,

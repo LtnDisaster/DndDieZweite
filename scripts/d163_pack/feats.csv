@@ -1,0 +1,3 @@
+id,name,requires,ability_boost,skill_prof,spells_grant,tool_prof,effect,category,effects,manual
+feat_hexcat,Hexcat's Instinct,,dex+1,,,tinker's tools,+1 Dexterity; trained with tinker's tools,origin,,D163 origin feat — the tool grant is machine-readable
+feat_brightspark,Brightspark,Skill Proficiency — Investigation,int+1,investigation,,,+1 Intelligence,general,,D163 general feat with a machine-readable prerequisite

@@ -339,6 +339,19 @@ def clean_props(props):
             if isinstance(v, str) and v.lower() in ABILITIES:
                 out[k] = v.lower()
             continue
+        if k == "tool":                    # D163-3: the tool key this item is
+            if isinstance(v, str) and v.strip():
+                out[k] = tool_key(v)
+            continue
+        if k == "tool_ability":            # D163-3: ability for its use check
+            if isinstance(v, str) and v.lower() in ABILITIES:
+                out[k] = v.lower()
+            continue
+        if k == "prof_group":              # D163-4: simple|martial|light|medium|heavy|shield
+            v2 = str(v or "").strip().lower()
+            if v2 in ("simple", "martial", "light", "medium", "heavy", "shield"):
+                out[k] = v2
+            continue
         if k == "recharge":
             if str(v or "").lower() in ("long",):
                 out[k] = "long"
@@ -414,8 +427,9 @@ def weapon_profiles(ch):
                 and stat_mod(ch, "dex") > stat_mod(ch, "str"):
             ability = "dex"                              # finesse: the wielder's better mod
         gated = bool(it.get("attunable")) and not bool(it.get("attuned"))
+        trained = weapon_proficient(ch, p.get("prof_group"), bool(p.get("proficient")))
         to_hit = (stat_mod(ch, ability)
-                  + (prof_bonus(ch) if p.get("proficient") else 0)
+                  + (prof_bonus(ch) if trained else 0)
                   + (0 if gated else _clampi(p.get("attack_bonus", 0), -10, 10)))
         dmg_bonus = (0 if gated else _clampi(p.get("damage_bonus", 0), -10, 10))
         if p.get("mod_to_damage", True):                 # a weapon attack adds its ability mod
@@ -423,7 +437,9 @@ def weapon_profiles(ch):
         extra = "" if gated else str(p.get("extra_damage_dice") or "")
         out.append({"slot": slot, "item_id": it.get("id"),
                     "name": str(it.get("name", "Weapon"))[:48],
-                    "ability": ability, "proficient": bool(p.get("proficient")),
+                    "ability": ability, "proficient": bool(trained),
+                    "prof_group": str(p.get("prof_group") or ""),
+                    "untrained": bool(p.get("prof_group")) and not trained,
                     "to_hit": to_hit, "dmg": dice.lower(), "dmg_bonus": dmg_bonus,
                     "dmg_type": p.get("damage_type") or "",
                     "range_ft": _clampi(p.get("range_ft", 0), 0, 600),
@@ -562,6 +578,8 @@ def _ac_from_set(char, pairs):
         if it.get("kind") == "armor" and (it.get("ac") or p.get("ac_base")):
             armor = (it, p)
             break
+    if armor and not armor_proficient(char, armor[1].get("prof_group"), False):
+        armor = None                                   # D163-4: no benefit from armour one cannot wear
     if armor:
         it, p = armor
         base = it.get("ac") or _clampi(p.get("ac_base", 0), 0, 40, 0)
@@ -581,6 +599,8 @@ def _ac_from_set(char, pairs):
             continue
         ident = it.get("identified", True)
         if it.get("kind") == "shield":
+            if not armor_proficient(char, p.get("prof_group"), False):
+                continue                                # D163-4: untrained shield: nothing
             if ident:
                 total += _clampi(it.get("ac", 0), 0, 10, 0)   # legacy shield ac
             total += prop_ac
@@ -745,8 +765,9 @@ def stat_mod(char, ability):
 # "ability modifier is silently 0" production bugs are born (2026-10 sprint).
 _JSON_COLUMNS = ("stats", "skills", "saves", "items", "spells", "spell_slots",
                  "defenses", "resources", "abilities", "class_levels", "equipment",
-                 "build")
-_JSON_LIST_DEFAULTS = ("items", "spells", "resources", "abilities")
+                 "build", "tool_profs", "weapon_profs", "armor_profs")
+_JSON_LIST_DEFAULTS = ("items", "spells", "resources", "abilities",
+                       "tool_profs", "weapon_profs", "armor_profs")
 
 
 def as_sheet(char):
@@ -903,6 +924,79 @@ def clean_resources(resources):
             reset = "manual"
         out.append({"id": rid, "name": name, "current": cur, "max": mx, "reset": reset})
     return out[:20]
+
+
+# ---------- proficiency axes (D163-3 / D163-4) ----------
+
+def tool_key(text):
+    """One canonical tool key: 'Thieves' tools' == 'thieves tools' ==
+    'THIEVES_TOOL'. CSV tool_prof sources and the item prop `tool` meet at
+    this key — no substring rules anywhere else."""
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()[:24]
+
+
+def _axis_list(char, col):
+    raw = (char or {}).get(col)
+    if isinstance(raw, str):
+        raw = db.j(raw, [])
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(x).strip().lower() for x in raw if str(x).strip()]
+
+
+def tool_profs(char):
+    return _axis_list(char, "tool_profs")
+
+
+def tool_trained(char, key):
+    key = tool_key(key)
+    return bool(key) and key in {tool_key(k) for k in tool_profs(char)}
+
+
+def tool_available(char, word):
+    """Carries a tool whose prop key (or legacy name/def id) contains `word`."""
+    word = str(word or "").strip().lower()
+    items = (char or {}).get("items")
+    if isinstance(items, str):
+        items = db.j(items, [])
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        props = it.get("props") if isinstance(it.get("props"), dict) else {}
+        hay = (tool_key(props.get("tool")),
+               tool_key(it.get("name")), tool_key(it.get("def_id") or it.get("id")))
+        if any(word in h for h in hay if h):
+            return True
+    return False
+
+
+def weapon_profs_axes(char):
+    return _axis_list(char, "weapon_profs")
+
+
+def armor_profs_axes(char):
+    return _axis_list(char, "armor_profs")
+
+
+def weapon_proficient(char, group, prop_flag=False):
+    """D163-4: trained = explicit item prop (legacy DM flag) OR the character's
+    weapon axis covers the item's prof_group. No group data at all (pre-D163
+    packs) keeps the legacy flag-only semantics."""
+    if prop_flag:
+        return True
+    group = str(group or "").strip().lower()
+    if not group:
+        return False
+    return group in set(weapon_profs_axes(char))
+
+
+def armor_proficient(char, group, prop_flag=False):
+    if prop_flag:
+        return True
+    group = str(group or "").strip().lower()
+    if not group:
+        return True                       # no data -> untouched legacy
+    return group in set(armor_profs_axes(char))
 
 
 # ---------- damage types and defenses ----------

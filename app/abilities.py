@@ -49,20 +49,53 @@ def _dice_bonus(v):
 _REGISTRY: dict = {}
 
 
-def register(raw):
-    """Validate and register an ability definition. Returns the clean dict or None."""
+def _scoped_key(room_id, aid):
+    # D163-1: per-room registration. Content is already room-scoped in the DB
+    # (PK kind,room_id,id) — the registry used to collapse every room's ids into
+    # one bare key, so a later import in room B silently re-defined room A's
+    # live spells. Room rows now additionally register under "<room>::<id>".
+    return f"{int(room_id)}::{aid}"
+
+
+def register(raw, room_id=0):
+    """Validate and register an ability definition. Returns the clean dict or None.
+
+    D163-1: with a non-zero room_id the definition ALSO registers under the
+    room-scoped key. The bare key keeps its legacy meaning (last writer wins,
+    global/manual definitions) so out-of-room callers and tests keep working."""
     defn = clean_definition(raw)
     if defn is not None:
-        _REGISTRY[defn["id"]] = defn
+        rid = int(room_id or 0)
+        _REGISTRY[_scoped_key(rid, defn["id"])] = defn
+        if rid == 0:
+            # bare lane = manual/global definitions only; live room resolution
+            # never consults it, so a room import can no longer clobber another
+            # room (the pre-D163 bug) and cannot pollute the global lane either.
+            _REGISTRY[defn["id"]] = defn
     return defn
 
 
-def unregister(ability_id):
-    _REGISTRY.pop(str(ability_id), None)
+def unregister(ability_id, room_id=0):
+    aid = str(ability_id)
+    rid = int(room_id or 0)
+    _REGISTRY.pop(_scoped_key(rid, aid), None)
+    if rid == 0:
+        _REGISTRY.pop(aid, None)
 
 
-def get(ability_id):
-    return _REGISTRY.get(str(ability_id))
+def get(ability_id, room_id=0):
+    """Resolve an ability. Live lookup (non-zero room) checks the room's own
+    definition first, then the GLOBAL lane (room 0 / manual registrations);
+    it never falls back to the bare legacy key. A room-less get() reads the
+    bare lane (tests, tooling). D163-1."""
+    aid = str(ability_id)
+    rid = int(room_id or 0)
+    if rid:
+        d = _REGISTRY.get(_scoped_key(rid, aid))
+        if d is None:
+            d = _REGISTRY.get(_scoped_key(0, aid))
+        return d
+    return _REGISTRY.get(aid)
 
 
 def registry():
@@ -325,10 +358,21 @@ def _consume_cost(c, room_id, tok, defn, cast_level):
                 return False, "Invalid cast level", None
             lvl = cast_level
         if tok["character_id"]:
-            ch = c.execute("SELECT id, spell_slots FROM characters WHERE id=?",
+            ch = c.execute("SELECT id, spell_slots, spells FROM characters WHERE id=?",
                            (tok["character_id"],)).fetchone()
             if ch is None:
                 return False, "Caster gone", None
+            # D163-7: the prepared-caster gate rides the ABILITY pipeline too —
+            # class spells live in characters.abilities, so their sheet button is
+            # an ability_cast; without this check the daily list (spell_prepare)
+            # would be decorative for exactly the CSV built casters it exists
+            # for. Same rule as the legacy cast path (room.dice, D138): a
+            # prep-gated list casts only what the player prepared today. The
+            # read rides the SAME tx as the slot increment — no race window.
+            ent = next((x for x in gear.clean_spells(db.j(ch["spells"], []) or [])
+                        if x.get("id") == defn["id"] and x.get("prep")), None)
+            if ent is not None and not ent.get("prepared"):
+                return False, f"{ent.get('name') or defn['id']} is not prepared", None
             slots = gear.clean_slots(db.j(ch["spell_slots"], {}))
             holder = ("char", ch["id"])
         else:
@@ -424,7 +468,7 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
     the whole cast is idempotent against a repeated ``op_id``."""
     from .room import gamelog, health, net
 
-    defn = get(ability_id)
+    defn = get(ability_id, room_id)             # D163-1: the room's own definition wins
     if defn is None:
         return _fail("Unknown ability")
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (actor_token_id, room_id))
@@ -586,7 +630,9 @@ async def execute(room_id, *, actor_token_id, ability_id, is_dm=False, actor_use
                 if r:
                     heal = entry["heal"] = r["healed"]
                     changed = changed or r.get("changed", False)
-            if apply and defn["condition"]:
+            if apply and defn["condition"] and C.immune(t, defn["condition"]["key"]):
+                entry["condition_immune"] = defn["condition"]["key"]
+            elif apply and defn["condition"]:
                 conds = C.add(C.load(t), defn["condition"]["key"],
                               defn["condition"]["rounds"],
                               conc=(tok["id"] if defn["concentration"] else None))

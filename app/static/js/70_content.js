@@ -6,7 +6,7 @@
    or the whole room as a ZIP. DM-only (the panel lives in the DM tab). */
 (typeof window !== "undefined") && ((window.__BUILDS = window.__BUILDS || {})["70_content.js"] = window.__BUILD__ || "?");
 
-const CT_KINDS = ["species", "class", "subclass", "item", "spell", "background", "feat", "creature"];
+const CT_KINDS = ["species", "class", "subclass", "item", "spell", "background", "feat", "creature", "loottable", "quest"];
 
 async function ctPost(file, mode) {
   const code = state.room.code;

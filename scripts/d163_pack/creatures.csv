@@ -1,0 +1,2 @@
+id,name,size,type,ac,hp,speed_ft,fly_ft,str,dex,con,int,wis,cha,cr,skills,saves,attacks,spells,abilities,darkvision_ft,tags,companion,image,manual,resistances,immunities,vulnerabilities,condition_immunities,swim_ft,climb_ft,recharge
+grick_guard,Grick Guard,medium,plant,17,33,30,,12,14,14,,,,1/2,,,"Tendril +4 to hit, reach 5 ft, one creature: 1d6+2 piercing",,,30,plant; guard,,,D163 acceptance monster — defenses and resources from CSV columns,"psychic, poison",,necrotic,charmed,,20,Spore Burst 1

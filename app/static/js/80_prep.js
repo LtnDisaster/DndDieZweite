@@ -208,7 +208,9 @@ function renderPrepWizard(){
     parts.push(`<div><b>Choices for level ${lvl}</b></div>`);
     const known = [];
     if (spec.feat_choice || spec.ability_boost_or_feat){
-      const cur = w.feat ? "feat:" + w.feat : (w.ability ? "ab:" + w.ability : "");
+      const cur = w.feat ? "feat:" + w.feat
+        : (typeof w.ability === "object" && w.ability ? "asi"
+          : (w.ability ? "ab:" + w.ability : ""));
       const groups = [];
       if (spec.feat_choice){
         const opts = spec.feat_options && spec.feat_options.length
@@ -221,11 +223,32 @@ function renderPrepWizard(){
           return `<option value="feat:${esc(f.id)}" ${selected ? "selected" : ""}${disabled}>${esc(f.name || feats[f.id] || f.id)}${esc(hint)}</option>`;
         }).join("")}</optgroup>`);
       }
-      if (spec.ability_boost_or_feat)
-        groups.push(`<optgroup label="Ability score +2">${STATS.map(([k, l]) =>
-          `<option value="ab:${k}+2" ${cur === "ab:" + k + "+2" ? "selected" : ""}>${l} +2</option>`).join("")}</optgroup>`);
+      const asi = (w.ability && typeof w.ability === "object" && w.ability.asi) ? w.ability.asi : null;
+      if (spec.ability_boost_or_feat) {
+        // D163-5: guided 2024 ASI (+2/+1 or three +1, cap 20 server-side).
+        groups.push(`<optgroup label="Ability Score Improvement"><option value="asi"${asi || cur === "asi" ? " selected" : ""}>ASI (2024): +2 and +1, or three +1</option></optgroup>`);
+        if (cur.startsWith("ab:"))
+          groups.push(`<optgroup label="Ability score +2 (legacy)">${STATS.map(([k, l]) =>
+            `<option value="ab:${k}+2" ${cur === "ab:" + k + "+2" ? "selected" : ""}>${l} +2</option>`).join("")}</optgroup>`);
+      }
       parts.push(`<div class="row"><select class="pw-lvl" data-lvl="${esc(lvl)}" style="flex:1">` +
         `<option value="">— choose —</option>${groups.join("")}</select></div>`);
+      if (asi || (spec.ability_boost_or_feat && cur === "asi")) {
+        const mode = asi && asi.mode === "three" ? "three" : "plus2_plus1";
+        const abO = sel => `<option value="">—</option>` +
+          STATS.map(([k, l]) => `<option value="${k}"${sel === k ? " selected" : ""}>${l}</option>`).join("");
+        const t3 = asi && asi.mode === "three" ? (asi.abilities || []) : [];
+        parts.push(`<div class="row" style="align-items:center">` +
+          `<select class="pw-asi-mode" data-lvl="${esc(lvl)}" style="flex:1">` +
+          `<option value="plus2_plus1"${mode === "plus2_plus1" ? " selected" : ""}>+2 to one score and +1 to another</option>` +
+          `<option value="three"${mode === "three" ? " selected" : ""}>+1 to three different scores</option></select>` +
+          (mode === "three"
+            ? `<select class="pw-asi-t" data-lvl="${esc(lvl)}" multiple size="3" style="flex:1">` +
+              STATS.map(([k, l]) => `<option value="${k}"${t3.includes(k) ? " selected" : ""}>${l}</option>`).join("") + `</select>`
+            : `<select class="pw-asi-p2" data-lvl="${esc(lvl)}" style="flex:1">${abO(asi && asi.plus2)}</select>` +
+              `<span class="tiny">and +1 to</span><select class="pw-asi-p1" data-lvl="${esc(lvl)}" style="flex:1">${abO(asi && asi.plus1)}</select>`) +
+          `</div>`);
+      }
       known.push("feat_choice", "ability_boost_or_feat");
     }
     const reqC = +spec.cantrips || 0, reqS = +spec.spells || 0;
@@ -278,10 +301,34 @@ function renderPrepWizard(){
       const v = s.value;
       if (v.startsWith("feat:")) ent.feat = v.slice(5);
       else if (v.startsWith("ab:")) ent.ability = v.slice(3);
+      else if (v === "asi") ent.ability = {asi: {mode: "plus2_plus1", plus2: "", plus1: ""}};
+      else if (ent.ability && typeof ent.ability === "object") ent.ability = {asi: {mode: "plus2_plus1"}};
       if (ent.feat || ent.ability || (ent.cantrips && ent.cantrips.length) || (ent.spells && ent.spells.length)) p.wiz.levels[lvl] = ent;
       else delete p.wiz.levels[lvl];
-      prepWizSummary();
+      // D163: the guided ASI picker renders FROM p.wiz — selecting "asi" must
+      // re-render the wizard, or the +2/+1 fields never appear (summary alone
+      // left the whole 2024 ASI path dead in the browser).
+      if (v === "asi" || (ent.ability && typeof ent.ability === "object")) renderPrepWizard();
+      else prepWizSummary();
     };
+  const asiSave = (lvl, mutate) => {
+    const ent = Object.assign({}, p.wiz.levels[lvl] || {});
+    const cur = (ent.ability && typeof ent.ability === "object" && ent.ability.asi)
+      ? ent.ability : {asi: {mode: "plus2_plus1"}};
+    const asi = Object.assign({}, cur.asi); mutate(asi);
+    ent.ability = {asi}; p.wiz.levels[lvl] = ent;
+    renderPrepWizard();
+  };
+  for (const m of wiz.querySelectorAll(".pw-asi-mode"))
+    m.onchange = () => asiSave(m.dataset.lvl, a => {
+      a.mode = m.value; delete a.plus2; delete a.plus1; delete a.abilities; });
+  for (const a2 of wiz.querySelectorAll(".pw-asi-p2"))
+    a2.onchange = () => asiSave(a2.dataset.lvl, a => { a.plus2 = a2.value; });
+  for (const a1 of wiz.querySelectorAll(".pw-asi-p1"))
+    a1.onchange = () => asiSave(a1.dataset.lvl, a => { a.plus1 = a1.value; });
+  for (const t3 of wiz.querySelectorAll(".pw-asi-t"))
+    t3.onchange = () => asiSave(t3.dataset.lvl, a => {
+      a.abilities = [...t3.selectedOptions].map(o => o.value); });
   for (const [cls, key] of [[".pw-can", "cantrips"], [".pw-sp", "spells"]])
     for (const s of wiz.querySelectorAll(cls))
       s.onchange = () => {

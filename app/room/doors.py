@@ -108,10 +108,13 @@ def _tool_key(text):
 
 
 def _thieves_trained(raw_char, room_id):
-    """Tool proficiency from the character's background row (``tool_prof``).
-    This is where the engine DOES model tool proficiency today — backgrounds
-    only (D114's disarm gap was about the roll-time read; the data exists)."""
-    from .. import charbuild
+    """D163-3: tool proficiency now rides the character's ``tool_profs`` axis —
+    fed from background AND class AND feat rows at build apply. The pre-D163
+    background-row read stays as a fallback so sheets that never re-applied
+    after D163 keep exactly their old behaviour (no silent change)."""
+    from .. import charbuild, gear
+    if gear.tool_trained(raw_char, "thieves tools"):
+        return True
     ref = str(raw_char.get("background") or "").strip()
     if not ref:
         return False
@@ -122,9 +125,13 @@ def _thieves_trained(raw_char, room_id):
 
 
 def _has_thieves_tools(raw_char):
+    # D163-3: a tool is now RECOGNISED by its data (`props.tool` key), with the
+    # legacy name/def-id "thieves" match kept for pre-D163 packs.
+    from .. import gear
     items = db.j(raw_char.get("items"), []) or []
     return any("thieves" in _tool_key(str(i.get("name") or ""))
                or "thieves" in _tool_key(str(i.get("def_id") or i.get("id") or ""))
+               or "thieves" in _tool_key(str((i.get("props") or {}).get("tool") or ""))
                for i in items if isinstance(i, dict))
 
 

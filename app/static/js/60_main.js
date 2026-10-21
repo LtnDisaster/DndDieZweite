@@ -230,6 +230,47 @@ function wire(){
     if (osel.value === "stair") fillStairFloors(); };
   $("btn-long-rest").onclick = () => wsSend({ type: "long_rest",
     clear_conditions: !!($("long-rest-conds") && $("long-rest-conds").checked) });
+  // D163-8: Loot tables are CSV content — the DM rolls them right here, and
+  // the server's "chat" announcement rides the ONE chat pipeline back to
+  // everyone. The list is the room's own loottables.csv (REST export, the
+  // same DM-only read path the Content manager uses) — parsed just enough
+  // for id + display name; a table that only the CSV knows is rollable.
+  const _csvCells = (line) => {                     // one CSV line -> cells
+    const out = []; let cur = "", q = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (q) {
+        if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+        else cur += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === ",") { out.push(cur); cur = ""; }
+      else cur += ch;
+    }
+    out.push(cur); return out;
+  };
+  const fillLoot = async (force) => {
+    const sel = $("loot-tbl"); if (!sel) return;
+    if (sel.dataset.filled === "1" && !force) return;
+    if (!state.room || !state.room.code) return;    // before join: toggle will retry
+    try {
+      const r = await fetch(`/api/content/${encodeURIComponent(state.room.code)}/export?kind=loottable`);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const lines = (await r.text()).split("\n").map(l => l.trim()).filter(Boolean).slice(1);
+      sel.innerHTML = '<option value="">— no tables yet —</option>' + lines.map(l => {
+        const c = _csvCells(l);
+        const id = (c[0] || "").trim(), name = (c[1] || "").trim() || id;
+        return id ? `<option value="${esc(id)}">${esc(name)}</option>` : "";
+      }).join("");
+      sel.dataset.filled = "1";
+    } catch (e) { sel.innerHTML = '<option value="">— table list unavailable —</option>'; }
+  };
+  const _lg = $("loot-group"); if (_lg) _lg.ontoggle = () => { if (_lg.open) fillLoot(); };
+  fillLoot();                                               // DM tools render when the DM joins
+  const _lref = $("btn-loot-refresh"); if (_lref) _lref.onclick = () => fillLoot(true);
+  const _lroll = $("btn-loot-roll"); if (_lroll) _lroll.onclick = () => {
+    const s = $("loot-tbl");
+    if (s && s.value) wsSend({ type: "roll_loot", table_id: s.value });
+  };
   $("btn-aoe").onclick = () => { state.aoeArmed = !state.aoeArmed;
     $("btn-aoe").classList.toggle("active", state.aoeArmed); };
   // D162-5/6: the DM trap panel. The server takes the plane from the chosen

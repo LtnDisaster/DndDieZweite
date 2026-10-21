@@ -1,5 +1,13 @@
 # CSV-Only-Readiness — was die Engine heute rein datengetrieben kann (D110)
 
+> **Fortschreibung:** Die Endbewertung dieser Frage steht in
+> `docs/CSV_ONLY_FINAL_AUDIT_D163.md` (Urteil **JA-MIT-GRENZEN**, bewiesen am
+> echten Browser). Dieses Dokument bleibt als Matrix der D110-Ära erhalten;
+> seither geschlossen u. a.: Werkzeug-/Waffen-Profienz-Mechanik (D163),
+> tägliche Bereitungsliste inkl. Gate auf der Ability-Schiene (D163),
+> Beute-/Quest-Kanäle (D163), Kreatur-Abwehrwerte (D163). Die dokumentierten
+> Grammatik-Grenzen (§6/§6a) gelten unverändert weiter.
+
 Stand Sprint 41 (D112; vorher D111/Sprint 40). Frage dieses Dokuments: **Können neue Inhalte (Regeln,
 Gegenstände, Monster, Zustände) künftig NUR als CSV geliefert werden, ohne
 Engine-Code?** Bewertung je Datenfläche mit Code-Beleg — nicht nach Spalten,

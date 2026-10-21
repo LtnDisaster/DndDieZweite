@@ -419,6 +419,8 @@ async def _run_op(op, ctx):
             ctx["changed"] = True
             return f"concentration broken on {tok['label']}"
         if kind == "condition":
+            if C.immune(tok, op["key"]):                   # D163-2: data immunity
+                return f"{tok['label']} is immune to {op['key']}"
             conds = C.add(conds, op["key"], op["rounds"], op["until"],
                           conc=ctx.get("conc"))
             frag = f"{op['key']} on {tok['label']}"

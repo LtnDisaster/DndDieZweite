@@ -1,0 +1,3 @@
+id,name,die,entries,manual
+hoard_demo,Demo hoard,,"[{""label"":""Coin purse"",""weight"":2,""qty"":""2d6+5""},{""label"":""Moorium coin"",""weight"":1,""qty"":""1""}]",Roll it with the DM's Loot roll — one weighted entry per roll
+mill_cache,Miller's cache,,"[{""label"":""Bag of flour"",""weight"":1,""qty"":""2""},{""label"":""Silver ring"",""weight"":1,""qty"":""1""}]",Hidden stash behind the mill

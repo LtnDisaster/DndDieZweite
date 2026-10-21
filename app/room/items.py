@@ -30,6 +30,32 @@ def _consume(it, items):
     return " (consumed)"
 
 
+async def _use_tool(ws, room_id, user, tok, ch, it):
+    """D163-3: use of a `tool` item. One check (ability from the item's
+    tool_ability prop, default Dexterity), proficiency only when the sheet says
+    TRAINED and the tool is at hand. No invented DC — the number lands in the
+    player's whisper and the table adjudicates, like a sheet ability check."""
+    from . import opposed
+    props = it.get("props") or {}
+    key = gear.tool_key(props.get("tool"))
+    ability = str(props.get("tool_ability") or "dex").lower()
+    p = opposed.participant(room_id, tok)
+    if p is None:
+        await send_to(ws, "error", {"msg": "This token cannot roll"})
+        return
+    trained = gear.tool_trained(ch, key) and gear.tool_available(ch, key or "tool")
+    r = opposed.check_roll(p, ability, kind="check", prof=trained)
+    if r is None:
+        await send_to(ws, "error", {"msg": f"{it['name']} has no valid tool binding"})
+        return
+    note = ("with proficiency" if trained else
+            "trained but tool not at hand" if gear.tool_trained(ch, key)
+            else "untrained")
+    sys_msg(room_id, f"{ch['name']} uses {it['name']}.")
+    await send_to(ws, "whisper", {"text":
+        f"🧰 {it['name']}: {ability.upper()} {r['kept']}+{r['mod']} = {r['total']} ({note})"})
+
+
 async def handle_use_item(ws, room_id, user, is_dm, msg):
     tok = db.q1("SELECT * FROM tokens WHERE id=? AND room_id=?", (msg.get("token_id", -1), room_id))
     if tok is None or tok["character_id"] is None:
@@ -46,6 +72,11 @@ async def handle_use_item(ws, room_id, user, is_dm, msg):
     if it["magic"] and not it["identified"] and not is_dm:
         await send_user(room_id, user["id"], "whisper", {"text": "✨ You don't know what this item does yet."})
         return
+    if (it.get("props") or {}).get("tool"):
+        # D163-3: TOOLS become usable — a real check through the ONE check
+        # engine, proficiency from the character's tool axis when the character
+        # both carries and trained the tool. The DM reads the DC at the table.
+        return await _use_tool(ws, room_id, user, tok, ch, it)
     if not it["heal"] and not (it.get("props") or {}).get("effects"):
         await send_to(ws, "error", {"msg": f"{it['name']} isn't usable"})
         return

@@ -1,4 +1,6 @@
-id,name,requires,ability_boost,skill_prof,spells_grant,effect,category,effects,manual
-feat_soldier,Soldier's Burden,,str+1,,,,origin,,,"+1 Strength (max 20). Origin feat for the Veteran background.",
-feat_devotion,Devout Heart,,wis+1,,,,origin,,,"+1 Wisdom (max 20). Origin feat for the Acolyte background.",
-feat_sneak,Sneak Attack,,,,,"+1d6 piercing weapon damage, once per turn",general,"{""ops"":[{""expr"":""1d6"",""op"":""damage"",""target"":""target"",""type"":""piercing""}],""v"":1}","Castable ability feat_sneak. The once-per-turn limit is DM-adjudicated (grammar has no per-turn ledger — documented)."
+id,name,requires,ability_boost,skill_prof,spells_grant,tool_prof,effect,category,effects,manual
+feat_keen,Keen Mind,Skill Proficiency — Perception,wis+1,"perception, investigation",,,+1 Wisdom; +1 to Perception and Investigation checks,general,,demo feat (house rule); the prerequisite is machine-readable and proficiency-based
+feat_nimble,Nimble Steps,,dex+1,,,,+1 Dexterity (max 20),general,,the 5 ft speed increase is not automated today
+feat_quick_study,Quick Study,,,investigation,,,Proficiency in Investigation; you can recall a book's exact wording,origin,,demo origin feat (house rule) for bg_scholar
+feat_alley_cat,Alley Cat,,,stealth,,,Proficiency in Stealth; you always know the nearest way out of a building,origin,,demo origin feat (house rule) for bg_urchin
+martyr,Martyr's Guard,,,,,,Once per fight: 2d4+2 temporary hit points,general,"{""ops"":[{""expr"":""2d4+2"",""op"":""temp_hp"",""target"":""self""}],""v"":1}",D111 demo: active feat — registers as castable ability feat_martyr

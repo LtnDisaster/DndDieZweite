@@ -3918,3 +3918,58 @@ lines name conditions by design (public table record, D90).
   (rc=0)** (147 Dateien; Marks + Collect zweifach bestätigt). Feature-Matrix,
   CSV-Guide (Upsert-Modus, `item_defs`-Raum-PK), Arbeitslog und
   Abschlussdoku nachgezogen.
+
+## D163 — Operation: Letzte Codezeile (CSV-only-Annahme über echten Browser)
+
+- **Status:** bestanden, mit dokumentierten Grenzen. Neun Pakete
+  (Raum-Registry-Isolation, Werkzeug-/Waffen-Profizienz-Achsen, ASI-2024-Wahl,
+  ASI-Picker-Reparatur, Beutetabellen, Quest-CSV, tägliche Bereitungsliste,
+  Kreatur-CSV-Abwehrwerte, Inhalt-UI-Sichten) sind implementiert und
+  verhaltensgeprüft; Paket „Effekt-Grammatik“ wurde auditiert und als
+  **bewusste Sicherheitsgrenze** (Whitelist in `effectops.canon()/run()`)
+  bestätigt — keine Lücke, keine Änderung. Kernfrage beantwortet in
+  `docs/CSV_ONLY_FINAL_AUDIT_D163.md`.
+- **Beschlüsse (Regelkanon):**
+  - **Zauber-Bereitschaft aus CSV (Lücke geschlossen):** Das SPELL-Schema
+    bekam die bool-Spalten `prep` (Zauber hängt an der täglichen Liste) und
+    `prepared` (Startwert am ersten Tag). `_spell_display` las diese Felder
+    schon immer — das Schema hatte sie nie geliefert, der tägliche
+    Bereitungslauf war damit aus purem CSV unerreichbar. `_spell_display`
+    unverändert; die Zeilen liefern jetzt, was der Code erwartet.
+  - **Bereitungs-Gate auf der Ability-Schiene (echter Fund des E2E):**
+    charbuild legt jeden bekannten Klassenzauber in `characters.abilities`,
+    das Sheet rendert dafür `.cast-ab` → `ability_cast` — und dort fehlte das
+    D138-Gate komplett: Die bereitungs-gate-te Zauberliste wäre im echten
+    Spiel dekorativ gewesen. `abilities._consume_cost` (spell_slot-Zweig für
+    Charaktere) prüft jetzt dieselbe Regel wie `room.dice`
+    („… is not prepared“), Lesung in derselben Transaktion wie der
+    Slot-Verbrauch — kein Rennfenster. Fest genagelt in
+    `test_d163_prepare.py::test_ability_pipeline_cast_respects_the_daily_list`.
+  - **ASI-Picker 2024 (echter Fund des E2E):** Die Auswahl „asi“ in der
+    Assistenten-Zeile ließ den +2/+1-Picker nie erscheinen (onchange rief nur
+    die Zusammenfassung). `renderPrepWizard()`-Rebuild bei ASI-Auswahl macht
+    den Weg im Browser gangbar; E2E S2 beweist ihn (Bis-zu-Stufe-4-Build mit
+    Subklasse + ASI (+2 WIS/+1 INT) rein per Klick).
+  - **Slot-Progression pro Zeile:** `slot_progression` wird pro Klassenstufe
+    gelesen; leere Stufenzzeilen liefern keine Slots. Kanon wie im
+    Auslieferungspack: **Wert auf jeder Levelzeile wiederholen** (D163-Pack
+    angepasst). Keine Codeänderung — Datenkonvention dokumentiert.
+  - **Startausrüstung = UI-Zwei-Schritt:** Hintergrund- und Klassenausrüstung
+    werden über `🎒 Starting equipment` → `Grant equipment` im
+    Vorbereitungs-Screen verliehen (idempotent, Server-seitig gegen das Pack
+    validiert). E2E fährt genau diesen echten Pfad, nicht den DM-Transfer.
+  - **Beute- und Quest-Kanäle:** Beute-Ansage reitet die eine
+    Chat-Pipeline (`CHAT.post_chat` → „chat“-Event); `sys_msg` bleibt
+    DB-only. Mengenwürfel in `loottables.csv` werden mit `valid_dice`
+    („2d6+5“) geprüft und beim Speichern fail-closed nachvalidiert.
+    Quest-Upsert pro Raum behält DM-Fortschritt (Haken) bei Reimport.
+- **Konsequenzen:** Kanon 1296 → **1297 gesammelt, rc=0** (neuer Gate-Test;
+  Voll-Lauf gegen den finalen Build). Byte-Idempotenz des Pack-Generators
+  wiederhergestellt (generierter `spells.csv` enthält die neuen Spalten,
+  Scheibe neu erzeugt — `test_d109_mastery` grün). Echter Browser-E2E
+  `scripts/e2e_d163.mjs` S0–S14 als **Einzel-Lauf von Null: 19 Verdikte, alle
+  UI-OK** (DM + zwei Spieler, Zip-Import, Builds bis Stufe 4, Bereitungsliste
+  hin- und zurückgeschaltet, Zauber gegen Monster hp 33→21, Beute, Quest,
+  Reload-Persistenz, Upsert-Idempotenz, Raum-Isolation, Autorität); Belege
+  `e2e-evidence/d163-*.png` + `verdicts_d163.jsonl`. Abschluss-Audit
+  `docs/CSV_ONLY_FINAL_AUDIT_D163.md`.

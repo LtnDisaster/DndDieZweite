@@ -1,0 +1,2 @@
+id,name,glyph,color,group,blocks_movement,speed_delta,my_attacks_dis,my_checks_dis,my_saves_dis,attacks_against_me_adv,attacks_against_me_dis,auto_fail_saves,effects,manual
+cursed_glint,Cursed Glint,✨,#9b59b6,condition,,,1,,,,,,"{""on_round"":[{""op"":""damage"",""expr"":""1d4"",""target"":""self"",""type"":""radiant""}]}",D163 custom condition — recurring on_round effect from CSV

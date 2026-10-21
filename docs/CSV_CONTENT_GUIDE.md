@@ -50,9 +50,14 @@ Pro Art gibt es **einen** kanonischen Dateinamen:
 | `feats.csv` | `feat` | ein Talent |
 | `creatures.csv` | `creature` | eine Kreatur |
 | `conditions.csv` | `condition` | eine Zustands-/Marker-**Definition** (Hooks + Lebenszyklus-Effekte, D111) |
+| `loottables.csv` | `loottable` | **ein Eintrag** einer Beutetabelle (`table`,`label`,`qty`,`weight`; Menge als Stückzahl oder Würfel `2d6+5`, D163) |
+| `quests.csv` | `quest` | **ein Ziel** einer Quest (`quest`,`title`, …); DM-Haken bleiben bei Reimport/Upsert erhalten (D163) |
 
 Unbekannte Dateien (z. B. `notizen.csv`) werden **übersprungen**, nicht als
-Fehler gewertet — sie erscheinen aber markiert im Bericht.
+Fehler gewertet — sie erscheinen aber markiert im Bericht. **Beachte beim
+Einzel-CSV-Upload:** Die Art wird am **Dateinamen** erkannt (`spells.csv` →
+Zauber …); ein Phantasiename wie `probe.csv` findet kein Kind und läuft
+wirkungslos durch.
 
 Ein ganzes Paket kannst du als **ZIP** hochladen: Der Server erkennt eine ZIP
 automatisch (an der Signatur `PK\003\004`) und importiert jede bekannte
@@ -129,7 +134,7 @@ trägst du in die Stufe-1-Zeile; Stufenmerkmale in ihre jeweilige Stufe.
 | `prepared` | bool | prepared-Caster (bereitet aus der Klassenliste); sonst known-Caster (wählt) |
 | `spell_first_level` | 0–20 | **erste zaubernde Klassenstufe** (0 = nicht zaubernd, z. B. Paladin ab 2) |
 | `spell_replace` | bool | auf dieser Stufe darf ein bekannter Zauber getauscht werden |
-| `slot_progression` | Text | **Slot-Tabelle** dieser Klassenstufe als `grad:anzahl;…` (z. B. `1:4;2:3;3:2`). Wird vom Build **gelesen**, aber **nie** aus der Gesamtstufe abgeleitet (D58). Halbe/Voll-Caster setzen eigene Tabellen. |
+| `slot_progression` | Text | **Slot-Tabelle** dieser Klassenstufe als `grad:anzahl;…` (z. B. `1:4;2:3;3:2`). Wird vom Build **gelesen**, aber **nie** aus der Gesamtstufe abgeleitet (D58). Halbe/Voll-Caster setzen eigene Tabellen. **D163-Konvention: den Wert auf JEDER Levelzeile wiederholen** — leere Stufenzzeilen liefern keine Slots (das kanonische Auslieferungspack macht es vor). |
 | `upcast_scaling` | bool | Hinweis, dass Zauber mit Slotstufe skalieren (die eigentliche Regel steht pro Zauber in `upcast_step`) |
 | `manual` | Text | was händisch entschieden werden muss |
 
@@ -142,6 +147,11 @@ trägst du in die Stufe-1-Zeile; Stufenmerkmale in ihre jeweilige Stufe.
   Jede Alternative ist ein fester Token wie oben; mindestens zwei pro Gruppe;
   Gruppenlabels enthalten kein `=`, `|`, `,` und kommen nicht doppelt vor.
   Beispiel: `weapon=bow_long|sword_versatile; kit=goggles_night|gloves_thief`
+
+Der echte UI-Pfad ist der Zwei-Schritt im Vorbereitungs-Screen:
+**`🎒 Starting equipment`** (Report: was das Pack plant, inkl. Fehler) →
+**`Grant equipment`** (Verleih, idempotent — mehrfaches Drücken doppelt
+nichts). Der D163-Browser-E2E fährt genau diesen Weg für beide Spieler.
 
 Auflösung läuft ausschließlich über die Startausrüstungs-Route
 (`POST /api/rooms/{code}/starting-gear`): Jedes Token muss auf eine
@@ -236,6 +246,8 @@ alles rein Beschreibende gehört nach `desc`/`manual`.
 | `scale_tiers` | Schwellen `stufe:+würfel;…` | **Cantrip**-Wachstum nach **Charakterstufe**, z. B. `5:+1d8;11:+1d8;17:+1d8` (additiv) |
 | `class_list` | Klassenliste | welche Klassen (`classes.id`) den kennen |
 | `scaling_note` | Text | Hinweis zur Cantrip-/Slot-Skalierung (Anzeige) |
+| `prep` | bool | **Bereitungs-Gate (D163):** Zauber wirkt nur, wenn er auf der täglichen Liste steht (2024-prepared-Caster). Das Gate gilt auf **beiden** Wirkpfaden — klassischem `cast` und Ability-Schiene (`ability_cast`, dem eigentlichen Sheet-Knopf jedes Klassenzaubers). |
+| `prepared` | bool | **Startwert am ersten Tag** (nur mit `prep=1` sinnvoll); ab dann gehört die Liste dem Spieler (Checkboxen im Sheet, `spell_prepare`, überlebt Bau-Recompute und Reload). |
 | `manual` | Text | Hinweis |
 
 Zauber registrieren sich als **wirkbare Ability** (`abilities.register`) und
@@ -281,6 +293,28 @@ Zeile prüfen und sie in ihr Bestiarium übernehmen. Unterstützte Werte werden 
 den bestehenden `npc.clean_npc()`-Block übersetzt; einfache Angriffe folgen dem
 Muster `Bite +4 to hit; 1d6+2 piercing`. Nicht unterstützter Freitext bleibt
 sichtbar und deaktiviert den Import.
+
+### 4.9 `loottables.csv` — Beutetabelle (D163)
+`id`**F**, `name`**F**, `die` (optionaler fester Würfel; sonst gewichtete
+Summe), `entries`**F**, `manual`.
+
+`entries` ist **ein JSON-Array pro Zeile**:
+`[{"label":"Coin purse","qty":"2d6+5","weight":3}, {"label":"Hexed token","qty":1}]`
+— `weight` 1…10000 (Default 1), `qty` ganze Zahl oder Würfelstring nach
+`do_roll`-Grammatik (`2d6+5`), Default 1. Defekte Arrays/Qty-Werte lassen die
+**Zeile scheitern** (Fail-Closed beim Speichern und nochmal beim Laden).
+Der DM würfelt im Regelwerk-Panel („Roll loot“); die Ansage läuft über die
+**eine Chat-Pipeline** und ist für alle am Tisch sichtbar.
+
+### 4.10 `quests.csv` — Quest (D163)
+`id`**F**, `title`**F**, `description`, `objectives` (Komma-Liste der
+Zieltexte), `status` (`active`/`done`/`failed`, Default `active`),
+`visibility` (`party`/`dm`, Default `party`), `manual`.
+
+Quest-Zeilen werden beim Import in die lebende Quest-Tabelle **projiziert**
+(`_sync_quest`): die Content-Zeile bleibt Export-SSOT, der **DM-Fortschritt
+einmal gesetzter Haken überlebt Reimport und Upsert** (pro Raum, keine
+Duplikate). Spieler sehen die Quest im Story-Tab; Ziele hakt der DM.
 
 ---
 

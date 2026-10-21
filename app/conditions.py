@@ -176,6 +176,20 @@ def clean_conds(raw):
     return out
 
 
+def immune(tok, key):
+    """D163-2: data-driven condition immunity (NPC block ``cond_immune``,
+    projected from creatures.csv). PCs carry no data immunity today — the
+    engine has no PC source for one (documented limit). DM manual condition
+    edits stay un-gated on purpose (DM authority over the raw truth)."""
+    from . import npc as _NPC                     # lazy: npc imports gear/db only
+    block = _NPC.load(tok)
+    if not block:
+        return False
+    keys = block.get("cond_immune") or []
+    key = str(key).strip().lower()
+    return bool(key) and key in {str(k).strip().lower() for k in keys}
+
+
 def load(tok):
     return clean_conds(db.j(tok.get("conds"), [])) if tok else []
 
